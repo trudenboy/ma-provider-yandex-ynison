@@ -33,19 +33,20 @@ def _make_mock_config(values: dict[str, Any] | None = None) -> MagicMock:
     if values:
         defaults.update(values)
     config = MagicMock()
-    config.get_value.side_effect = lambda key: defaults.get(key)
+    config.get_value.side_effect = defaults.get
     return config
 
 
 def _make_mock_mass() -> MagicMock:
     """Create a mock MusicAssistant instance."""
     mass = MagicMock()
-    mass.cache_path = "/tmp/test-cache"
-    mass.create_task = MagicMock(
-        side_effect=lambda coro: (
-            asyncio.ensure_future(coro) if asyncio.iscoroutine(coro) else MagicMock()
-        )
-    )
+    mass.cache_path = "/var/cache/test-cache"
+    def _create_task(coro: object) -> MagicMock:
+        if asyncio.iscoroutine(coro):
+            return asyncio.ensure_future(coro)  # type: ignore[return-value]
+        return MagicMock()
+
+    mass.create_task = MagicMock(side_effect=_create_task)
     mass.subscribe = MagicMock(return_value=MagicMock())
     mass.get_providers = MagicMock(return_value=[])
     mass.config.set_raw_provider_config_value = MagicMock()
