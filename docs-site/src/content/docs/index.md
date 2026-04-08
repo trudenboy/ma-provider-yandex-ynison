@@ -1,13 +1,21 @@
 ---
-title: Yandex Music Connect (Ynison)
-description: Music Assistant plugin for Yandex Music device sync via Ynison protocol.
+title: Провайдер Yandex Music Connect (Ynison)
+description: Документация провайдера Yandex Music Connect (Ynison) для Music Assistant
 ---
 
-## Overview
+<img src="https://raw.githubusercontent.com/trudenboy/ma-provider-yandex-ynison/dev/provider/icon.svg" alt="Yandex Music Connect (Ynison)" style="width: 72px; float: right; margin: 0 0 1rem 1.5rem;" />
 
-This plugin makes any Music Assistant player appear as a playback device in the official
-Yandex Music app via the Ynison protocol (similar to Spotify Connect).
 
-## Status
+Music Assistant поддерживает [Yandex Music Connect (Ynison)](https://music.yandex.ru) — плеер.
+Провайдер создан и поддерживается [TrudenBoy](https://github.com/TrudenBoy).
 
-This plugin is in **alpha** stage. See the [implementation plan](https://github.com/trudenboy/ma-provider-yandex-ynison/blob/dev/IMPLEMENTATION_PLAN.md) for the current roadmap.
+
+
+
+## Настройка
+
+
+Инструкция по подключению — на странице [Настройка](configuration/).
+
+
+

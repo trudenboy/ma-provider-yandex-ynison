@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version (semver, e.g. 1.0.0)"
+        description: "Version (semver, e.g. 1.2.0)"
         required: true
         type: string
       prerelease:

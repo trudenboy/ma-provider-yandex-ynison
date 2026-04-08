@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Stable tag (e.g. v1.0.0-stable) — leave empty to use latest"
+        description: "Stable tag (e.g. v1.2.0-stable) — leave empty to use latest"
         default: ""
         type: string
 
