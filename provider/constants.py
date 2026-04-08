@@ -35,7 +35,7 @@ DEFAULT_APP_NAME: Final[str] = "Music Assistant"
 DEFAULT_APP_VERSION: Final[str] = "1.0.0"
 
 # Device types (from Ynison protobuf DeviceType enum)
-DEVICE_TYPE_SPEAKER: Final[str] = "SPEAKER"
+DEVICE_TYPE_WEB: Final[str] = "WEB"
 
 # Reconnect settings
 RECONNECT_DELAYS: Final[tuple[float, ...]] = (2.0, 4.0, 8.0, 16.0, 30.0, 60.0)
