@@ -1,0 +1,84 @@
+[project]
+name = "ma-provider-yandex-ynison"
+version = "0.1.0"
+description = "Yandex Music Connect (Ynison) plugin for Music Assistant"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+dependencies = []
+
+[project.optional-dependencies]
+test = [
+  "pytest==9.0.2",
+  "pytest-asyncio>=0.24",
+  "pytest-aiohttp==1.1.0",
+  "pytest-cov==7.0.0",
+  "syrupy==5.0.0",
+  "codespell==2.4.1",
+  "music-assistant-models>=1.1.99",
+  "music-assistant @ git+https://github.com/music-assistant/server.git@dev",
+  "aiohttp>=3.9.0",
+  "ruff==0.14.13",
+  "mypy==1.19.1",
+  "pre-commit==4.5.1",
+  "pre-commit-hooks==6.0.0",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["provider*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+filterwarnings = [
+  "ignore:coroutine.*was never awaited:RuntimeWarning",
+]
+
+[tool.codespell]
+ignore-words-list = "provid,hass,followings,childs,explict,additionals,commitish,nam,"
+skip = "*.js,*.svg,docs-site/package-lock.json"
+
+[tool.mypy]
+python_version = "3.12"
+platform = "linux"
+follow_imports = "silent"
+ignore_missing_imports = true
+check_untyped_defs = true
+disable_error_code = [
+  "annotation-unchecked",
+  "import-not-found",
+  "import-untyped",
+]
+disallow_any_generics = true
+disallow_incomplete_defs = true
+disallow_subclassing_any = true
+disallow_untyped_calls = true
+disallow_untyped_decorators = true
+disallow_untyped_defs = true
+enable_error_code = [
+  "ignore-without-code",
+  "redundant-self",
+  "truthy-iterable",
+]
+extra_checks = false
+local_partial_types = true
+no_implicit_optional = true
+no_implicit_reexport = true
+packages = ["tests", "provider"]
+show_error_codes = true
+strict_equality = true
+strict_optional = true
+warn_incomplete_stub = true
+warn_no_return = true
+warn_redundant_casts = true
+warn_return_any = true
+warn_unreachable = true
+warn_unused_configs = true
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+warn_unused_ignores = false
