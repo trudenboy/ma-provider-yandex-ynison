@@ -1,6 +1,6 @@
 [project]
 name = "ma-provider-yandex-ynison"
-version = "0.1.0"
+version = "1.0.0"
 description = "Yandex Music Connect (Ynison) plugin for Music Assistant"
 requires-python = ">=3.12"
 license = "Apache-2.0"
