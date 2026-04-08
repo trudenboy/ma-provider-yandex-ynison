@@ -41,6 +41,7 @@ def _make_mock_mass() -> MagicMock:
     """Create a mock MusicAssistant instance."""
     mass = MagicMock()
     mass.cache_path = "/var/cache/test-cache"
+
     def _create_task(coro: object) -> MagicMock:
         if asyncio.iscoroutine(coro):
             return asyncio.ensure_future(coro)  # type: ignore[return-value]
