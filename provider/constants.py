@@ -19,11 +19,15 @@ CONF_X_TOKEN: Final[str] = "x_token"
 CONF_PLAYER: Final[str] = "player"
 CONF_DISPLAY_NAME: Final[str] = "display_name"
 CONF_ALLOW_PLAYER_SWITCH: Final[str] = "allow_player_switch"
+CONF_DEVICE_ID: Final[str] = "device_id"
 
 # Actions
 CONF_ACTION_AUTH_QR: Final[str] = "auth_qr"
 CONF_ACTION_CLEAR_AUTH: Final[str] = "clear_auth"
 CONF_REMEMBER_SESSION: Final[str] = "remember_session"
+
+# Player selection
+PLAYER_ID_AUTO: Final[str] = "__auto__"
 
 # Defaults
 DEFAULT_DISPLAY_NAME: Final[str] = "Music Assistant"
@@ -32,3 +36,11 @@ DEFAULT_APP_VERSION: Final[str] = "1.0.0"
 
 # Device types (from Ynison protobuf DeviceType enum)
 DEVICE_TYPE_SPEAKER: Final[str] = "SPEAKER"
+
+# Reconnect settings
+RECONNECT_DELAYS: Final[tuple[float, ...]] = (2.0, 4.0, 8.0, 16.0, 30.0, 60.0)
+MAX_RECONNECT_ATTEMPTS: Final[int] = 5
+
+# WebSocket timeouts
+WS_CONNECT_TIMEOUT: Final[float] = 15.0
+WS_RECEIVE_TIMEOUT: Final[float] = 60.0
