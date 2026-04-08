@@ -11,7 +11,7 @@ import pytest
 
 from provider.constants import (
     DEFAULT_APP_NAME,
-    DEVICE_TYPE_SPEAKER,
+    DEVICE_TYPE_WEB,
     YNISON_ORIGIN,
 )
 from provider.ynison_client import (
@@ -63,7 +63,7 @@ class TestYnisonDeviceInfo:
 
     def test_defaults(self) -> None:
         info = YnisonDeviceInfo(device_id="abc", title="My Speaker")
-        assert info.type == DEVICE_TYPE_SPEAKER
+        assert info.type == DEVICE_TYPE_WEB
         assert info.app_name == DEFAULT_APP_NAME
 
     def test_custom_values(self) -> None:
@@ -266,8 +266,9 @@ class TestGenerateDeviceId:
 
     def test_format(self) -> None:
         device_id = generate_device_id()
-        assert len(device_id) == 36  # UUID format
-        assert device_id.count("-") == 4
+        assert len(device_id) == 16
+        assert device_id.isalnum()
+        assert device_id.islower() or device_id.isdigit()
 
     def test_uniqueness(self) -> None:
         ids = {generate_device_id() for _ in range(10)}

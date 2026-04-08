@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, cast
 from music_assistant_models.enums import (
     ContentType,
     EventType,
+    MediaType,
     PlaybackState,
     ProviderType,
     StreamType,
@@ -19,6 +20,7 @@ from music_assistant_models.errors import LoginFailed, UnsupportedFeaturedExcept
 from music_assistant_models.media_items import AudioFormat
 from music_assistant_models.streamdetails import StreamMetadata
 
+from music_assistant.helpers.ffmpeg import get_ffmpeg_stream
 from music_assistant.models.plugin import PluginProvider, PluginSource
 
 from .constants import (
@@ -83,6 +85,9 @@ class YandexYnisonProvider(PluginProvider):
         self._on_unload_callbacks: list[Callable[..., None]] = []
         self._yandex_provider: Any = None
         self._last_volume_sent: int | None = None
+        self._current_streaming_track_id: str | None = None
+        self._track_changed_event = asyncio.Event()
+        self._stream_stop_event = asyncio.Event()
 
         # PluginSource
         self._source_details = PluginSource(
@@ -157,26 +162,84 @@ class YandexYnisonProvider(PluginProvider):
         return self._source_details
 
     async def get_audio_stream(self, player_id: str) -> AsyncGenerator[bytes, None]:
-        """Return custom audio stream for the currently playing Ynison track."""
-        if not self._ynison or not self._ynison.state.current_track_id:
-            self.logger.warning("No current track to stream")
+        """Return continuous audio stream following Ynison track changes.
+
+        Streams the current track, then waits for track changes and streams
+        the next track automatically. Runs until the source is deselected.
+        """
+        self._stream_stop_event.clear()
+
+        while not self._stream_stop_event.is_set():
+            if not self._ynison or not self._ynison.state.current_track_id:
+                # Wait for a track to appear
+                self._track_changed_event.clear()
+                try:
+                    await asyncio.wait_for(self._track_changed_event.wait(), timeout=30.0)
+                except TimeoutError:
+                    continue
+                continue
+
+            track_id = self._ynison.state.current_track_id
+            self._current_streaming_track_id = track_id
+            self._track_changed_event.clear()
+
+            if not self._yandex_provider:
+                self.logger.warning(
+                    "No linked Yandex Music provider — cannot stream track %s", track_id
+                )
+                return
+
+            # Stream the current track
+            async for chunk in self._stream_track(track_id):
+                yield chunk
+                # Check if track changed mid-stream
+                if self._track_changed_event.is_set() or self._stream_stop_event.is_set():
+                    break
+
+            self._current_streaming_track_id = None
+
+            if self._stream_stop_event.is_set():
+                break
+
+            # If track didn't change yet, wait for next track
+            if not self._track_changed_event.is_set():
+                try:
+                    await asyncio.wait_for(self._track_changed_event.wait(), timeout=30.0)
+                except TimeoutError:
+                    self.logger.debug("No track change after timeout, stopping stream")
+                    break
+
+    async def _stream_track(self, track_id: str) -> AsyncGenerator[bytes, None]:
+        """Stream a single track by ID, yielding PCM chunks."""
+        try:
+            stream_details = await self._yandex_provider.get_stream_details(
+                track_id, MediaType.TRACK
+            )
+        except Exception:
+            self.logger.exception("Failed to get stream details for track %s", track_id)
             return
 
-        track_id = self._ynison.state.current_track_id
+        if stream_details.stream_type != StreamType.HTTP or not stream_details.path:
+            self.logger.warning(
+                "Unsupported stream type %s for track %s (only HTTP supported)",
+                stream_details.stream_type,
+                track_id,
+            )
+            return
 
-        if self._yandex_provider:
-            # Use the linked Yandex Music provider to get the audio stream
-            try:
-                async for chunk in self._yandex_provider.get_audio_stream_for_track(track_id):
-                    yield chunk
-                return
-            except Exception:
-                self.logger.exception(
-                    "Failed to get audio stream via linked provider for track %s",
-                    track_id,
-                )
+        self.logger.info(
+            "Streaming track %s: format=%s, url=%s",
+            track_id,
+            stream_details.audio_format,
+            stream_details.path[:80],
+        )
 
-        self.logger.warning("No linked Yandex Music provider — cannot stream track %s", track_id)
+        async for chunk in get_ffmpeg_stream(
+            audio_input=stream_details.path,
+            input_format=stream_details.audio_format,
+            output_format=self._source_details.audio_format,
+        ):
+            yield chunk
 
     # ------------------------------------------------------------------
     # Token handling
@@ -211,10 +274,13 @@ class YandexYnisonProvider(PluginProvider):
         """Handle state update from Ynison."""
         is_our_device = state.active_device_id == self._device_id
 
-        if is_our_device:
+        if is_our_device and not state.is_paused:
             await self._activate_playback(state)
+        elif is_our_device and state.is_paused:
+            # Our device but paused — stop player, keep association
+            await self._pause_playback()
         elif self._source_details.in_use_by:
-            # Active device switched away from us
+            # Active device switched away — fully release player
             self._clear_active_player()
 
     async def _activate_playback(self, state: YnisonState) -> None:
@@ -224,6 +290,8 @@ class YandexYnisonProvider(PluginProvider):
             self.logger.warning("Ynison active on our device but no MA player available")
             return
 
+        self._stream_stop_event.clear()
+
         # Select source on the target player if not already active
         if self._source_details.in_use_by != target_player_id:
             self._active_player_id = target_player_id
@@ -231,6 +299,12 @@ class YandexYnisonProvider(PluginProvider):
             self.mass.create_task(
                 self.mass.players.select_source(target_player_id, self.instance_id)
             )
+
+        # Signal track change if track_id changed
+        new_track = state.current_track_id
+        if new_track and new_track != self._current_streaming_track_id:
+            self.logger.info("Track changed: %s -> %s", self._current_streaming_track_id, new_track)
+            self._track_changed_event.set()
 
         # Update metadata from state
         self._update_metadata(state)
@@ -263,7 +337,23 @@ class YandexYnisonProvider(PluginProvider):
             title = playable.get("title")
             if title:
                 meta.title = title
-            meta.image_url = playable.get("cover_url_optional")
+            cover = playable.get("cover_url_optional")
+            if cover and not cover.startswith("http"):
+                cover = f"https://{cover}"
+            if cover:
+                # Replace %% placeholder with size
+                cover = cover.replace("%%", "400x400")
+            meta.image_url = cover
+
+    async def _pause_playback(self) -> None:
+        """Handle pause — stop player but keep source association."""
+        self._stream_stop_event.set()
+        player_id = self._source_details.in_use_by
+        if player_id:
+            try:
+                await self.mass.players.cmd_stop(player_id)
+            except Exception:
+                self.logger.debug("Failed to stop player %s on pause", player_id)
 
     async def _handle_ynison_disconnect(self) -> None:
         """Handle permanent disconnect from Ynison."""
@@ -347,6 +437,7 @@ class YandexYnisonProvider(PluginProvider):
         prev_player_id = self._active_player_id
         self._active_player_id = None
         self._source_details.in_use_by = None
+        self._stream_stop_event.set()
 
         if prev_player_id:
             self.logger.debug(

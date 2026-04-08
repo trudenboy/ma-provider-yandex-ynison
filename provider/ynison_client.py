@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
+import string
 import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
@@ -17,7 +19,7 @@ from music_assistant_models.errors import LoginFailed
 from .constants import (
     DEFAULT_APP_NAME,
     DEFAULT_APP_VERSION,
-    DEVICE_TYPE_SPEAKER,
+    DEVICE_TYPE_WEB,
     MAX_RECONNECT_ATTEMPTS,
     RECONNECT_DELAYS,
     WS_CONNECT_TIMEOUT,
@@ -33,7 +35,7 @@ class YnisonDeviceInfo:
 
     device_id: str
     title: str
-    type: str = DEVICE_TYPE_SPEAKER
+    type: str = DEVICE_TYPE_WEB
     app_name: str = DEFAULT_APP_NAME
     app_version: str = DEFAULT_APP_VERSION
 
@@ -210,8 +212,13 @@ class YnisonClient:
             "update_full_state": {
                 "player_state": state,
                 "device": self._build_device_dict(),
+                "is_currently_active": False,
             },
+            "rid": str(uuid.uuid4()),
+            "player_action_timestamp_ms": 0,
+            "activity_interception_type": "DO_NOT_INTERCEPT_BY_DEFAULT",
         }
+        self._logger.debug("Sending full state: %s", json.dumps(msg)[:500])
         await self._send(msg)
 
     # ------------------------------------------------------------------
@@ -254,24 +261,40 @@ class YnisonClient:
             "capabilities": {
                 "can_be_player": True,
                 "can_be_remote_controller": False,
-                "volume_granularity": 100,
+                "volume_granularity": 16,
             },
-            "volume_info": {"volume": 1.0},
+            "volume_info": {"volume": 0},
+            "is_shadow": False,
         }
 
     def _build_initial_state(self) -> dict[str, Any]:
         """Build initial player state (paused, empty queue)."""
+        device_id = self._device_info.device_id
         return {
             "status": {
                 "paused": True,
                 "duration_ms": 0,
                 "progress_ms": 0,
-                "playback_speed": 1.0,
+                "playback_speed": 1,
+                "version": {
+                    "device_id": device_id,
+                    "version": int(uuid.uuid4().int % (10**18)),
+                    "timestamp_ms": 0,
+                },
             },
             "player_queue": {
-                "current_playable_index": 0,
+                "current_playable_index": -1,
+                "entity_id": "",
+                "entity_type": "VARIOUS",
                 "playable_list": [],
                 "options": {"repeat_mode": "NONE"},
+                "entity_context": "BASED_ON_ENTITY_BY_DEFAULT",
+                "version": {
+                    "device_id": device_id,
+                    "version": int(uuid.uuid4().int % (10**18)),
+                    "timestamp_ms": 0,
+                },
+                "from_optional": "",
             },
         }
 
@@ -340,6 +363,14 @@ class YnisonClient:
                 if self._stop_event.is_set():
                     break
 
+                self._logger.debug(
+                    "Ynison msg type=%s, data=%s",
+                    msg.type,
+                    (msg.data[:500] if msg.data else "<empty>")
+                    if msg.type != aiohttp.WSMsgType.ERROR
+                    else str(self._ws.exception()),
+                )
+
                 if msg.type == aiohttp.WSMsgType.TEXT:
                     try:
                         data = json.loads(msg.data)
@@ -350,6 +381,10 @@ class YnisonClient:
                             "Failed to parse Ynison message: %s",
                             msg.data[:200] if msg.data else "<empty>",
                         )
+                elif msg.type == aiohttp.WSMsgType.BINARY:
+                    self._logger.debug(
+                        "Ynison binary message (%d bytes)", len(msg.data) if msg.data else 0
+                    )
                 elif msg.type == aiohttp.WSMsgType.ERROR:
                     self._logger.warning("Ynison WebSocket error: %s", self._ws.exception())
                     break
@@ -358,11 +393,18 @@ class YnisonClient:
                     aiohttp.WSMsgType.CLOSING,
                     aiohttp.WSMsgType.CLOSED,
                 ):
+                    self._logger.debug(
+                        "Ynison WS close: type=%s, close_code=%s, extra=%s",
+                        msg.type,
+                        self._ws.close_code,
+                        msg.extra,
+                    )
                     break
         except asyncio.CancelledError:
             return
         except Exception:
             self._logger.exception("Unexpected error in Ynison message loop")
+        self._logger.debug("Ynison message loop exited")
 
         self._connected = False
 
@@ -433,5 +475,6 @@ class YnisonClient:
 
 
 def generate_device_id() -> str:
-    """Generate a new device UUID for Ynison registration."""
-    return str(uuid.uuid4())
+    """Generate a 16-character alphanumeric device ID for Ynison registration."""
+    chars = string.ascii_lowercase + string.digits
+    return "".join(random.choice(chars) for _ in range(16))
