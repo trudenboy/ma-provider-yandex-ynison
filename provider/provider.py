@@ -13,6 +13,7 @@ from music_assistant_models.enums import (
     EventType,
     MediaType,
     PlaybackState,
+    ProviderFeature,
     ProviderType,
     StreamType,
 )
@@ -52,7 +53,7 @@ class YandexYnisonProvider(PluginProvider):
         mass: MusicAssistant,
         manifest: ProviderManifest,
         config: ProviderConfig,
-        supported_features: set,
+        supported_features: set[ProviderFeature],
     ) -> None:
         """Initialize the Ynison plugin provider."""
         super().__init__(mass, manifest, config, supported_features)

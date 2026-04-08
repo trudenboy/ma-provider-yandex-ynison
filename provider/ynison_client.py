@@ -55,7 +55,7 @@ class YnisonState:
         playable_list = queue.get("playable_list", [])
         index = queue.get("current_playable_index", 0)
         if playable_list and 0 <= index < len(playable_list):
-            return playable_list[index].get("playable_id")
+            return str(playable_list[index].get("playable_id"))
         return None
 
     @property
@@ -307,12 +307,12 @@ class YnisonClient:
         assert self._session is not None
         headers = self._build_headers()
 
-        timeout = aiohttp.ClientTimeout(total=WS_CONNECT_TIMEOUT)
+        ws_timeout = aiohttp.ClientWSTimeout(ws_close=WS_CONNECT_TIMEOUT)
         try:
             ws = await self._session.ws_connect(
                 YNISON_REDIRECT_URL,
                 headers=headers,
-                timeout=timeout,
+                timeout=ws_timeout,
             )
         except aiohttp.WSServerHandshakeError as err:
             if err.status in (401, 403):
@@ -344,8 +344,8 @@ class YnisonClient:
         url = f"wss://{host}{YNISON_STATE_PATH}"
         headers = self._build_headers(redirect_ticket=ticket, session_id=session_id)
 
-        timeout = aiohttp.ClientTimeout(total=WS_CONNECT_TIMEOUT)
-        self._ws = await self._session.ws_connect(url, headers=headers, timeout=timeout)
+        ws_timeout = aiohttp.ClientWSTimeout(ws_close=WS_CONNECT_TIMEOUT)
+        self._ws = await self._session.ws_connect(url, headers=headers, timeout=ws_timeout)
         self._connected = True
         self._logger.info("Connected to Ynison state service at %s", host)
 
