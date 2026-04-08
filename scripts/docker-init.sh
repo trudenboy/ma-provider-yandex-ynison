@@ -9,7 +9,7 @@ echo "==> Setting up Yandex Music Connect (Ynison) provider..."
 PROVIDERS_DIR=$(/app/venv/bin/python3 -c \
     "import music_assistant.providers, os; print(os.path.dirname(music_assistant.providers.__file__))")
 
-# Remove any existing yandex_ynison provider (image may bundle one), then symlink ours
+# Remove any existing yandex_music provider (image may bundle one), then symlink ours
 rm -rf "${PROVIDERS_DIR}/yandex_ynison"
 ln -s /tmp/provider "${PROVIDERS_DIR}/yandex_ynison"
 echo "==> Provider linked: ${PROVIDERS_DIR}/yandex_ynison"

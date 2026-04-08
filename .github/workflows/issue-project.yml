@@ -44,8 +44,23 @@ jobs:
             -f iid="$IID" \
             --jq '.data.addProjectV2ItemById.item.id')
 
-          # TODO: Set Provider field option ID after creating GitHub project column
-          # PROVIDER_OPT="<to-be-configured>"
+          # Set Provider field
+          PROVIDER_OPT=""
+
+          if [[ -n "$PROVIDER_OPT" ]]; then
+            gh api graphql -f query='
+              mutation($pid:ID!,$iid:ID!,$fid:ID!,$oid:String!){
+                updateProjectV2ItemFieldValue(input:{
+                  projectId:$pid,itemId:$iid,
+                  fieldId:$fid,
+                  value:{singleSelectOptionId:$oid}
+                }){projectV2Item{id}}
+              }' \
+              -f pid="$PID" \
+              -f iid="$ITEM_ID" \
+              -f fid="PVTSSF_lAHOCFMIf84BPvYezg-EBos" \
+              -f oid="$PROVIDER_OPT"
+          fi
 
           # Set Incident Type field based on label
           case "$LABEL" in
@@ -71,4 +86,32 @@ jobs:
               -f iid="$ITEM_ID" \
               -f fid="PVTSSF_lAHOCFMIf84BPvYezg-EBow" \
               -f oid="$INCIDENT_OPT"
+          fi
+
+          # Set Priority field based on priority:* label
+
+          ISSUE_LABELS=$(gh api repos/${{ github.repository }}/issues/$(
+            [[ "${{ github.event_name }}" == "workflow_dispatch" ]] && echo "${{ inputs.issue_number }}" || echo "${{ github.event.issue.number }}"
+          ) --jq '[.labels[].name] | join(" ")')
+          case "$ISSUE_LABELS" in
+            *"priority:critical"*) PRIORITY_OPT="362e52a7" ;;
+            *"priority:high"*)     PRIORITY_OPT="21693c8c" ;;
+            *"priority:medium"*)   PRIORITY_OPT="17d0cdb7" ;;
+            *"priority:low"*)      PRIORITY_OPT="c26e065d" ;;
+            *)                     PRIORITY_OPT="" ;;
+          esac
+
+          if [[ -n "$PRIORITY_OPT" ]]; then
+            gh api graphql -f query='
+              mutation($pid:ID!,$iid:ID!,$fid:ID!,$oid:String!){
+                updateProjectV2ItemFieldValue(input:{
+                  projectId:$pid,itemId:$iid,
+                  fieldId:$fid,
+                  value:{singleSelectOptionId:$oid}
+                }){projectV2Item{id}}
+              }' \
+              -f pid="$PID" \
+              -f iid="$ITEM_ID" \
+              -f fid="PVTSSF_lAHOCFMIf84BPvYezg-EBo0" \
+              -f oid="$PRIORITY_OPT"
           fi

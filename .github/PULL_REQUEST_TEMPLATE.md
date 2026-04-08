@@ -1,13 +1,23 @@
-## Summary
+<!-- Yandex Music Connect (Ynison) pull request template -->
+## Description
 
-<!-- Brief description of what this PR does -->
+<!-- What does this PR do? Why is it needed? -->
 
-## Test plan
+## Type of change
 
-- [ ] Tests pass (`uv run pytest`)
-- [ ] Linting passes (`uv run ruff check .`)
-- [ ] Type checking passes (`uv run mypy`)
+- [ ] Bug fix
+- [ ] New feature
+- [ ] Documentation update
+- [ ] CI/Infrastructure
+- [ ] Refactoring
 
-## Related issues
+## Testing
 
-<!-- Link any related issues: Fixes #123, Closes #456 -->
+- [ ] Tests pass locally (`uv run pytest`)
+- [ ] Lint passes (`uv run pre-commit run --all-files`)
+- [ ] New/changed code is covered by tests
+
+## Checklist
+
+- [ ] Documentation updated if behavior changed
+- [ ] No secrets or credentials committed

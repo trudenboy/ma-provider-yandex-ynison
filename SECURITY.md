@@ -2,19 +2,17 @@
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability, please report it responsibly:
+**Please do not report security vulnerabilities through public GitHub issues.**
 
-1. **Do NOT** open a public issue
-2. Email the maintainer or use GitHub's private vulnerability reporting feature
-3. Include a description of the vulnerability and steps to reproduce
+Use GitHub's built-in [Private Vulnerability Reporting](../../security/advisories/new) to report security issues confidentially.
 
-## Supported Versions
+This ensures the issue can be assessed and a fix prepared before any public disclosure.
 
-| Version | Supported |
-|---------|-----------|
-| Latest  | Yes       |
+### What to include
 
-## Scope
+- Description of the vulnerability
+- Steps to reproduce
+- Potential impact
+- Any suggested fix (optional)
 
-This plugin handles Yandex Music OAuth tokens and WebSocket connections to Yandex services.
-Tokens are stored encrypted via Music Assistant's configuration system.
+We aim to acknowledge reports within 72 hours and provide a fix timeline within 7 days.
