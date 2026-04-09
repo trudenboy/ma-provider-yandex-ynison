@@ -89,6 +89,8 @@ class YandexYnisonProvider(PluginProvider):
         self._current_streaming_track_id: str | None = None
         self._track_changed_event = asyncio.Event()
         self._stream_stop_event = asyncio.Event()
+        self._seek_position_ms: int = 0
+        self._last_progress_ms: int = 0
 
         # PluginSource
         self._source_details = PluginSource(
@@ -195,8 +197,10 @@ class YandexYnisonProvider(PluginProvider):
                     await self.mass.players.cmd_stop(player_id)
                 return
 
-            # Stream the current track
-            async for chunk in self._stream_track(track_id):
+            # Stream the current track (with seek offset if any)
+            seek_ms = self._seek_position_ms
+            self._seek_position_ms = 0
+            async for chunk in self._stream_track(track_id, seek_ms=seek_ms):
                 yield chunk
                 # Check if track changed, stopped, or source deselected
                 if (
@@ -219,7 +223,9 @@ class YandexYnisonProvider(PluginProvider):
                     self.logger.debug("No track change after timeout, stopping stream")
                     break
 
-    async def _stream_track(self, track_id: str) -> AsyncGenerator[bytes, None]:
+    async def _stream_track(
+        self, track_id: str, seek_ms: int = 0
+    ) -> AsyncGenerator[bytes, None]:
         """Stream a single track by ID, yielding PCM chunks.
 
         Converts source audio to PCM via ffmpeg since MA reads audio_format
@@ -253,10 +259,18 @@ class YandexYnisonProvider(PluginProvider):
             )
             return
 
+        # Build extra input args for seek
+        extra_input_args: list[str] | None = None
+        if seek_ms > 0:
+            seek_sec = seek_ms / 1000.0
+            extra_input_args = ["-ss", f"{seek_sec:.3f}"]
+            self.logger.info("Seeking to %.1fs in track %s", seek_sec, track_id)
+
         async for chunk in get_ffmpeg_stream(
             audio_input=audio_input,
             input_format=stream_details.audio_format,
             output_format=self._source_details.audio_format,
+            extra_input_args=extra_input_args,
         ):
             yield chunk
 
@@ -323,7 +337,21 @@ class YandexYnisonProvider(PluginProvider):
         new_track = state.current_track_id
         if new_track and new_track != self._current_streaming_track_id:
             self.logger.info("Track changed: %s -> %s", self._current_streaming_track_id, new_track)
+            self._seek_position_ms = state.progress_ms
             self._track_changed_event.set()
+        elif new_track and new_track == self._current_streaming_track_id:
+            # Detect seek: significant jump in progress (>3s difference from expected)
+            progress_delta = abs(state.progress_ms - self._last_progress_ms)
+            if self._last_progress_ms > 0 and progress_delta > 3000:
+                self.logger.info(
+                    "Seek detected on track %s: %dms -> %dms",
+                    new_track,
+                    self._last_progress_ms,
+                    state.progress_ms,
+                )
+                self._seek_position_ms = state.progress_ms
+                self._track_changed_event.set()
+        self._last_progress_ms = state.progress_ms
 
         # Update metadata from state
         self._update_metadata(state)
