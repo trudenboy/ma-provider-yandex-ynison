@@ -215,12 +215,15 @@ class YandexYnisonProvider(PluginProvider):
             if self._stream_stop_event.is_set():
                 break
 
-            # If track didn't change yet, wait for next track
-            if not self._track_changed_event.is_set():
+            # Track finished naturally — advance queue in Ynison
+            if not self._track_changed_event.is_set() and self._ynison:
+                self.logger.info("Track %s finished, advancing to next", track_id)
+                await self._advance_queue()
+                # Wait for Ynison to confirm the track change
                 try:
-                    await asyncio.wait_for(self._track_changed_event.wait(), timeout=30.0)
+                    await asyncio.wait_for(self._track_changed_event.wait(), timeout=10.0)
                 except TimeoutError:
-                    self.logger.debug("No track change after timeout, stopping stream")
+                    self.logger.debug("No track change after advance, stopping stream")
                     break
 
     async def _stream_track(
@@ -573,10 +576,10 @@ class YandexYnisonProvider(PluginProvider):
             paused=True,
         )
 
-    async def _on_next(self) -> None:
-        """Handle next track command — update queue index in Ynison."""
+    async def _advance_queue(self) -> None:
+        """Advance to the next track in the Ynison queue."""
         if not self._ynison:
-            raise UnsupportedFeaturedException("Not connected to Ynison")
+            return
         state = self._ynison.state
         queue = state.player_state.get("player_queue", {})
         current_index = queue.get("current_playable_index", 0)
@@ -585,7 +588,19 @@ class YandexYnisonProvider(PluginProvider):
             new_state = dict(state.player_state)
             new_state["player_queue"] = dict(queue)
             new_state["player_queue"]["current_playable_index"] = current_index + 1
+            new_state["status"] = dict(new_state.get("status", {}))
+            new_state["status"]["progress_ms"] = 0
+            new_state["status"]["paused"] = False
             await self._ynison.send_full_state(player_state=new_state)
+        else:
+            self.logger.info("Queue exhausted, no next track")
+            self._stream_stop_event.set()
+
+    async def _on_next(self) -> None:
+        """Handle next track command — update queue index in Ynison."""
+        if not self._ynison:
+            raise UnsupportedFeaturedException("Not connected to Ynison")
+        await self._advance_queue()
 
     async def _on_previous(self) -> None:
         """Handle previous track command — update queue index in Ynison."""
