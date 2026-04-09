@@ -325,10 +325,12 @@ class YandexYnisonProvider(PluginProvider):
             self.logger.warning("Ynison active on our device but no MA player available")
             return
 
+        # Detect resume after pause: stream was stopped but player still associated
+        needs_reselect = self._stream_stop_event.is_set()
         self._stream_stop_event.clear()
 
-        # Select source on the target player if not already active
-        if self._source_details.in_use_by != target_player_id:
+        # Select source on the target player if not already active or resuming
+        if self._source_details.in_use_by != target_player_id or needs_reselect:
             self._active_player_id = target_player_id
             self._source_details.in_use_by = target_player_id
             self.mass.create_task(
@@ -336,11 +338,13 @@ class YandexYnisonProvider(PluginProvider):
             )
 
         # Signal track change if track_id changed
+        significant_change = False
         new_track = state.current_track_id
         if new_track and new_track != self._current_streaming_track_id:
             self.logger.info("Track changed: %s -> %s", self._current_streaming_track_id, new_track)
             self._seek_position_ms = state.progress_ms
             self._track_changed_event.set()
+            significant_change = True
         elif new_track and new_track == self._current_streaming_track_id:
             # Detect seek: compare reported progress with expected progress
             # Expected = last known progress + elapsed wall-clock time
@@ -358,14 +362,16 @@ class YandexYnisonProvider(PluginProvider):
                 )
                 self._seek_position_ms = state.progress_ms
                 self._track_changed_event.set()
+                significant_change = True
         self._last_progress_ms = state.progress_ms
         self._last_progress_time = time.monotonic()
 
         # Update metadata from state
         self._update_metadata(state)
 
-        # Trigger player update
-        self.mass.players.trigger_player_update(target_player_id)
+        # Only trigger player update on meaningful changes to avoid UI churn
+        if significant_change or needs_reselect:
+            self.mass.players.trigger_player_update(target_player_id)
 
     def _update_metadata(self, state: YnisonState) -> None:
         """Update PluginSource metadata from Ynison state."""
@@ -401,16 +407,15 @@ class YandexYnisonProvider(PluginProvider):
             meta.image_url = cover
 
     async def _pause_playback(self) -> None:
-        """Handle pause — stop player and release source so resume re-selects it."""
+        """Handle pause — stop streaming but keep player association for resume."""
         self._stream_stop_event.set()
+        self._last_progress_time = 0.0  # reset so resume doesn't trigger false seek
         player_id = self._source_details.in_use_by
-        self._source_details.in_use_by = None
         if player_id:
             try:
                 await self.mass.players.cmd_stop(player_id)
             except Exception:
                 self.logger.debug("Failed to stop player %s on pause", player_id)
-            self.mass.players.trigger_player_update(player_id)
 
     async def _handle_ynison_disconnect(self) -> None:
         """Handle permanent disconnect from Ynison."""
