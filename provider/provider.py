@@ -74,9 +74,7 @@ class YandexYnisonProvider(PluginProvider):
         device_id = cast("str | None", self.config.get_value(CONF_DEVICE_ID))
         if not device_id:
             device_id = generate_device_id()
-            self.mass.config.set_raw_provider_config_value(
-                self.instance_id, CONF_DEVICE_ID, device_id
-            )
+            self._update_config_value(CONF_DEVICE_ID, device_id)
         self._device_id: str = device_id
 
         # Runtime state
@@ -294,9 +292,7 @@ class YandexYnisonProvider(PluginProvider):
             self.logger.info("Refreshing music token from x_token")
             try:
                 token = await refresh_music_token(x_token)
-                self.mass.config.set_raw_provider_config_value(
-                    self.instance_id, CONF_TOKEN, token, encrypted=True
-                )
+                self._update_config_value(CONF_TOKEN, token, encrypted=True)
                 return token
             except Exception as err:
                 raise LoginFailed("Failed to refresh Yandex music token from x_token") from err
@@ -625,6 +621,9 @@ class YandexYnisonProvider(PluginProvider):
             new_state = dict(state.player_state)
             new_state["player_queue"] = dict(queue)
             new_state["player_queue"]["current_playable_index"] = current_index - 1
+            new_state["status"] = dict(new_state.get("status", {}))
+            new_state["status"]["progress_ms"] = 0
+            new_state["status"]["paused"] = False
             await self._ynison.send_full_state(player_state=new_state)
 
     async def _on_seek(self, position: int) -> None:
