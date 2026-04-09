@@ -183,8 +183,10 @@ class YandexYnisonProvider(PluginProvider):
                     continue
                 continue
 
-            self._track_changed_event.clear()
+            # Clear event before reading state to avoid missing updates
+            # that arrive between the read and clear
             track_id = self._ynison.state.current_track_id
+            self._track_changed_event.clear()
             self._current_streaming_track_id = track_id
 
             if not self._yandex_provider:
