@@ -226,9 +226,7 @@ class YandexYnisonProvider(PluginProvider):
                     self.logger.debug("No track change after advance, stopping stream")
                     break
 
-    async def _stream_track(
-        self, track_id: str, seek_ms: int = 0
-    ) -> AsyncGenerator[bytes, None]:
+    async def _stream_track(self, track_id: str, seek_ms: int = 0) -> AsyncGenerator[bytes, None]:
         """Stream a single track by ID, yielding PCM chunks.
 
         Converts source audio to PCM via ffmpeg since MA reads audio_format
