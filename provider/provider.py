@@ -229,23 +229,33 @@ class YandexYnisonProvider(PluginProvider):
             self.logger.exception("Failed to get stream details for track %s", track_id)
             return
 
-        if stream_details.stream_type != StreamType.HTTP or not stream_details.path:
+        # Determine audio input based on stream type
+        audio_input: AsyncGenerator[bytes, None] | str
+        if stream_details.stream_type == StreamType.CUSTOM:
+            # CUSTOM = raw/encrypted transport, use provider's get_audio_stream
+            audio_input = self._yandex_provider.get_audio_stream(stream_details)
+            self.logger.info(
+                "Streaming track %s (custom): format=%s", track_id, stream_details.audio_format
+            )
+        elif stream_details.stream_type == StreamType.HTTP and stream_details.path:
+            # HTTP = direct URL (fallback path)
+            audio_input = stream_details.path
+            self.logger.info(
+                "Streaming track %s (http): format=%s, url=%s",
+                track_id,
+                stream_details.audio_format,
+                stream_details.path[:80],
+            )
+        else:
             self.logger.warning(
-                "Unsupported stream type %s for track %s (only HTTP supported)",
+                "Unsupported stream type %s for track %s",
                 stream_details.stream_type,
                 track_id,
             )
             return
 
-        self.logger.info(
-            "Streaming track %s: format=%s, url=%s",
-            track_id,
-            stream_details.audio_format,
-            stream_details.path[:80],
-        )
-
         async for chunk in get_ffmpeg_stream(
-            audio_input=stream_details.path,
+            audio_input=audio_input,
             input_format=stream_details.audio_format,
             output_format=self._source_details.audio_format,
         ):
