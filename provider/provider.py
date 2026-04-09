@@ -91,6 +91,7 @@ class YandexYnisonProvider(PluginProvider):
         self._stream_stop_event = asyncio.Event()
         self._seek_position_ms: int = 0
         self._last_progress_ms: int = 0
+        self._last_progress_time: float = 0.0
 
         # PluginSource
         self._source_details = PluginSource(
@@ -341,18 +342,24 @@ class YandexYnisonProvider(PluginProvider):
             self._seek_position_ms = state.progress_ms
             self._track_changed_event.set()
         elif new_track and new_track == self._current_streaming_track_id:
-            # Detect seek: significant jump in progress (>3s difference from expected)
-            progress_delta = abs(state.progress_ms - self._last_progress_ms)
-            if self._last_progress_ms > 0 and progress_delta > 3000:
+            # Detect seek: compare reported progress with expected progress
+            # Expected = last known progress + elapsed wall-clock time
+            now = time.monotonic()
+            elapsed_ms = (now - self._last_progress_time) * 1000 if self._last_progress_time else 0
+            expected_ms = self._last_progress_ms + elapsed_ms
+            drift_ms = abs(state.progress_ms - expected_ms)
+            if self._last_progress_ms > 0 and drift_ms > 5000:
                 self.logger.info(
-                    "Seek detected on track %s: %dms -> %dms",
+                    "Seek detected on track %s: expected ~%dms, got %dms (drift %dms)",
                     new_track,
-                    self._last_progress_ms,
+                    int(expected_ms),
                     state.progress_ms,
+                    int(drift_ms),
                 )
                 self._seek_position_ms = state.progress_ms
                 self._track_changed_event.set()
         self._last_progress_ms = state.progress_ms
+        self._last_progress_time = time.monotonic()
 
         # Update metadata from state
         self._update_metadata(state)
