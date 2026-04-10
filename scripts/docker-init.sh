@@ -6,6 +6,16 @@ set -e
 echo "==> Setting up Yandex Music Connect (Ynison) provider..."
 
 # Locate MA providers directory inside the container venv
+# Determine pip installer: prefer uv, fall back to pip
+if [ -x /app/venv/bin/uv ]; then
+    PIP_INSTALL="/app/venv/bin/uv pip install --quiet"
+elif [ -x /app/venv/bin/pip ]; then
+    PIP_INSTALL="/app/venv/bin/pip install --quiet"
+else
+    echo "ERROR: neither uv nor pip found in /app/venv/bin" >&2
+    exit 1
+fi
+
 PROVIDERS_DIR=$(/app/venv/bin/python3 -c \
     "import music_assistant.providers, os; print(os.path.dirname(music_assistant.providers.__file__))")
 
@@ -35,7 +45,7 @@ PYEOF
 )
 if [ -n "$DEPS" ]; then
     echo "==> Installing provider dependencies: $DEPS"
-    /app/venv/bin/uv pip install --quiet $DEPS
+    $PIP_INSTALL $DEPS
 fi
 
 # Install manifest.json requirements (e.g. ya-passport-auth)
@@ -51,7 +61,7 @@ PYEOF
 )
 if [ -n "$MANIFEST_DEPS" ]; then
     echo "==> Installing manifest requirements: $MANIFEST_DEPS"
-    /app/venv/bin/uv pip install --quiet $MANIFEST_DEPS
+    $PIP_INSTALL $MANIFEST_DEPS
 fi
 
 echo "==> Starting Music Assistant..."
