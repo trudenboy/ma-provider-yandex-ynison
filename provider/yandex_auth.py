@@ -20,7 +20,7 @@ from ya_passport_auth.exceptions import QRTimeoutError, YaPassportError
 from music_assistant.helpers.auth import AuthenticationHelper
 
 if TYPE_CHECKING:
-    from music_assistant import MusicAssistant
+    from music_assistant.mass import MusicAssistant
 
 _LOGGER = logging.getLogger(__name__)
 

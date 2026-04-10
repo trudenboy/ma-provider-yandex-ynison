@@ -295,6 +295,8 @@ class YandexYnisonProvider(PluginProvider):
                 new_token = await refresh_music_token(SecretStr(x_token))
                 self._update_config_value(CONF_TOKEN, new_token.get_secret(), encrypted=True)
                 return new_token
+            except LoginFailed:
+                raise
             except Exception as err:
                 raise LoginFailed("Failed to refresh Yandex music token from x_token") from err
 
