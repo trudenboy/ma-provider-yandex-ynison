@@ -100,8 +100,5 @@ max-complexity = 25
 fixture-parentheses = false
 mark-parentheses = false
 
-[lint.per-file-ignores]
-"tests/**" = ["D102", "PLC0415", "PLW0108", "S108"]
-
 [lint.isort]
 known-first-party = ["music_assistant"]
