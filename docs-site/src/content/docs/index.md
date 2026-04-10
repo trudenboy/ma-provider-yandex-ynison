@@ -16,6 +16,3 @@ Music Assistant поддерживает [Yandex Music Connect (Ynison)](https:/
 
 
 Инструкция по подключению — на странице [Настройка](configuration/).
-
-
-
