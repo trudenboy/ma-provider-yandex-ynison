@@ -594,9 +594,7 @@ class YandexYnisonProvider(PluginProvider):
                 try:
                     await self.mass.players.select_source(new_player_id, new_player_id)
                 except Exception:
-                    self.logger.debug(
-                        "Could not revert active_source for %s", new_player_id
-                    )
+                    self.logger.debug("Could not revert active_source for %s", new_player_id)
                 if current_target:
                     self.mass.players.trigger_player_update(current_target)
                 msg = (
