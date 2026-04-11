@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.1] - 2026-04-11
+
+### Added
+- Radio/wave queue replenishment via Yandex Music REST API (`get_rotor_station_tracks`) — RADIO queues now auto-advance indefinitely
+- Prefetch optimization: background fetch of next track batch when playing second-to-last item in queue
+- `depends_on: "yandex_music"` in manifest — MA auto-loads ynison when yandex_music is available and cascade-unloads when removed
+- `_wait_for_track_change()` helper that ignores Ynison echoes and waits for actual track ID change
+- 4 new tests for radio replenishment, prefetch, and echo-resistant track change wait
+
+### Fixed
+- Race condition on track completion: Ynison echo of `update_playing_status` triggered false seek detection, causing old track to re-stream at seek=end, then new track to start at wrong position
+- Active device now increments `current_playable_index` itself (Ynison is state-sync, not command protocol)
+- RADIO/wave queues no longer stall at end — tracks fetched via YM API instead of relying on `sync_state_from_eov` (which only works for non-radio entities)
+
+### Removed
+- EOV-based queue replenishment (replaced by direct REST API calls)
+
 ## [1.2.0] - 2026-04-11
 
 ### Added
