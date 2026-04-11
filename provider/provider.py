@@ -436,7 +436,7 @@ class YandexYnisonProvider(PluginProvider):
         meta = self._source_details.metadata
         if stream_details.duration:
             meta.duration = stream_details.duration
-        meta.elapsed_time = seek_ms / 1000 if seek_ms else 0
+        meta.elapsed_time = seek_ms // 1000 if seek_ms else 0
         meta.elapsed_time_last_updated = time.time()
         if self._source_details.in_use_by:
             self.mass.players.trigger_player_update(
