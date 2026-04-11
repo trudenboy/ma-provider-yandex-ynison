@@ -765,6 +765,7 @@ class YandexYnisonProvider(PluginProvider):
             await self._advance_queue_index(next_index)
         else:
             # 2b. At end of queue — use prefetched data or fetch now
+            expanded: list[dict[str, Any]] | None = None
             if self._prefetched_list:
                 self.logger.info("Using pre-fetched queue (%d items)", len(self._prefetched_list))
                 expanded = self._prefetched_list
