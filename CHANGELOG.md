@@ -8,12 +8,16 @@ All notable changes to this project will be documented in this file.
 - Multi-instance token sharing: new instances auto-detect and reuse token from existing ones
 - Instance name postfix: multiple instances show device name in UI (e.g. `[Living Room]`)
 - Ynison error response handling: errors are logged and no longer crash the connection loop
-- 6 new tests for token sharing and instance naming
+- Queue exhaustion completion signal: Ynison is notified when queue ends so controller can push more tracks (radio/My Wave)
+- `_best_duration_ms` helper: prefers actual stream duration over Ynison state value
+- 8 new tests for token sharing, instance naming, queue exhaustion, and duration handling
 
 ### Fixed
 - Volume changes no longer break Ynison connection (volume sync removed — MA controls physical player independently)
-- Duration now synced from actual audio stream, not Ynison metadata
+- Duration now synced from actual audio stream, not Ynison metadata (fixes premature track stop)
+- Stale `duration_ms` no longer propagated on track advance — reset to 0 when switching tracks
 - Progress bar shows correct position after seek from Yandex Music app (upstream PR #3652 merged)
+- Queue exhaustion no longer freezes YM app — stream stops cleanly and restarts via `select_source`
 
 ### Changed
 - Plugin stage promoted from `alpha` to `beta`
