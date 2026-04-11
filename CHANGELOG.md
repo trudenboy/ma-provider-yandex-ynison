@@ -19,6 +19,7 @@ All notable changes to this project will be documented in this file.
 - Stale `duration_ms` no longer propagated on track advance — reset to 0 when switching tracks
 - Progress bar shows correct position after seek from Yandex Music app (upstream PR #3652 merged)
 - Queue exhaustion no longer freezes YM app — stream stops cleanly and restarts via `select_source`
+- Next track unavailable after auto-advance — MA no longer manipulates queue index; Yandex controls the queue
 
 ### Changed
 - Plugin stage promoted from `alpha` to `beta`
