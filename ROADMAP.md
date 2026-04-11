@@ -8,12 +8,33 @@ Released features:
 - Ya-passport-auth migration
 - Duration and progress sync
 - Reconnect with exponential backoff
+- SyncStateFromEOV queue replenishment on queue exhaustion
 
 ## Short-term
 
 ### PR #3614 — upstream merge
 - Address remaining CI and review feedback
 - Get merged into `music-assistant/server`
+
+### Queue replenishment improvements
+
+The Ynison protocol doesn't natively auto-replenish radio queues when a
+non-YM-app device is the active player. We currently send `SyncStateFromEOV` to
+request the backend to refresh the queue from the centralized EOV service.
+
+**Additional strategies (to evaluate if EOV sync alone is insufficient):**
+
+1. **Proactive progress updates** — send `update_playing_status` at ~90% of
+   track progress to trigger the YM app's pre-fetch logic, even when
+   our device is active. Low risk, easy to implement.
+
+2. **Direct rotor REST API** — call `/rotor/station/{station}/tracks` ourselves
+   to fetch the next batch of radio tracks, then push them into the Ynison
+   queue via `update_player_state`. High complexity: requires station tracking,
+   feedback API calls, and queue version management.
+
+3. **Hybrid approach** — SyncStateFromEOV first → proactive progress fallback →
+   rotor API last resort. Progressively more effort but maximum reliability.
 
 ## Medium-term
 

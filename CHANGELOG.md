@@ -9,6 +9,7 @@ All notable changes to this project will be documented in this file.
 - Instance name postfix: multiple instances show device name in UI (e.g. `[Living Room]`)
 - Ynison error response handling: errors are logged and no longer crash the connection loop
 - Queue exhaustion completion signal: Ynison is notified when queue ends so controller can push more tracks (radio/My Wave)
+- SyncStateFromEOV: requests EOV backend to replenish the queue when exhausted (first known implementation of this Ynison feature)
 - `_best_duration_ms` helper: prefers actual stream duration over Ynison state value
 - 8 new tests for token sharing, instance naming, queue exhaustion, and duration handling
 
