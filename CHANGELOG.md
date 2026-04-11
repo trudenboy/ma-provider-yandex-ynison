@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.0] - 2026-04-11
+
+### Added
+- Multi-instance token sharing: new instances auto-detect and reuse token from existing ones
+- Instance name postfix: multiple instances show device name in UI (e.g. `[Living Room]`)
+- Ynison error response handling: errors are logged and no longer crash the connection loop
+- 6 new tests for token sharing and instance naming
+
+### Fixed
+- Volume changes no longer break Ynison connection (volume sync removed — MA controls physical player independently)
+- Duration now synced from actual audio stream, not Ynison metadata
+- Progress bar shows correct position after seek from Yandex Music app (upstream PR #3652 merged)
+
+### Changed
+- Plugin stage promoted from `alpha` to `beta`
+
+### Removed
+- Volume sync to Ynison (was causing 400/500 errors and connection drops)
+
 ## [1.1.0] - 2026-04-10
 
 ### Changed
