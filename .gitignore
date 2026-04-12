@@ -20,3 +20,4 @@ docs-site/.astro/
 aprender-test/
 aprender-webui.png
 .playwright-mcp/
+ma-server/
