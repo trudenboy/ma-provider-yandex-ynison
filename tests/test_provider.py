@@ -1086,7 +1086,7 @@ class TestPreBuffer:
                 yield c
 
         # Use real create_task
-        provider.mass.create_task = lambda coro: asyncio.get_event_loop().create_task(coro)  # type: ignore[method-assign]
+        provider.mass.create_task = lambda coro: asyncio.get_event_loop().create_task(coro)  # type: ignore[method-assign, assignment, misc]
 
         with patch(
             "provider.provider.get_ffmpeg_stream",
@@ -1135,7 +1135,7 @@ class TestPreBuffer:
                 await asyncio.sleep(0.1)
                 yield f"pcm-{i}".encode()
 
-        provider.mass.create_task = lambda coro: asyncio.get_event_loop().create_task(coro)  # type: ignore[method-assign]
+        provider.mass.create_task = lambda coro: asyncio.get_event_loop().create_task(coro)  # type: ignore[method-assign, assignment, misc]
 
         with patch(
             "provider.provider.get_ffmpeg_stream",
@@ -1162,7 +1162,7 @@ class TestPreBuffer:
         mock_ynison.state.is_paused = False
         provider._ynison = mock_ynison
 
-        provider.mass.create_task = lambda coro: asyncio.get_event_loop().create_task(coro)  # type: ignore[method-assign]
+        provider.mass.create_task = lambda coro: asyncio.get_event_loop().create_task(coro)  # type: ignore[method-assign, assignment, misc]
 
         await provider._start_prebuffer("track:err")
         assert provider._prebuffer is not None
@@ -1196,7 +1196,7 @@ class TestPreBuffer:
         async def _fake_ffmpeg(**_kwargs: object) -> Any:
             yield b"pcm"
 
-        provider.mass.create_task = lambda coro: asyncio.get_event_loop().create_task(coro)  # type: ignore[method-assign]
+        provider.mass.create_task = lambda coro: asyncio.get_event_loop().create_task(coro)  # type: ignore[method-assign, assignment, misc]
 
         with patch(
             "provider.provider.get_ffmpeg_stream",
@@ -1238,7 +1238,7 @@ class TestPreBuffer:
         async def _fake_ffmpeg(**_kwargs: object) -> Any:
             yield b"pcm"
 
-        provider.mass.create_task = lambda coro: asyncio.get_event_loop().create_task(coro)  # type: ignore[method-assign]
+        provider.mass.create_task = lambda coro: asyncio.get_event_loop().create_task(coro)  # type: ignore[method-assign, assignment, misc]
 
         with patch(
             "provider.provider.get_ffmpeg_stream",
