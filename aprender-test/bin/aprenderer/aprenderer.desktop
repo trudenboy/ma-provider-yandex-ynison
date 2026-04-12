@@ -1,0 +1,7 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=APRenderer
+Icon=
+Exec=sudo bash -c  'cd /usr/aprenderer && /usr/aprenderer/ap2renderer'
+Terminal=true

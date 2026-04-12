@@ -1,0 +1,134 @@
+- generic [ref=e2]:
+  - generic [ref=e3]:
+    - heading "Album Player Media Renderer settings" [level=3] [ref=e5]
+    - generic [ref=e6]:
+      - list [ref=e7]:
+        - listitem [ref=e8]:
+          - link "General" [ref=e9] [cursor=pointer]:
+            - /url: "#general"
+        - listitem [ref=e10]:
+          - link "DSD" [ref=e11] [cursor=pointer]:
+            - /url: "#decoder"
+        - listitem [ref=e12]:
+          - link "DSP" [ref=e13] [cursor=pointer]:
+            - /url: "#dsp"
+        - listitem [ref=e14]:
+          - link "Conv" [ref=e15] [cursor=pointer]:
+            - /url: "#conv"
+        - listitem [ref=e16]:
+          - link "System" [ref=e17] [cursor=pointer]:
+            - /url: "#system"
+        - listitem [ref=e18]:
+          - link "Status" [ref=e19] [cursor=pointer]:
+            - /url: "#status"
+        - listitem [ref=e20]:
+          - link "Info" [ref=e21] [cursor=pointer]:
+            - /url: "#info"
+        - listitem [ref=e22]:
+          - link "Card" [ref=e23] [cursor=pointer]:
+            - /url: "#card"
+      - table [ref=e26]:
+        - rowgroup [ref=e27]:
+          - row "Name APlayer Play silence (ms) 0 16bit output 24bit output" [ref=e28]:
+            - cell "Name APlayer Play silence (ms) 0 16bit output 24bit output" [ref=e29]:
+              - text: Name
+              - textbox [ref=e30]: APlayer
+              - text: Play silence (ms)
+              - textbox [ref=e31]: "0"
+              - generic [ref=e32]:
+                - checkbox [ref=e33]
+                - text: 16bit output
+              - generic [ref=e34]:
+                - checkbox [ref=e35]
+                - text: 24bit output
+          - row "Playback mode Preload buffer (frames) Standard 100000 (16384-8388608) Direct Input Gapless mode Full Memory Full preloading" [ref=e36]:
+            - cell "Playback mode Preload buffer (frames) Standard 100000 (16384-8388608) Direct Input Gapless mode Full Memory Full preloading" [ref=e37]:
+              - table [ref=e38]:
+                - rowgroup [ref=e39]:
+                  - row "Playback mode Preload buffer (frames)" [ref=e40]:
+                    - cell "Playback mode" [ref=e41]
+                    - cell [ref=e42]
+                    - cell "Preload buffer (frames)" [ref=e43]
+                  - row "Standard 100000 (16384-8388608)" [ref=e44]:
+                    - cell [ref=e45]:
+                      - radio [checked] [ref=e46]
+                    - cell "Standard" [ref=e47]
+                    - cell [ref=e48]
+                    - cell "100000 (16384-8388608)" [ref=e49]:
+                      - textbox [ref=e50]: "100000"
+                      - text: (16384-8388608)
+                  - row "Direct Input Gapless mode" [ref=e51]:
+                    - cell [ref=e52]:
+                      - radio [ref=e53]
+                    - cell "Direct Input" [ref=e54]
+                    - cell [ref=e55]
+                    - cell "Gapless mode" [ref=e56]:
+                      - checkbox [checked] [ref=e57]
+                      - text: Gapless mode
+                  - row "Full Memory Full preloading" [ref=e58]:
+                    - cell [ref=e59]:
+                      - radio [ref=e60]
+                    - cell "Full Memory" [ref=e61]
+                    - cell [ref=e62]
+                    - cell "Full preloading" [ref=e63]:
+                      - checkbox [ref=e64]
+                      - text: Full preloading
+          - row "Volume control HW Master" [ref=e65]:
+            - cell "Volume control HW Master" [ref=e66]:
+              - checkbox "Volume control" [ref=e67]
+              - text: Volume control
+              - checkbox "HW" [ref=e68]
+              - text: HW
+              - combobox [ref=e69]:
+                - option "Master" [selected]
+                - option "Synth"
+                - option "Line"
+                - option "CD"
+                - option "Mic"
+                - option "External I/O Box"
+          - row "ALSA Period ALSA Buffer Buffer Access 128 frames 2048 frames MMAP mode -1 µs -1 µs RW mode" [ref=e70]:
+            - cell "ALSA Period ALSA Buffer Buffer Access 128 frames 2048 frames MMAP mode -1 µs -1 µs RW mode" [ref=e71]:
+              - table [ref=e72]:
+                - rowgroup [ref=e73]:
+                  - row "ALSA Period ALSA Buffer Buffer Access" [ref=e74]:
+                    - cell "ALSA Period" [ref=e75]
+                    - cell "ALSA Buffer" [ref=e76]
+                    - cell "Buffer Access" [ref=e77]
+                  - row "128 frames 2048 frames MMAP mode" [ref=e78]:
+                    - cell [ref=e79]
+                    - cell "128 frames" [ref=e80]:
+                      - textbox [ref=e81]: "128"
+                      - text: frames
+                    - cell [ref=e82]
+                    - cell [ref=e83]
+                    - cell "2048 frames" [ref=e84]:
+                      - textbox [ref=e85]: "2048"
+                      - text: frames
+                    - cell [ref=e86]
+                    - cell "MMAP mode" [ref=e87]:
+                      - radio [checked] [ref=e88]
+                      - text: MMAP mode
+                  - row "-1 µs -1 µs RW mode" [ref=e89]:
+                    - cell [ref=e90]
+                    - cell "-1 µs" [ref=e91]:
+                      - textbox [ref=e92]: "-1"
+                      - text: µs
+                    - cell [ref=e93]
+                    - cell [ref=e94]
+                    - cell "-1 µs" [ref=e95]:
+                      - textbox [ref=e96]: "-1"
+                      - text: µs
+                    - cell [ref=e97]
+                    - cell "RW mode" [ref=e98]:
+                      - radio [ref=e99]
+                      - text: RW mode
+          - row "Download tracks" [ref=e100]:
+            - cell "Download tracks" [ref=e101]:
+              - checkbox [ref=e102]
+              - text: Download tracks
+          - row [ref=e103]:
+            - cell [ref=e104]
+  - generic [ref=e105]:
+    - button "Apply" [ref=e106]
+    - button "Return" [ref=e107]
+    - button "Exit Renderer" [ref=e108]
