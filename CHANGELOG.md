@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.3.0] - 2026-04-12
+
+### Added
+- **FLAC passthrough**: eliminated local ffmpeg transcoding — raw audio bytes (FLAC/MP3/AAC) now pass directly from Yandex CDN to MA's ffmpeg, removing one entire ffmpeg process from the pipeline
+- **Pre-buffer system**: audio download starts immediately on Ynison track change (before the player HTTP GET arrives), hiding API and CDN latency from the critical playback path
+- `PreBuffer` dataclass with asyncio.Queue-based producer/consumer, automatic cancellation, and error fallback
+
+### Changed
+- PluginSource `audio_format` changed from `PCM_S16LE` to `FLAC` — MA now receives native audio format instead of pre-decoded PCM
+- `_stream_track` simplified: raw passthrough for normal playback, ffmpeg fallback only for seek operations
+- `get_audio_stream` now checks for matching prebuffer before streaming directly
+
+### Fixed
+- Reduced playback start delay by ~3-5 seconds (from ~15-20s to ~10-12s) on all player types; further improvement requires MA server-side change (`-re` → `-readrate_initial_burst`)
+
 ## [1.2.1] - 2026-04-11
 
 ### Added
