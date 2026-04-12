@@ -62,6 +62,9 @@ _PCM_LOSSY = AudioFormat(
     channels=2,
 )
 
+# How often (seconds) to sync progress to MA UI and Ynison.
+_PROGRESS_SYNC_INTERVAL = 5.0
+
 
 @dataclass
 class PreBuffer:
@@ -215,7 +218,7 @@ class YandexYnisonProvider(PluginProvider):
         """Get (audio)source details for this plugin."""
         return self._source_details
 
-    async def get_audio_stream(self, player_id: str) -> AsyncGenerator[bytes, None]:
+    async def get_audio_stream(self, player_id: str) -> AsyncGenerator[bytes, None]:  # noqa: PLR0915
         """Return continuous audio stream following Ynison track changes.
 
         Streams the current track, then waits for track changes and streams
@@ -258,6 +261,7 @@ class YandexYnisonProvider(PluginProvider):
             seek_ms = self._seek_position_ms
             self._seek_position_ms = 0
             bytes_yielded = 0
+            last_progress_sync = time.monotonic()
 
             if (
                 self._prebuffer
@@ -270,6 +274,10 @@ class YandexYnisonProvider(PluginProvider):
                 async for chunk in self._yield_from_prebuffer():
                     yield chunk
                     bytes_yielded += len(chunk)
+                    now_mono = time.monotonic()
+                    if now_mono - last_progress_sync >= _PROGRESS_SYNC_INTERVAL:
+                        last_progress_sync = now_mono
+                        await self._sync_progress(seek_ms, bytes_yielded, player_id)
                     if (
                         self._track_changed_event.is_set()
                         or self._stream_stop_event.is_set()
@@ -287,6 +295,10 @@ class YandexYnisonProvider(PluginProvider):
                 async for chunk in self._stream_track(track_id, seek_ms=seek_ms):
                     yield chunk
                     bytes_yielded += len(chunk)
+                    now_mono = time.monotonic()
+                    if now_mono - last_progress_sync >= _PROGRESS_SYNC_INTERVAL:
+                        last_progress_sync = now_mono
+                        await self._sync_progress(seek_ms, bytes_yielded, player_id)
                     if (
                         self._track_changed_event.is_set()
                         or self._stream_stop_event.is_set()
@@ -591,7 +603,9 @@ class YandexYnisonProvider(PluginProvider):
         best_duration = self._best_duration_ms()
         if best_duration:
             meta.duration = best_duration // 1000
-        if state.progress_ms is not None:
+        # Only update elapsed from Ynison when NOT actively streaming —
+        # during streaming, _sync_progress provides byte-accurate progress.
+        if state.progress_ms is not None and not self._source_details.in_use_by:
             meta.elapsed_time = state.progress_ms // 1000
             meta.elapsed_time_last_updated = time.time()
 
@@ -638,6 +652,34 @@ class YandexYnisonProvider(PluginProvider):
         if self._source_details.in_use_by:
             self.mass.players.trigger_player_update(
                 self._source_details.in_use_by, force_update=True
+            )
+
+    def _bytes_to_ms(self, byte_count: int) -> int:
+        """Convert PCM byte count to milliseconds using the normalized format."""
+        fmt = self._normalized_format
+        byte_rate = fmt.sample_rate * fmt.channels * (fmt.bit_depth // 8)
+        if byte_rate == 0:
+            return 0
+        return (byte_count * 1000) // byte_rate
+
+    async def _sync_progress(
+        self, seek_ms: int, bytes_yielded: int, player_id: str | None
+    ) -> None:
+        """Push real playback progress to MA metadata and Ynison."""
+        elapsed_ms = seek_ms + self._bytes_to_ms(bytes_yielded)
+        # Update MA metadata
+        meta = self._source_details.metadata
+        if meta:
+            meta.elapsed_time = elapsed_ms // 1000
+            meta.elapsed_time_last_updated = time.time()
+        if player_id:
+            self.mass.players.trigger_player_update(player_id)
+        # Update Ynison so the Yandex app shows correct position
+        if self._ynison:
+            await self._ynison.update_playing_status(
+                progress_ms=elapsed_ms,
+                duration_ms=self._best_duration_ms(),
+                paused=False,
             )
 
     async def _pause_playback(self) -> None:
