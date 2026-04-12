@@ -17,3 +17,6 @@ site/
 .ma-data/
 docs-site/node_modules/
 docs-site/.astro/
+aprender-test/
+aprender-webui.png
+.playwright-mcp/

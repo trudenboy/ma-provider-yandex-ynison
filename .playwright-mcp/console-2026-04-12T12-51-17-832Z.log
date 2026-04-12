@@ -1,3 +1,0 @@
-[     270ms] [ERROR] Failed to load resource: the server responded with a status of 404 (Not found) @ http://192.168.10.136:7779/favicon.ico:0
-[ 1173693ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://192.168.10.136:7779/?GetConfig:0
-[ 1179660ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://192.168.10.136:7779/?GetConfig:0
