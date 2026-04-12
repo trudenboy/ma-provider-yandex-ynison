@@ -662,9 +662,7 @@ class YandexYnisonProvider(PluginProvider):
             return 0
         return (byte_count * 1000) // byte_rate
 
-    async def _sync_progress(
-        self, seek_ms: int, bytes_yielded: int, player_id: str | None
-    ) -> None:
+    async def _sync_progress(self, seek_ms: int, bytes_yielded: int, player_id: str | None) -> None:
         """Push real playback progress to MA metadata and Ynison."""
         elapsed_ms = seek_ms + self._bytes_to_ms(bytes_yielded)
         # Update MA metadata
