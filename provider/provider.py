@@ -132,6 +132,7 @@ class YandexYnisonProvider(PluginProvider):
         self._seek_position_ms: int = 0
         self._last_progress_ms: int = 0
         self._last_progress_time: float = 0.0
+        self._seek_grace_until: float = 0.0
         self._last_player_update_time: float = 0.0
         self._actual_duration_ms: int = 0
         self._prebuffer: PreBuffer | None = None
@@ -256,6 +257,7 @@ class YandexYnisonProvider(PluginProvider):
             # Stream the current track — use prebuffer if available
             seek_ms = self._seek_position_ms
             self._seek_position_ms = 0
+            bytes_yielded = 0
 
             if (
                 self._prebuffer
@@ -267,6 +269,7 @@ class YandexYnisonProvider(PluginProvider):
                 self.logger.debug("Using prebuffer for track %s", track_id)
                 async for chunk in self._yield_from_prebuffer():
                     yield chunk
+                    bytes_yielded += len(chunk)
                     if (
                         self._track_changed_event.is_set()
                         or self._stream_stop_event.is_set()
@@ -283,12 +286,22 @@ class YandexYnisonProvider(PluginProvider):
                     )
                 async for chunk in self._stream_track(track_id, seek_ms=seek_ms):
                     yield chunk
+                    bytes_yielded += len(chunk)
                     if (
                         self._track_changed_event.is_set()
                         or self._stream_stop_event.is_set()
                         or self._source_details.in_use_by != player_id
                     ):
                         break
+
+            # Pad to PCM frame boundary — prevents frame misalignment in
+            # MA's single ffmpeg when a track stream is interrupted mid-chunk.
+            fmt = self._normalized_format
+            frame_size = (fmt.bit_depth // 8) * fmt.channels
+            remainder = bytes_yielded % frame_size
+            if remainder:
+                pad = frame_size - remainder
+                yield b"\x00" * pad
 
             # Don't clear _current_streaming_track_id yet — keep it set
             # during advance/wait so Ynison echo of the same track doesn't
@@ -519,6 +532,10 @@ class YandexYnisonProvider(PluginProvider):
             self._seek_position_ms = state.progress_ms
             self._track_changed_event.set()
             significant_change = True
+            # Grace period: ignore seek detection for a few seconds after
+            # track change — Ynison echoes can report stale progress that
+            # looks like a large drift.
+            self._seek_grace_until = time.monotonic() + 5.0
             # Start prebuffering immediately — before the player HTTP GET
             if self._yandex_provider:
                 self.mass.create_task(self._start_prebuffer(new_track, state.progress_ms))
@@ -526,20 +543,23 @@ class YandexYnisonProvider(PluginProvider):
             # Detect seek: compare reported progress with expected progress
             # Expected = last known progress + elapsed wall-clock time
             now = time.monotonic()
-            elapsed_ms = (now - self._last_progress_time) * 1000 if self._last_progress_time else 0
-            expected_ms = self._last_progress_ms + elapsed_ms
-            drift_ms = abs(state.progress_ms - expected_ms)
-            if drift_ms > 2000:
-                self.logger.info(
-                    "Seek detected on track %s: expected ~%dms, got %dms (drift %dms)",
-                    new_track,
-                    int(expected_ms),
-                    state.progress_ms,
-                    int(drift_ms),
-                )
-                self._seek_position_ms = state.progress_ms
-                self._track_changed_event.set()
-                significant_change = True
+            if now < self._seek_grace_until:
+                pass  # Skip seek detection during grace period after track change
+            elif self._last_progress_time:
+                elapsed_ms = (now - self._last_progress_time) * 1000
+                expected_ms = self._last_progress_ms + elapsed_ms
+                drift_ms = abs(state.progress_ms - expected_ms)
+                if drift_ms > 2000:
+                    self.logger.info(
+                        "Seek detected on track %s: expected ~%dms, got %dms (drift %dms)",
+                        new_track,
+                        int(expected_ms),
+                        state.progress_ms,
+                        int(drift_ms),
+                    )
+                    self._seek_position_ms = state.progress_ms
+                    self._track_changed_event.set()
+                    significant_change = True
         self._last_progress_ms = state.progress_ms
         self._last_progress_time = time.monotonic()
 
