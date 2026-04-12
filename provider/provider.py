@@ -873,7 +873,7 @@ class YandexYnisonProvider(PluginProvider):
                 "Playback ended on player %s, clearing active player",
                 prev_player_id,
             )
-            player = self.mass.players.get(prev_player_id)
+            player = self.mass.players.get_player(prev_player_id)
             still_ours = (
                 was_in_use and player is not None and player.active_source == self.instance_id
             )

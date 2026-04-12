@@ -245,7 +245,7 @@ class TestClearActivePlayer:
         # Mock player lookup so _clear_active_player can check active_source
         mock_player = MagicMock()
         mock_player.active_source = provider.instance_id
-        provider.mass.players.get.return_value = mock_player  # type: ignore[attr-defined]
+        provider.mass.players.get_player.return_value = mock_player  # type: ignore[attr-defined]
 
         provider._clear_active_player()
 
