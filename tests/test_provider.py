@@ -630,16 +630,18 @@ class TestYnisonStateHandling:
         mock_track.albums = [MagicMock(id="a3")]
         mock_track.cover_uri = "cover3.jpg"
 
-        mock_client = MagicMock()
-        mock_client.get_rotor_station_tracks = AsyncMock(return_value=([mock_track], "batch-123"))
         mock_ym_provider = MagicMock()
-        mock_ym_provider.client = mock_client
+        mock_ym_provider.get_rotor_station_tracks = AsyncMock(
+            return_value=([mock_track], "batch-123")
+        )
         provider._yandex_provider = mock_ym_provider
 
         await provider._signal_track_completion()
 
         # Fetched tracks from station
-        mock_client.get_rotor_station_tracks.assert_awaited_once_with("user:onyourwave", queue="t2")
+        mock_ym_provider.get_rotor_station_tracks.assert_awaited_once_with(
+            "user:onyourwave", queue="t2"
+        )
         # Advanced index to 2 with expanded playable_list
         call_args = mock_ynison.update_player_state.call_args
         sent_state = call_args.kwargs["player_state"]
@@ -713,10 +715,10 @@ class TestYnisonStateHandling:
         mock_track.albums = [MagicMock(id="a5")]
         mock_track.cover_uri = "cover5.jpg"
 
-        mock_client = MagicMock()
-        mock_client.get_rotor_station_tracks = AsyncMock(return_value=([mock_track], "batch-pfx"))
         mock_ym_provider = MagicMock()
-        mock_ym_provider.client = mock_client
+        mock_ym_provider.get_rotor_station_tracks = AsyncMock(
+            return_value=([mock_track], "batch-pfx")
+        )
         provider._yandex_provider = mock_ym_provider
 
         # Use real create_task so prefetch coroutine actually runs
@@ -772,16 +774,14 @@ class TestYnisonStateHandling:
         ]
         provider._prefetched_list = prefetched
 
-        mock_client = MagicMock()
-        mock_client.get_rotor_station_tracks = AsyncMock()
         mock_ym_provider = MagicMock()
-        mock_ym_provider.client = mock_client
+        mock_ym_provider.get_rotor_station_tracks = AsyncMock()
         provider._yandex_provider = mock_ym_provider
 
         await provider._signal_track_completion()
 
         # Should NOT have called API — used prefetched
-        mock_client.get_rotor_station_tracks.assert_not_awaited()
+        mock_ym_provider.get_rotor_station_tracks.assert_not_awaited()
         # Advanced with prefetched list
         call_args = mock_ynison.update_player_state.call_args
         sent_state = call_args.kwargs["player_state"]
@@ -988,7 +988,7 @@ class TestPCMNormalization:
         mock_yandex = MagicMock()
         mock_yandex.domain = "yandex_music"
         mock_yandex.type = ProviderType.MUSIC
-        mock_yandex.config.get_value.side_effect = lambda k: "superb" if k == "quality" else None
+        mock_yandex.get_quality = MagicMock(return_value="superb")
         provider._yandex_provider = mock_yandex
         provider._update_normalized_format()
 
@@ -1004,7 +1004,7 @@ class TestPCMNormalization:
         mock_yandex = MagicMock()
         mock_yandex.domain = "yandex_music"
         mock_yandex.type = ProviderType.MUSIC
-        mock_yandex.config.get_value.side_effect = lambda k: "balanced" if k == "quality" else None
+        mock_yandex.get_quality = MagicMock(return_value="balanced")
         provider._yandex_provider = mock_yandex
         provider._update_normalized_format()
 
@@ -1957,9 +1957,7 @@ class TestGetStreamDetailsWithRetry:
         mock_yp = MagicMock()
         sd = MagicMock()
         sd.to_dict.return_value = {"track_id": "t1"}
-        mock_yp.get_stream_details = AsyncMock(
-            side_effect=[RuntimeError("transient"), sd]
-        )
+        mock_yp.get_stream_details = AsyncMock(side_effect=[RuntimeError("transient"), sd])
         provider._yandex_provider = mock_yp
 
         with patch("provider.provider.asyncio.sleep", new_callable=AsyncMock):
@@ -1971,13 +1969,13 @@ class TestGetStreamDetailsWithRetry:
         """Raises RuntimeError after all retries exhausted."""
         provider = _make_provider()
         mock_yp = MagicMock()
-        mock_yp.get_stream_details = AsyncMock(
-            side_effect=RuntimeError("always fails")
-        )
+        mock_yp.get_stream_details = AsyncMock(side_effect=RuntimeError("always fails"))
         provider._yandex_provider = mock_yp
 
-        with patch("provider.provider.asyncio.sleep", new_callable=AsyncMock), \
-             pytest.raises(RuntimeError, match="failed after"):
+        with (
+            patch("provider.provider.asyncio.sleep", new_callable=AsyncMock),
+            pytest.raises(RuntimeError, match="failed after"),
+        ):
             await provider._get_stream_details_with_retry("t1")
         assert mock_yp.get_stream_details.await_count == _API_MAX_RETRIES
 
@@ -1985,9 +1983,7 @@ class TestGetStreamDetailsWithRetry:
         """CancelledError propagates immediately, no retry."""
         provider = _make_provider()
         mock_yp = MagicMock()
-        mock_yp.get_stream_details = AsyncMock(
-            side_effect=asyncio.CancelledError()
-        )
+        mock_yp.get_stream_details = AsyncMock(side_effect=asyncio.CancelledError())
         provider._yandex_provider = mock_yp
 
         with pytest.raises(asyncio.CancelledError):

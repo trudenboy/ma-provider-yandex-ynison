@@ -83,6 +83,7 @@ _API_MAX_BACKOFF = 30.0
 # Cache TTL for stream details (seconds)
 _STREAM_DETAILS_CACHE_TTL = 300  # 5 minutes
 
+
 class YandexYnisonProvider(PluginProvider):
     """Implementation of the Yandex Music Connect (Ynison) Plugin."""
 
@@ -600,9 +601,7 @@ class YandexYnisonProvider(PluginProvider):
         for attempt in range(_API_MAX_RETRIES):
             async with self._api_throttler.acquire() as delay:
                 if delay > 0:
-                    self.logger.debug(
-                        "get_stream_details throttled %.1fs", delay
-                    )
+                    self.logger.debug("get_stream_details throttled %.1fs", delay)
             try:
                 sd = await self._yandex_provider.get_stream_details(  # type: ignore[union-attr]
                     track_id, media_type
@@ -1292,7 +1291,7 @@ class YandexYnisonProvider(PluginProvider):
         # Start with auto-detected base from YM quality
         quality = ""
         if self._yandex_provider:
-            quality = str(self._yandex_provider.config.get_value("quality") or "").strip().lower()
+            quality = self._yandex_provider.get_quality()
         is_lossless = quality in ("superb", "lossless")
         base = _PCM_LOSSLESS_PARAMS if is_lossless else _PCM_LOSSY_PARAMS
 
@@ -1536,8 +1535,9 @@ class YandexYnisonProvider(PluginProvider):
         )
 
         try:
-            client = self._yandex_provider.client
-            tracks, batch_id = await client.get_rotor_station_tracks(entity_id, queue=last_track_id)
+            tracks, batch_id = await self._yandex_provider.get_rotor_station_tracks(
+                entity_id, queue=last_track_id
+            )
         except Exception:
             self.logger.exception("Failed to fetch radio tracks for %s", entity_id)
             return None

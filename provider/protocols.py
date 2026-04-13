@@ -28,12 +28,12 @@ class YandexMusicProviderLike(Protocol):
         """Return async generator of raw audio bytes."""
         ...
 
-    @property
-    def config(self) -> Any:
-        """Provider configuration."""
+    async def get_rotor_station_tracks(
+        self, station_id: str, queue: str | int | None = None
+    ) -> tuple[list[Any], str | None]:
+        """Fetch tracks from a rotor station for radio queue replenishment."""
         ...
 
-    @property
-    def client(self) -> Any:
-        """Underlying API client."""
+    def get_quality(self) -> str:
+        """Return the configured audio quality tier (e.g. 'balanced', 'superb')."""
         ...
