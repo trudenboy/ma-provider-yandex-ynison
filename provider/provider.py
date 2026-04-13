@@ -19,7 +19,7 @@ from music_assistant_models.enums import (
     StreamType,
 )
 from music_assistant_models.errors import LoginFailed, UnsupportedFeaturedException
-from music_assistant_models.streamdetails import StreamMetadata
+from music_assistant_models.streamdetails import StreamDetails, StreamMetadata
 from ya_passport_auth import SecretStr
 
 from music_assistant.helpers.audio import align_audio_to_frame_boundary
@@ -64,7 +64,6 @@ if TYPE_CHECKING:
     from music_assistant_models.event import MassEvent
     from music_assistant_models.media_items import AudioFormat
     from music_assistant_models.provider import ProviderManifest
-    from music_assistant_models.streamdetails import StreamDetails
 
     from music_assistant.mass import MusicAssistant
 
@@ -80,6 +79,9 @@ _PROGRESS_SYNC_INTERVAL = 5.0
 _API_MAX_RETRIES = 3
 _API_INITIAL_BACKOFF = 2.0
 _API_MAX_BACKOFF = 30.0
+
+# Cache TTL for stream details (seconds)
+_STREAM_DETAILS_CACHE_TTL = 300  # 5 minutes
 
 class YandexYnisonProvider(PluginProvider):
     """Implementation of the Yandex Music Connect (Ynison) Plugin."""
@@ -582,7 +584,17 @@ class YandexYnisonProvider(PluginProvider):
         track_id: str,
         media_type: MediaType = MediaType.TRACK,
     ) -> StreamDetails:
-        """Fetch stream details with throttling and retry on transient failures."""
+        """Fetch stream details with caching, throttling, and retry."""
+        cache_key = f"ynison_sd_{track_id}"
+        cached = await self.mass.cache.get(
+            cache_key,
+            provider=self.instance_id,
+            base_class=StreamDetails,
+        )
+        if cached is not None:
+            self.logger.debug("Stream details cache hit for %s", track_id)
+            return cached
+
         backoff = _API_INITIAL_BACKOFF
         last_err: Exception | None = None
         for attempt in range(_API_MAX_RETRIES):
@@ -592,9 +604,16 @@ class YandexYnisonProvider(PluginProvider):
                         "get_stream_details throttled %.1fs", delay
                     )
             try:
-                return await self._yandex_provider.get_stream_details(  # type: ignore[union-attr]
+                sd = await self._yandex_provider.get_stream_details(  # type: ignore[union-attr]
                     track_id, media_type
                 )
+                await self.mass.cache.set(
+                    cache_key,
+                    sd.to_dict(),
+                    expiration=_STREAM_DETAILS_CACHE_TTL,
+                    provider=self.instance_id,
+                )
+                return sd
             except asyncio.CancelledError:
                 raise
             except Exception as err:

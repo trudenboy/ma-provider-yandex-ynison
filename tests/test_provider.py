@@ -77,6 +77,10 @@ def _make_mock_mass() -> MagicMock:
     mass.get_providers = MagicMock(return_value=[])
     mass.config.set_raw_provider_config_value = MagicMock()
 
+    # Cache — return None (miss) by default
+    mass.cache.get = AsyncMock(return_value=None)
+    mass.cache.set = AsyncMock()
+
     # Players
     mass.players.all_players = MagicMock(return_value=[])
     mass.players.get_player = MagicMock(return_value=None)
@@ -1920,22 +1924,39 @@ class TestGetStreamDetailsWithRetry:
     """Tests for _get_stream_details_with_retry."""
 
     async def test_success_first_attempt(self) -> None:
-        """Returns stream details on first try."""
+        """Returns stream details on first try and caches result."""
         provider = _make_provider()
         mock_yp = MagicMock()
         sd = MagicMock()
+        sd.to_dict.return_value = {"track_id": "t1"}
         mock_yp.get_stream_details = AsyncMock(return_value=sd)
         provider._yandex_provider = mock_yp
 
         result = await provider._get_stream_details_with_retry("t1")
         assert result is sd
         mock_yp.get_stream_details.assert_awaited_once()
+        # Verify cache.set was called
+        provider.mass.cache.set.assert_awaited_once()
+
+    async def test_cache_hit_skips_api(self) -> None:
+        """Returns cached stream details without API call."""
+        provider = _make_provider()
+        cached_sd = MagicMock()
+        provider.mass.cache.get = AsyncMock(return_value=cached_sd)
+        mock_yp = MagicMock()
+        mock_yp.get_stream_details = AsyncMock()
+        provider._yandex_provider = mock_yp
+
+        result = await provider._get_stream_details_with_retry("t1")
+        assert result is cached_sd
+        mock_yp.get_stream_details.assert_not_awaited()
 
     async def test_retries_on_failure(self) -> None:
         """Retries on transient error, succeeds on second attempt."""
         provider = _make_provider()
         mock_yp = MagicMock()
         sd = MagicMock()
+        sd.to_dict.return_value = {"track_id": "t1"}
         mock_yp.get_stream_details = AsyncMock(
             side_effect=[RuntimeError("transient"), sd]
         )
