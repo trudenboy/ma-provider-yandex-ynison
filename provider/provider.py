@@ -169,7 +169,8 @@ class PreBuffer:
                 self.queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
-        # Ensure any blocked consumer sees EOF
+        # Ensure any blocked consumer sees EOF — use blocking put with
+        # timeout so delivery is atomic (no gap between discard and put).
         with suppress(asyncio.QueueFull):
             self.queue.put_nowait(None)
 
@@ -674,12 +675,15 @@ class YandexYnisonProvider(PluginProvider):
                     prebuffer.chunks_queued,
                     prebuffer.error,
                 )
-                # Guarantee EOF sentinel delivery — if the queue is full
-                # (consumer hasn't drained yet), discard one chunk to make room.
-                if prebuffer.queue.full():
+                # Atomic EOF sentinel delivery — use blocking put with timeout
+                # to avoid the race between get_nowait(discard) and put_nowait(None).
+                try:
+                    await asyncio.wait_for(prebuffer.queue.put(None), timeout=5.0)
+                except (TimeoutError, asyncio.CancelledError):
                     with suppress(asyncio.QueueEmpty):
                         prebuffer.queue.get_nowait()
-                prebuffer.queue.put_nowait(None)  # EOF sentinel
+                    with suppress(asyncio.QueueFull):
+                        prebuffer.queue.put_nowait(None)
 
         prebuffer.task = self.mass.create_task(_fill())
 
@@ -734,10 +738,13 @@ class YandexYnisonProvider(PluginProvider):
                     prebuffer.chunks_queued,
                     prebuffer.error,
                 )
-                if prebuffer.queue.full():
+                try:
+                    await asyncio.wait_for(prebuffer.queue.put(None), timeout=5.0)
+                except (TimeoutError, asyncio.CancelledError):
                     with suppress(asyncio.QueueEmpty):
                         prebuffer.queue.get_nowait()
-                prebuffer.queue.put_nowait(None)
+                    with suppress(asyncio.QueueFull):
+                        prebuffer.queue.put_nowait(None)
 
         prebuffer.task = self.mass.create_task(_fill())
 
