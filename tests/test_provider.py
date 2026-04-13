@@ -36,10 +36,10 @@ from provider.crossfade import crossfade_bytes_for
 from provider.prebuffer import PreBuffer
 from provider.provider import (
     _API_MAX_RETRIES,
-    _PCM_LOSSLESS_PARAMS,
-    _PCM_LOSSY_PARAMS,
+    PCM_LOSSLESS_PARAMS,
+    PCM_LOSSY_PARAMS,
     YandexYnisonProvider,
-    _make_pcm_format,
+    make_pcm_format,
 )
 from provider.ynison_client import YnisonState
 
@@ -1314,7 +1314,7 @@ class TestPreBuffer:
 
     async def test_prebuffer_put_timeout_on_stalled_consumer(self) -> None:
         """Fill aborts with error after queue.put timeout on stalled consumer."""
-        fmt = _make_pcm_format(_PCM_LOSSY_PARAMS)
+        fmt = make_pcm_format(PCM_LOSSY_PARAMS)
         prebuffer = PreBuffer(
             track_id="stall:1",
             seek_ms=0,
@@ -1482,7 +1482,7 @@ class TestPCMFrameAlignment:
     async def test_frame_alignment_padding_s24le(self) -> None:
         """Verify padding math for s24le stereo (frame_size=6)."""
         provider = _make_provider()
-        provider._normalized_format = _make_pcm_format(_PCM_LOSSLESS_PARAMS)
+        provider._normalized_format = make_pcm_format(PCM_LOSSLESS_PARAMS)
         fmt = provider._normalized_format
         frame_size = (fmt.bit_depth // 8) * fmt.channels
         assert frame_size == 6  # 3 bytes x 2 channels
@@ -1497,7 +1497,7 @@ class TestPCMFrameAlignment:
     async def test_frame_alignment_padding_s16le(self) -> None:
         """Verify padding math for s16le stereo (frame_size=4)."""
         provider = _make_provider()
-        provider._normalized_format = _make_pcm_format(_PCM_LOSSY_PARAMS)
+        provider._normalized_format = make_pcm_format(PCM_LOSSY_PARAMS)
         fmt = provider._normalized_format
         frame_size = (fmt.bit_depth // 8) * fmt.channels
         assert frame_size == 4  # 2 bytes x 2 channels
@@ -1511,7 +1511,7 @@ class TestPCMFrameAlignment:
 
     async def test_no_padding_when_aligned(self) -> None:
         """No padding needed when bytes_yielded is already frame-aligned."""
-        fmt = _make_pcm_format(_PCM_LOSSLESS_PARAMS)
+        fmt = make_pcm_format(PCM_LOSSLESS_PARAMS)
         frame_size = (fmt.bit_depth // 8) * fmt.channels
         # 6000 bytes = 1000 frames of s24le stereo
         assert 6000 % frame_size == 0
@@ -1905,7 +1905,7 @@ class TestBytesToMs:
     def test_24bit(self) -> None:
         """24-bit stereo 48000Hz: 288000 bytes = 1000ms."""
         provider = _make_provider()
-        provider._normalized_format = _make_pcm_format(_PCM_LOSSLESS_PARAMS)
+        provider._normalized_format = make_pcm_format(PCM_LOSSLESS_PARAMS)
         assert provider._bytes_to_ms(288000) == 1000
 
     def test_zero(self) -> None:

@@ -196,6 +196,15 @@ class YnisonClient:
     # Send methods
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _message_meta() -> dict[str, Any]:
+        """Return common envelope fields for state-mutating messages."""
+        return {
+            "rid": str(uuid.uuid4()),
+            "player_action_timestamp_ms": 0,
+            "activity_interception_type": "DO_NOT_INTERCEPT_BY_DEFAULT",
+        }
+
     async def update_playing_status(self, progress_ms: int, duration_ms: int, paused: bool) -> None:
         """Send playback status update to Ynison."""
         self._logger.debug(
@@ -238,9 +247,7 @@ class YnisonClient:
             "sync_state_from_eov": {
                 "actual_queue_id": actual_queue_id,
             },
-            "rid": str(uuid.uuid4()),
-            "player_action_timestamp_ms": 0,
-            "activity_interception_type": "DO_NOT_INTERCEPT_BY_DEFAULT",
+            **self._message_meta(),
         }
         self._logger.info("→ sync_state_from_eov: queue_id=%r", actual_queue_id)
         await self._send(msg)
@@ -262,9 +269,7 @@ class YnisonClient:
             "update_player_state": {
                 "player_state": player_state,
             },
-            "rid": str(uuid.uuid4()),
-            "player_action_timestamp_ms": 0,
-            "activity_interception_type": "DO_NOT_INTERCEPT_BY_DEFAULT",
+            **self._message_meta(),
         }
         self._logger.debug("Sending player state: %s", json.dumps(msg)[:500])
         await self._send(msg)
@@ -281,9 +286,7 @@ class YnisonClient:
                 "device": self._build_device_dict(),
                 "is_currently_active": False,
             },
-            "rid": str(uuid.uuid4()),
-            "player_action_timestamp_ms": 0,
-            "activity_interception_type": "DO_NOT_INTERCEPT_BY_DEFAULT",
+            **self._message_meta(),
         }
         self._logger.debug("Sending full state: %s", json.dumps(msg)[:500])
         await self._send(msg)

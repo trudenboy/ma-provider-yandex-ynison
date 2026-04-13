@@ -67,11 +67,6 @@ if TYPE_CHECKING:
 
     from music_assistant.mass import MusicAssistant
 
-# Backward-compatible aliases (referenced in tests and internally)
-_PCM_LOSSLESS_PARAMS = PCM_LOSSLESS_PARAMS
-_PCM_LOSSY_PARAMS = PCM_LOSSY_PARAMS
-_make_pcm_format = make_pcm_format
-
 # How often (seconds) to sync progress to MA UI and Ynison.
 _PROGRESS_SYNC_INTERVAL = 5.0
 
@@ -154,8 +149,8 @@ class YandexYnisonProvider(PluginProvider):
         self._crossfade_remainder: bytes = b""
         self._prefetched_list: list[dict[str, Any]] | None = None
         self._prefetch_task: asyncio.Task[Any] | None = None
-        self._normalized_params: dict[str, Any] = _PCM_LOSSY_PARAMS
-        self._normalized_format: AudioFormat = _make_pcm_format(_PCM_LOSSY_PARAMS)
+        self._normalized_params: dict[str, Any] = PCM_LOSSY_PARAMS
+        self._normalized_format: AudioFormat = make_pcm_format(PCM_LOSSY_PARAMS)
 
         # Rate limiter for Yandex API calls (max 2 req/s)
         self._api_throttler = ThrottlerManager(rate_limit=2, period=1.0)
@@ -449,7 +444,7 @@ class YandexYnisonProvider(PluginProvider):
                         bytes_yielded += len(tail_data)
             else:
                 # Prebuffer miss — stream directly (fallback)
-                track_fmt = _make_pcm_format(self._normalized_params)
+                track_fmt = make_pcm_format(self._normalized_params)
                 if self._prebuffer and self._prebuffer.track_id != track_id:
                     self.logger.debug(
                         "Prebuffer miss: have %s, need %s",
@@ -560,7 +555,7 @@ class YandexYnisonProvider(PluginProvider):
             extra_input_args += ["-ss", f"{seek_ms / 1000.0:.3f}"]
 
         # Fresh format copy so inner ffmpeg's mutation doesn't affect shared state
-        out_fmt = _make_pcm_format(self._normalized_params)
+        out_fmt = make_pcm_format(self._normalized_params)
         self.logger.info(
             "Streaming track %s → %s: input=%s seek=%dms",
             track_id,
@@ -736,7 +731,7 @@ class YandexYnisonProvider(PluginProvider):
         if self._prebuffer:
             await self._prebuffer.cancel()
 
-        fmt = _make_pcm_format(self._normalized_params)
+        fmt = make_pcm_format(self._normalized_params)
         prebuffer = make_prebuffer(track_id=track_id, seek_ms=seek_ms, output_format=fmt)
         self._prebuffer = prebuffer
 
@@ -771,7 +766,7 @@ class YandexYnisonProvider(PluginProvider):
         if self._yandex_provider is None:
             raise RuntimeError("Yandex Music provider not available")
 
-        fmt = _make_pcm_format(self._normalized_params)
+        fmt = make_pcm_format(self._normalized_params)
         prebuffer = make_prebuffer(track_id=track_id, seek_ms=0, output_format=fmt)
         self._next_prebuffer = prebuffer
 
@@ -1293,7 +1288,7 @@ class YandexYnisonProvider(PluginProvider):
         if self._yandex_provider:
             quality = self._yandex_provider.get_quality()
         is_lossless = quality in ("superb", "lossless")
-        base = _PCM_LOSSLESS_PARAMS if is_lossless else _PCM_LOSSY_PARAMS
+        base = PCM_LOSSLESS_PARAMS if is_lossless else PCM_LOSSY_PARAMS
 
         # Apply config overrides
         sample_rate = base["sample_rate"]
@@ -1311,8 +1306,8 @@ class YandexYnisonProvider(PluginProvider):
             "channels": 2,
         }
         # Fresh copy for each caller so no shared mutable state
-        self._normalized_format = _make_pcm_format(self._normalized_params)
-        self._source_details.audio_format = _make_pcm_format(self._normalized_params)
+        self._normalized_format = make_pcm_format(self._normalized_params)
+        self._source_details.audio_format = make_pcm_format(self._normalized_params)
         self.logger.debug(
             "Normalization format: %s/%dHz/%dbit",
             self._normalized_format.content_type.value,

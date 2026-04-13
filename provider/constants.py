@@ -50,4 +50,3 @@ MAX_RECONNECT_ATTEMPTS: Final[int] = 5
 
 # WebSocket timeouts
 WS_CONNECT_TIMEOUT: Final[float] = 15.0
-WS_RECEIVE_TIMEOUT: Final[float] = 60.0
