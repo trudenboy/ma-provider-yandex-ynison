@@ -39,6 +39,7 @@ from .constants import (
     PLAYER_ID_AUTO,
 )
 from .prebuffer import PreBuffer, make_prebuffer, run_fill, yield_from_prebuffer
+from .protocols import YandexMusicProviderLike
 from .streaming import (
     PCM_LOSSLESS_PARAMS,
     PCM_LOSSY_PARAMS,
@@ -121,7 +122,7 @@ class YandexYnisonProvider(PluginProvider):
         self._ynison: YnisonClient | None = None
         self._runner_task: asyncio.Task[None] | None = None
         self._on_unload_callbacks: list[Callable[..., None]] = []
-        self._yandex_provider: Any = None
+        self._yandex_provider: YandexMusicProviderLike | None = None
         self._current_streaming_track_id: str | None = None
         self._track_changed_event = asyncio.Event()
         self._stream_stop_event = asyncio.Event()
@@ -1176,6 +1177,10 @@ class YandexYnisonProvider(PluginProvider):
             paused=True,
         )
 
+    # Entity types that use server-side "radio" queue replenishment.
+    # Currently only RADIO (personal wave, genre stations).
+    # Add "WAVE" here if/when Yandex supports it via the same
+    # rotor_station_tracks API.
     _RADIO_ENTITY_TYPES = {"RADIO"}
 
     def _maybe_prefetch(
@@ -1437,19 +1442,11 @@ class YandexYnisonProvider(PluginProvider):
         """Handle previous track command — update queue index in Ynison."""
         if not self._ynison:
             raise UnsupportedFeaturedException("Not connected to Ynison")
-        state = self._ynison.state
-        queue = state.player_state.get("player_queue", {})
+        queue = self._ynison.state.player_state.get("player_queue", {})
         current_index = queue.get("current_playable_index", 0)
         if current_index > 0:
-            new_state = dict(state.player_state)
-            new_state["player_queue"] = dict(queue)
-            new_state["player_queue"]["current_playable_index"] = current_index - 1
-            new_state["status"] = dict(new_state.get("status", {}))
-            new_state["status"]["progress_ms"] = 0
-            new_state["status"]["duration_ms"] = 0
-            new_state["status"]["paused"] = False
             self._actual_duration_ms = 0
-            await self._ynison.update_player_state(player_state=new_state)
+            await self._advance_queue_index(current_index - 1)
 
     async def _on_seek(self, position: int) -> None:
         """Handle seek command — send position update to Ynison.
