@@ -266,8 +266,8 @@ class TestApplyCrossfade:
         mock_strip = AsyncMock(return_value=b"stripped")
         mock_align = MagicMock(return_value=b"aligned")
 
-        async def _mock_apply(_self: Any, fo: bytes, _fi: Any, _pf: Any) -> Any:
-            assert fo == b"aligned", "fade_out should be aligned"
+        async def _mock_apply(_self: Any, fade_out: bytes, _fi: Any, _pf: Any) -> Any:
+            assert fade_out == b"aligned", "fade_out should be aligned"
             yield b"out"
 
         with (
