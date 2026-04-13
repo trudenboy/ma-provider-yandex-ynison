@@ -28,10 +28,10 @@ from provider.constants import (
     DEFAULT_DISPLAY_NAME,
     PLAYER_ID_AUTO,
 )
+from provider.prebuffer import PreBuffer
 from provider.provider import (
     _PCM_LOSSLESS_PARAMS,
     _PCM_LOSSY_PARAMS,
-    PreBuffer,
     YandexYnisonProvider,
     _make_pcm_format,
 )
@@ -1093,7 +1093,7 @@ class TestPreBuffer:
         provider.mass.create_task = lambda coro: asyncio.get_event_loop().create_task(coro)  # type: ignore[method-assign, assignment, misc]
 
         with patch(
-            "provider.provider.get_ffmpeg_stream",
+            "provider.prebuffer.get_ffmpeg_stream",
             side_effect=_fake_ffmpeg,
         ):
             await provider._start_prebuffer("track:1")
@@ -1142,7 +1142,7 @@ class TestPreBuffer:
         provider.mass.create_task = lambda coro: asyncio.get_event_loop().create_task(coro)  # type: ignore[method-assign, assignment, misc]
 
         with patch(
-            "provider.provider.get_ffmpeg_stream",
+            "provider.prebuffer.get_ffmpeg_stream",
             side_effect=_slow_ffmpeg,
         ):
             await provider._start_prebuffer("track:1")
@@ -1203,7 +1203,7 @@ class TestPreBuffer:
         provider.mass.create_task = lambda coro: asyncio.get_event_loop().create_task(coro)  # type: ignore[method-assign, assignment, misc]
 
         with patch(
-            "provider.provider.get_ffmpeg_stream",
+            "provider.prebuffer.get_ffmpeg_stream",
             side_effect=_fake_ffmpeg,
         ):
             await provider._start_prebuffer("track:1")
@@ -1245,7 +1245,7 @@ class TestPreBuffer:
         provider.mass.create_task = lambda coro: asyncio.get_event_loop().create_task(coro)  # type: ignore[method-assign, assignment, misc]
 
         with patch(
-            "provider.provider.get_ffmpeg_stream",
+            "provider.prebuffer.get_ffmpeg_stream",
             side_effect=_fake_ffmpeg,
         ):
             await provider._start_prebuffer("track:1")
@@ -1287,7 +1287,7 @@ class TestPreBuffer:
         provider.mass.create_task = lambda coro: asyncio.get_event_loop().create_task(coro)  # type: ignore[method-assign, assignment, misc]
 
         with patch(
-            "provider.provider.get_ffmpeg_stream",
+            "provider.prebuffer.get_ffmpeg_stream",
             side_effect=_fake_ffmpeg,
         ):
             await provider._start_prebuffer("track:full")

@@ -7,7 +7,6 @@ import struct
 import time
 from collections.abc import AsyncGenerator, Callable
 from contextlib import suppress
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
 from music_assistant_models.enums import (
@@ -41,6 +40,7 @@ from .constants import (
     OUTPUT_AUTO,
     PLAYER_ID_AUTO,
 )
+from .prebuffer import PreBuffer, make_prebuffer, run_fill, yield_from_prebuffer
 from .yandex_auth import refresh_music_token
 from .ynison_client import YnisonClient, YnisonDeviceInfo, YnisonState, generate_device_id
 
@@ -142,37 +142,6 @@ def _log_first_chunk(logger: Any, chunk: bytes, fmt: AudioFormat) -> None:
 
 # How often (seconds) to sync progress to MA UI and Ynison.
 _PROGRESS_SYNC_INTERVAL = 5.0
-
-
-@dataclass
-class PreBuffer:
-    """Holds pre-buffered audio data for an upcoming track."""
-
-    track_id: str
-    seek_ms: int
-    output_format: AudioFormat
-    queue: asyncio.Queue[bytes | None] = field(default_factory=lambda: asyncio.Queue(maxsize=64))
-    stream_details: StreamDetails | None = None
-    error: Exception | None = None
-    task: asyncio.Task[None] | None = None
-    chunks_queued: int = 0
-
-    async def cancel(self) -> None:
-        """Cancel the prebuffer task, drain the queue and unblock consumers."""
-        if self.task and not self.task.done():
-            self.task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self.task
-        # Drain leftover chunks so the queue isn't full
-        while True:
-            try:
-                self.queue.get_nowait()
-            except asyncio.QueueEmpty:
-                break
-        # Ensure any blocked consumer sees EOF — use blocking put with
-        # timeout so delivery is atomic (no gap between discard and put).
-        with suppress(asyncio.QueueFull):
-            self.queue.put_nowait(None)
 
 
 class YandexYnisonProvider(PluginProvider):
@@ -641,72 +610,26 @@ class YandexYnisonProvider(PluginProvider):
         if self._prebuffer:
             await self._prebuffer.cancel()
 
-        # Snapshot the current normalized format — fresh copy for inner ffmpeg
         fmt = _make_pcm_format(self._normalized_params)
-        prebuffer = PreBuffer(track_id=track_id, seek_ms=seek_ms, output_format=fmt)
+        prebuffer = make_prebuffer(track_id=track_id, seek_ms=seek_ms, output_format=fmt)
         self._prebuffer = prebuffer
 
-        async def _fill() -> None:
-            try:
-                sd = await self._yandex_provider.get_stream_details(track_id, MediaType.TRACK)
-                prebuffer.stream_details = sd
-                await self._update_metadata_from_stream(sd, seek_ms)
-
-                extra_input_args = ["-readrate", "1.1", "-readrate_initial_burst", "5"]
-                if seek_ms > 0:
-                    extra_input_args += ["-ss", f"{seek_ms / 1000.0:.3f}"]
-                async for chunk in get_ffmpeg_stream(
-                    audio_input=self._yandex_provider.get_audio_stream(sd),
-                    input_format=sd.audio_format,
-                    output_format=fmt,
-                    extra_input_args=extra_input_args,
-                ):
-                    prebuffer.chunks_queued += 1
-                    try:
-                        await asyncio.wait_for(
-                            prebuffer.queue.put(chunk), timeout=30.0
-                        )
-                    except TimeoutError:
-                        prebuffer.error = TimeoutError(
-                            "Queue put timeout — consumer stalled"
-                        )
-                        self.logger.warning(
-                            "Prebuffer queue full for 30s, aborting for %s",
-                            track_id,
-                        )
-                        return
-            except asyncio.CancelledError:
-                raise
-            except Exception as err:
-                prebuffer.error = err
-                self.logger.warning("Prebuffer failed for %s: %s", track_id, err)
-            finally:
-                self.logger.debug(
-                    "Prebuffer fill done for %s: %d chunks queued, error=%s",
-                    track_id,
-                    prebuffer.chunks_queued,
-                    prebuffer.error,
-                )
-                # Atomic EOF sentinel delivery — use blocking put with timeout
-                # to avoid the race between get_nowait(discard) and put_nowait(None).
-                try:
-                    await asyncio.wait_for(prebuffer.queue.put(None), timeout=5.0)
-                except (TimeoutError, asyncio.CancelledError):
-                    with suppress(asyncio.QueueEmpty):
-                        prebuffer.queue.get_nowait()
-                    with suppress(asyncio.QueueFull):
-                        prebuffer.queue.put_nowait(None)
-
-        prebuffer.task = self.mass.create_task(_fill())
+        prebuffer.task = self.mass.create_task(
+            run_fill(
+                prebuffer=prebuffer,
+                get_stream_details=self._yandex_provider.get_stream_details,
+                get_audio_stream=self._yandex_provider.get_audio_stream,
+                output_format=fmt,
+                logger=self.logger,
+                on_stream_details=self._update_metadata_from_stream,
+            )
+        )
 
     async def _yield_from_prebuffer(self) -> AsyncGenerator[bytes, None]:
         """Yield chunks from the active prebuffer queue until EOF sentinel."""
         prebuffer = self._prebuffer
         assert prebuffer is not None
-        while True:
-            chunk = await prebuffer.queue.get()
-            if chunk is None:
-                break
+        async for chunk in yield_from_prebuffer(prebuffer):
             yield chunk
 
     async def _start_next_prebuffer(self, track_id: str) -> None:
@@ -719,59 +642,22 @@ class YandexYnisonProvider(PluginProvider):
         if self._next_prebuffer:
             await self._next_prebuffer.cancel()
 
+        if self._yandex_provider is None:
+            raise RuntimeError("Yandex Music provider not available")
+
         fmt = _make_pcm_format(self._normalized_params)
-        prebuffer = PreBuffer(track_id=track_id, seek_ms=0, output_format=fmt)
+        prebuffer = make_prebuffer(track_id=track_id, seek_ms=0, output_format=fmt)
         self._next_prebuffer = prebuffer
 
-        async def _fill() -> None:
-            try:
-                if self._yandex_provider is None:
-                    raise RuntimeError("Yandex Music provider not available")
-                sd = await self._yandex_provider.get_stream_details(track_id, MediaType.TRACK)
-                prebuffer.stream_details = sd
-                # Don't update metadata yet — still playing current track
-                extra_input_args = ["-readrate", "1.1", "-readrate_initial_burst", "5"]
-                async for chunk in get_ffmpeg_stream(
-                    audio_input=self._yandex_provider.get_audio_stream(sd),
-                    input_format=sd.audio_format,
-                    output_format=fmt,
-                    extra_input_args=extra_input_args,
-                ):
-                    prebuffer.chunks_queued += 1
-                    try:
-                        await asyncio.wait_for(
-                            prebuffer.queue.put(chunk), timeout=30.0
-                        )
-                    except TimeoutError:
-                        prebuffer.error = TimeoutError(
-                            "Queue put timeout — consumer stalled"
-                        )
-                        self.logger.warning(
-                            "Next-prebuffer queue full for 30s, aborting for %s",
-                            track_id,
-                        )
-                        return
-            except asyncio.CancelledError:
-                raise
-            except Exception as err:
-                prebuffer.error = err
-                self.logger.warning("Next-track prebuffer failed for %s: %s", track_id, err)
-            finally:
-                self.logger.debug(
-                    "Next-prebuffer fill done for %s: %d chunks queued, error=%s",
-                    track_id,
-                    prebuffer.chunks_queued,
-                    prebuffer.error,
-                )
-                try:
-                    await asyncio.wait_for(prebuffer.queue.put(None), timeout=5.0)
-                except (TimeoutError, asyncio.CancelledError):
-                    with suppress(asyncio.QueueEmpty):
-                        prebuffer.queue.get_nowait()
-                    with suppress(asyncio.QueueFull):
-                        prebuffer.queue.put_nowait(None)
-
-        prebuffer.task = self.mass.create_task(_fill())
+        prebuffer.task = self.mass.create_task(
+            run_fill(
+                prebuffer=prebuffer,
+                get_stream_details=self._yandex_provider.get_stream_details,
+                get_audio_stream=self._yandex_provider.get_audio_stream,
+                output_format=fmt,
+                logger=self.logger,
+            )
+        )
 
     def _maybe_prebuffer_next(
         self,
