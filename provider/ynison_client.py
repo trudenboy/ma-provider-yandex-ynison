@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 import random
-import string
+import secrets
 import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
@@ -634,6 +634,5 @@ class YnisonClient:
 
 
 def generate_device_id() -> str:
-    """Generate a 16-character alphanumeric device ID for Ynison registration."""
-    chars = string.ascii_lowercase + string.digits
-    return "".join(random.choice(chars) for _ in range(16))
+    """Generate a 16-character hex device ID for Ynison registration."""
+    return secrets.token_hex(8)
