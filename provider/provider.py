@@ -39,6 +39,12 @@ from .constants import (
     OUTPUT_AUTO,
     PLAYER_ID_AUTO,
 )
+from .crossfade import (
+    TailBuffer,
+    apply_crossfade,
+    collect_crossfade_head,
+    crossfade_bytes_for,
+)
 from .prebuffer import PreBuffer, make_prebuffer, run_fill, yield_from_prebuffer
 from .protocols import YandexMusicProviderLike
 from .streaming import (
@@ -137,6 +143,7 @@ class YandexYnisonProvider(PluginProvider):
         self._actual_duration_ms: int = 0
         self._prebuffer: PreBuffer | None = None
         self._next_prebuffer: PreBuffer | None = None
+        self._crossfade_remainder: bytes = b""
         self._prefetched_list: list[dict[str, Any]] | None = None
         self._prefetch_task: asyncio.Task[Any] | None = None
         self._normalized_params: dict[str, Any] = _PCM_LOSSY_PARAMS
@@ -291,6 +298,13 @@ class YandexYnisonProvider(PluginProvider):
             self._streaming_progress_ms = seek_ms
             last_progress_sync = time.monotonic()
 
+            # Yield any leftover head bytes from previous crossfade
+            if self._crossfade_remainder:
+                remainder = self._crossfade_remainder
+                self._crossfade_remainder = b""
+                yield remainder
+                bytes_yielded += len(remainder)
+
             # Promote next-track prebuffer if it matches
             if (
                 self._next_prebuffer
@@ -374,13 +388,35 @@ class YandexYnisonProvider(PluginProvider):
                     self._prebuffer.output_format.sample_rate,
                     self._prebuffer.chunks_queued,
                 )
+
+                use_crossfade = (
+                    self._crossfade_duration_s > 0
+                    and self._prebuffer_next_enabled
+                )
+                tail_buf: TailBuffer | None = None
+                if use_crossfade:
+                    cf_bytes = crossfade_bytes_for(
+                        self._crossfade_duration_s, track_fmt
+                    )
+                    if cf_bytes > 0:
+                        tail_buf = TailBuffer(cf_bytes)
+
+                interrupted = False
                 chunk_idx = 0
                 async for chunk in self._yield_from_prebuffer():
                     if chunk_idx == 0:
                         log_first_chunk(self.logger, chunk, self._prebuffer.output_format)
                     chunk_idx += 1
-                    yield chunk
-                    bytes_yielded += len(chunk)
+
+                    if tail_buf is not None:
+                        overflow = tail_buf.push(chunk)
+                        if overflow:
+                            yield overflow
+                            bytes_yielded += len(overflow)
+                    else:
+                        yield chunk
+                        bytes_yielded += len(chunk)
+
                     now_mono = time.monotonic()
                     if now_mono - last_progress_sync >= _PROGRESS_SYNC_INTERVAL:
                         last_progress_sync = now_mono
@@ -390,7 +426,23 @@ class YandexYnisonProvider(PluginProvider):
                         or self._stream_stop_event.is_set()
                         or self._source_details.in_use_by != player_id
                     ):
+                        interrupted = True
                         break
+
+                # Crossfade: mix tail with head of next track
+                if tail_buf is not None and not interrupted:
+                    tail_data = tail_buf.flush()
+                    async for chunk in self._do_crossfade(
+                        tail_data, track_fmt
+                    ):
+                        yield chunk
+                        bytes_yielded += len(chunk)
+                elif tail_buf is not None:
+                    # Interrupted — flush tail as-is (no crossfade)
+                    tail_data = tail_buf.flush()
+                    if tail_data:
+                        yield tail_data
+                        bytes_yielded += len(tail_data)
             else:
                 # Prebuffer miss — stream directly (fallback)
                 track_fmt = _make_pcm_format(self._normalized_params)
@@ -525,6 +577,99 @@ class YandexYnisonProvider(PluginProvider):
                 log_first_chunk(self.logger, chunk, out_fmt)
             chunk_idx += 1
             yield chunk
+
+    # ------------------------------------------------------------------
+    # Crossfade
+    # ------------------------------------------------------------------
+
+    async def _do_crossfade(
+        self,
+        tail_data: bytes,
+        pcm_format: AudioFormat,
+    ) -> AsyncGenerator[bytes, None]:
+        """Attempt crossfade between tail of current track and head of next.
+
+        If next_prebuffer is available and healthy, collects crossfade-
+        duration worth of head bytes and mixes via MA's StandardCrossFade.
+        Falls back to yielding tail as-is on any failure.
+        """
+        if not tail_data:
+            return
+
+        next_pb = self._next_prebuffer
+        if not next_pb or next_pb.error:
+            self.logger.debug("Crossfade: no next prebuffer, yielding tail as-is")
+            yield tail_data
+            return
+
+        # Verify format compatibility
+        nf = next_pb.output_format
+        if (
+            nf.content_type != pcm_format.content_type
+            or nf.sample_rate != pcm_format.sample_rate
+            or nf.bit_depth != pcm_format.bit_depth
+        ):
+            self.logger.debug(
+                "Crossfade: format mismatch (%s vs %s), yielding tail as-is",
+                pcm_format.content_type.value,
+                nf.content_type.value,
+            )
+            yield tail_data
+            return
+
+        target_bytes = crossfade_bytes_for(self._crossfade_duration_s, pcm_format)
+        self.logger.debug(
+            "Crossfade: collecting %d head bytes from next prebuffer %s",
+            target_bytes,
+            next_pb.track_id,
+        )
+
+        try:
+            head_data, _eof = await collect_crossfade_head(
+                next_pb, target_bytes=target_bytes
+            )
+        except Exception:
+            self.logger.warning("Crossfade: head collection failed", exc_info=True)
+            yield tail_data
+            return
+
+        if len(head_data) == 0:
+            self.logger.debug("Crossfade: no head data available, yielding tail as-is")
+            yield tail_data
+            return
+
+        self.logger.info(
+            "Crossfade: mixing %d tail + %d head bytes (%.1fs)",
+            len(tail_data),
+            len(head_data),
+            self._crossfade_duration_s,
+        )
+
+        try:
+            async for chunk in apply_crossfade(
+                fade_out=tail_data,
+                fade_in=head_data,
+                pcm_format=pcm_format,
+                duration_s=float(self._crossfade_duration_s),
+                logger=self.logger,
+            ):
+                yield chunk
+        except Exception:
+            self.logger.warning(
+                "Crossfade: mixing failed, yielding tail + head separately",
+                exc_info=True,
+            )
+            yield tail_data
+            yield head_data
+            return
+
+        # Any head bytes beyond the crossfade overlap will be yielded
+        # at the start of the next track iteration via _crossfade_remainder.
+        # StandardCrossFade already yields post-crossfade bytes, so we
+        # only need to store remaining queue data from next_prebuffer.
+        # The queue still has unconsumed chunks — they'll be picked up
+        # when next_prebuffer is promoted to _prebuffer in the next
+        # loop iteration.
 
     # ------------------------------------------------------------------
     # Pre-buffer
