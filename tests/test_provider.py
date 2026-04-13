@@ -35,6 +35,7 @@ from provider.constants import (
 from provider.crossfade import crossfade_bytes_for
 from provider.prebuffer import PreBuffer
 from provider.provider import (
+    _API_MAX_RETRIES,
     _PCM_LOSSLESS_PARAMS,
     _PCM_LOSSY_PARAMS,
     YandexYnisonProvider,
@@ -1907,6 +1908,70 @@ class TestBytesToMs:
         """Zero bytes = zero milliseconds."""
         provider = _make_provider()
         assert provider._bytes_to_ms(0) == 0
+
+
+# ------------------------------------------------------------------
+# _get_stream_details_with_retry
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestGetStreamDetailsWithRetry:
+    """Tests for _get_stream_details_with_retry."""
+
+    async def test_success_first_attempt(self) -> None:
+        """Returns stream details on first try."""
+        provider = _make_provider()
+        mock_yp = MagicMock()
+        sd = MagicMock()
+        mock_yp.get_stream_details = AsyncMock(return_value=sd)
+        provider._yandex_provider = mock_yp
+
+        result = await provider._get_stream_details_with_retry("t1")
+        assert result is sd
+        mock_yp.get_stream_details.assert_awaited_once()
+
+    async def test_retries_on_failure(self) -> None:
+        """Retries on transient error, succeeds on second attempt."""
+        provider = _make_provider()
+        mock_yp = MagicMock()
+        sd = MagicMock()
+        mock_yp.get_stream_details = AsyncMock(
+            side_effect=[RuntimeError("transient"), sd]
+        )
+        provider._yandex_provider = mock_yp
+
+        with patch("provider.provider.asyncio.sleep", new_callable=AsyncMock):
+            result = await provider._get_stream_details_with_retry("t1")
+        assert result is sd
+        assert mock_yp.get_stream_details.await_count == 2
+
+    async def test_raises_after_max_retries(self) -> None:
+        """Raises RuntimeError after all retries exhausted."""
+        provider = _make_provider()
+        mock_yp = MagicMock()
+        mock_yp.get_stream_details = AsyncMock(
+            side_effect=RuntimeError("always fails")
+        )
+        provider._yandex_provider = mock_yp
+
+        with patch("provider.provider.asyncio.sleep", new_callable=AsyncMock), \
+             pytest.raises(RuntimeError, match="failed after"):
+            await provider._get_stream_details_with_retry("t1")
+        assert mock_yp.get_stream_details.await_count == _API_MAX_RETRIES
+
+    async def test_cancellation_not_retried(self) -> None:
+        """CancelledError propagates immediately, no retry."""
+        provider = _make_provider()
+        mock_yp = MagicMock()
+        mock_yp.get_stream_details = AsyncMock(
+            side_effect=asyncio.CancelledError()
+        )
+        provider._yandex_provider = mock_yp
+
+        with pytest.raises(asyncio.CancelledError):
+            await provider._get_stream_details_with_retry("t1")
+        mock_yp.get_stream_details.assert_awaited_once()
 
 
 # ------------------------------------------------------------------

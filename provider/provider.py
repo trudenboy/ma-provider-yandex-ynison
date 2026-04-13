@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 import time
 from collections.abc import AsyncGenerator, Callable
 from contextlib import suppress
@@ -23,6 +24,7 @@ from ya_passport_auth import SecretStr
 
 from music_assistant.helpers.audio import align_audio_to_frame_boundary
 from music_assistant.helpers.ffmpeg import get_ffmpeg_stream
+from music_assistant.helpers.throttle_retry import ThrottlerManager
 from music_assistant.models.plugin import PluginProvider, PluginSource
 
 from .constants import (
@@ -71,10 +73,13 @@ _PCM_LOSSLESS_PARAMS = PCM_LOSSLESS_PARAMS
 _PCM_LOSSY_PARAMS = PCM_LOSSY_PARAMS
 _make_pcm_format = make_pcm_format
 
-
 # How often (seconds) to sync progress to MA UI and Ynison.
 _PROGRESS_SYNC_INTERVAL = 5.0
 
+# Retry settings for transient Yandex API failures
+_API_MAX_RETRIES = 3
+_API_INITIAL_BACKOFF = 2.0
+_API_MAX_BACKOFF = 30.0
 
 class YandexYnisonProvider(PluginProvider):
     """Implementation of the Yandex Music Connect (Ynison) Plugin."""
@@ -148,6 +153,9 @@ class YandexYnisonProvider(PluginProvider):
         self._prefetch_task: asyncio.Task[Any] | None = None
         self._normalized_params: dict[str, Any] = _PCM_LOSSY_PARAMS
         self._normalized_format: AudioFormat = _make_pcm_format(_PCM_LOSSY_PARAMS)
+
+        # Rate limiter for Yandex API calls (max 2 req/s)
+        self._api_throttler = ThrottlerManager(rate_limit=2, period=1.0)
 
         # Progress tracking — byte counter is the single source of truth
         # during active streaming; Ynison echoes are detected and ignored.
@@ -533,9 +541,7 @@ class YandexYnisonProvider(PluginProvider):
         changes (codec, bit depth, sample rate).
         """
         try:
-            stream_details = await self._yandex_provider.get_stream_details(
-                track_id, MediaType.TRACK
-            )
+            stream_details = await self._get_stream_details_with_retry(track_id)
         except Exception:
             self.logger.exception("Failed to get stream details for track %s", track_id)
             self._stream_stop_event.set()
@@ -570,6 +576,42 @@ class YandexYnisonProvider(PluginProvider):
                 log_first_chunk(self.logger, chunk, out_fmt)
             chunk_idx += 1
             yield chunk
+
+    async def _get_stream_details_with_retry(
+        self,
+        track_id: str,
+        media_type: MediaType = MediaType.TRACK,
+    ) -> StreamDetails:
+        """Fetch stream details with throttling and retry on transient failures."""
+        backoff = _API_INITIAL_BACKOFF
+        last_err: Exception | None = None
+        for attempt in range(_API_MAX_RETRIES):
+            async with self._api_throttler.acquire() as delay:
+                if delay > 0:
+                    self.logger.debug(
+                        "get_stream_details throttled %.1fs", delay
+                    )
+            try:
+                return await self._yandex_provider.get_stream_details(  # type: ignore[union-attr]
+                    track_id, media_type
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:
+                last_err = err
+                if attempt < _API_MAX_RETRIES - 1:
+                    jitter = backoff * random.uniform(0.75, 1.25)
+                    self.logger.warning(
+                        "get_stream_details attempt %d/%d failed: %s, retrying in %.1fs",
+                        attempt + 1,
+                        _API_MAX_RETRIES,
+                        err,
+                        jitter,
+                    )
+                    await asyncio.sleep(jitter)
+                    backoff = min(backoff * 2, _API_MAX_BACKOFF)
+        msg = f"get_stream_details failed after {_API_MAX_RETRIES} attempts for {track_id}"
+        raise RuntimeError(msg) from last_err
 
     # ------------------------------------------------------------------
     # Crossfade
@@ -683,7 +725,7 @@ class YandexYnisonProvider(PluginProvider):
         prebuffer.task = self.mass.create_task(
             run_fill(
                 prebuffer=prebuffer,
-                get_stream_details=self._yandex_provider.get_stream_details,
+                get_stream_details=self._get_stream_details_with_retry,
                 get_audio_stream=self._yandex_provider.get_audio_stream,
                 output_format=fmt,
                 logger=self.logger,
@@ -718,7 +760,7 @@ class YandexYnisonProvider(PluginProvider):
         prebuffer.task = self.mass.create_task(
             run_fill(
                 prebuffer=prebuffer,
-                get_stream_details=self._yandex_provider.get_stream_details,
+                get_stream_details=self._get_stream_details_with_retry,
                 get_audio_stream=self._yandex_provider.get_audio_stream,
                 output_format=fmt,
                 logger=self.logger,
