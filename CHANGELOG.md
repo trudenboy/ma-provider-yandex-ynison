@@ -2,6 +2,33 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.0] - 2026-04-13
+
+### Added
+- **Crossfade**: smooth audio transitions between tracks using MA's `StandardCrossFade` engine, configurable 0–10s (default off)
+- **API throttling & retry**: `ThrottlerManager` rate-limits Yandex API calls; exponential backoff with jitter on transient failures
+- **Stream details cache**: `mass.cache` integration with 5-minute TTL eliminates redundant API calls for repeated tracks
+- **PreBuffer ready event**: `ready_threshold` signals when enough audio is buffered, enabling precise crossfade timing
+- New modules: `provider/crossfade.py`, `provider/prebuffer.py`, `provider/protocols.py`, `provider/streaming.py`
+- 157 new tests (88 → 245 total), ynison_client coverage 55% → 96%, provider coverage 59% → 70%
+
+### Changed
+- `YandexMusicProviderLike` Protocol: replaced `client`/`config` properties with typed `get_rotor_station_tracks()` and `get_quality()` methods — eliminates tight coupling to yandex_music internals
+- Crossfade output wrapped with `iter_pcm_slices()` for frame-aligned ~100ms chunks
+- PreBuffer `cancel()` uses `close_async_generator()` for safe generator cleanup
+- Crossfade fallback uses `align_audio_to_frame_boundary()` for PCM alignment
+- `_bytes_to_ms()` uses `AudioFormat.pcm_sample_size` instead of manual byte_rate calculation
+
+### Fixed
+- Atomic EOF sentinel delivery in prebuffer prevents race conditions
+- 30-second timeout on `prebuffer.queue.put()` prevents silent hangs
+- `assert` replaced with `RuntimeError` in ynison_client for production safety
+- Device ID generation uses `secrets.token_hex` instead of predictable random
+- mypy `no-any-return` resolved in `_get_target_player_id`
+
+### Security
+- Device ID generation hardened with cryptographically secure `secrets` module
+
 ## [1.3.0] - 2026-04-12
 
 ### Added
