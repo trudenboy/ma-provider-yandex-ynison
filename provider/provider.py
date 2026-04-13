@@ -564,6 +564,7 @@ class YandexYnisonProvider(PluginProvider):
             seek_ms,
         )
         chunk_idx = 0
+        assert self._yandex_provider is not None  # guarded by _ensure_yandex_provider
         async for chunk in get_ffmpeg_stream(
             audio_input=self._yandex_provider.get_audio_stream(stream_details),
             input_format=stream_details.audio_format,
@@ -589,7 +590,7 @@ class YandexYnisonProvider(PluginProvider):
         )
         if cached is not None:
             self.logger.debug("Stream details cache hit for %s", track_id)
-            return cached
+            return cast("StreamDetails", cached)
 
         backoff = _API_INITIAL_BACKOFF
         last_err: Exception | None = None
@@ -735,6 +736,7 @@ class YandexYnisonProvider(PluginProvider):
         prebuffer = make_prebuffer(track_id=track_id, seek_ms=seek_ms, output_format=fmt)
         self._prebuffer = prebuffer
 
+        assert self._yandex_provider is not None  # guarded by _ensure_yandex_provider
         prebuffer.task = self.mass.create_task(
             run_fill(
                 prebuffer=prebuffer,
@@ -1261,7 +1263,7 @@ class YandexYnisonProvider(PluginProvider):
         for provider in self.mass.get_providers():
             if provider.domain == "yandex_music" and provider.type == ProviderType.MUSIC:
                 self.logger.debug("Found Yandex Music provider — enabling playback control")
-                self._yandex_provider = provider
+                self._yandex_provider = cast("YandexMusicProviderLike", provider)
                 self._update_normalized_format()
                 self._update_source_capabilities()
                 return
