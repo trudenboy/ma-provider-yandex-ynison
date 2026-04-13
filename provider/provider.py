@@ -662,7 +662,19 @@ class YandexYnisonProvider(PluginProvider):
                     extra_input_args=extra_input_args,
                 ):
                     prebuffer.chunks_queued += 1
-                    await prebuffer.queue.put(chunk)
+                    try:
+                        await asyncio.wait_for(
+                            prebuffer.queue.put(chunk), timeout=30.0
+                        )
+                    except TimeoutError:
+                        prebuffer.error = TimeoutError(
+                            "Queue put timeout — consumer stalled"
+                        )
+                        self.logger.warning(
+                            "Prebuffer queue full for 30s, aborting for %s",
+                            track_id,
+                        )
+                        return
             except asyncio.CancelledError:
                 raise
             except Exception as err:
@@ -713,7 +725,8 @@ class YandexYnisonProvider(PluginProvider):
 
         async def _fill() -> None:
             try:
-                assert self._yandex_provider is not None
+                if self._yandex_provider is None:
+                    raise RuntimeError("Yandex Music provider not available")
                 sd = await self._yandex_provider.get_stream_details(track_id, MediaType.TRACK)
                 prebuffer.stream_details = sd
                 # Don't update metadata yet — still playing current track
@@ -725,7 +738,19 @@ class YandexYnisonProvider(PluginProvider):
                     extra_input_args=extra_input_args,
                 ):
                     prebuffer.chunks_queued += 1
-                    await prebuffer.queue.put(chunk)
+                    try:
+                        await asyncio.wait_for(
+                            prebuffer.queue.put(chunk), timeout=30.0
+                        )
+                    except TimeoutError:
+                        prebuffer.error = TimeoutError(
+                            "Queue put timeout — consumer stalled"
+                        )
+                        self.logger.warning(
+                            "Next-prebuffer queue full for 30s, aborting for %s",
+                            track_id,
+                        )
+                        return
             except asyncio.CancelledError:
                 raise
             except Exception as err:
