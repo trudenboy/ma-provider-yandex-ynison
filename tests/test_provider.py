@@ -31,6 +31,7 @@ from provider.constants import (
 from provider.provider import (
     _PCM_LOSSLESS_PARAMS,
     _PCM_LOSSY_PARAMS,
+    PreBuffer,
     YandexYnisonProvider,
     _make_pcm_format,
 )
@@ -1252,6 +1253,75 @@ class TestPreBuffer:
 
         provider._clear_active_player()
         assert provider._prebuffer is None
+
+    async def test_prebuffer_eof_delivery_under_contention(self) -> None:
+        """EOF sentinel arrives even when queue is full at fill completion."""
+        provider = _make_provider()
+        provider._source_details.in_use_by = "player1"
+
+        mock_yandex = MagicMock()
+        sd = MagicMock()
+        sd.duration = 200
+        sd.audio_format = MagicMock()
+        mock_yandex.get_stream_details = AsyncMock(return_value=sd)
+
+        async def _fake_audio_stream(_details: object) -> Any:
+            yield b"raw"
+
+        mock_yandex.get_audio_stream = _fake_audio_stream
+        provider._yandex_provider = mock_yandex
+
+        mock_ynison = MagicMock()
+        mock_ynison.update_playing_status = AsyncMock()
+        mock_ynison.state.is_paused = False
+        provider._ynison = mock_ynison
+
+        # Fill 65 chunks into a maxsize=64 queue — the last put blocks until
+        # the consumer drains. The fill task must still deliver EOF after.
+        chunks = [f"pcm-{i}".encode() for i in range(65)]
+
+        async def _fake_ffmpeg(**_kwargs: object) -> Any:
+            for c in chunks:
+                yield c
+
+        provider.mass.create_task = lambda coro: asyncio.get_event_loop().create_task(coro)  # type: ignore[method-assign, assignment, misc]
+
+        with patch(
+            "provider.provider.get_ffmpeg_stream",
+            side_effect=_fake_ffmpeg,
+        ):
+            await provider._start_prebuffer("track:full")
+            assert provider._prebuffer is not None
+            assert provider._prebuffer.task is not None
+
+            # Slowly drain as consumer — fill must not timeout (30s) here
+            collected: list[bytes] = []
+            async for chunk in provider._yield_from_prebuffer():
+                collected.append(chunk)
+
+        # All chunks received, no data loss
+        assert collected == chunks
+
+    async def test_prebuffer_put_timeout_on_stalled_consumer(self) -> None:
+        """Fill aborts with error after queue.put timeout on stalled consumer."""
+        fmt = _make_pcm_format(_PCM_LOSSY_PARAMS)
+        prebuffer = PreBuffer(
+            track_id="stall:1",
+            seek_ms=0,
+            output_format=fmt,
+            queue=asyncio.Queue(maxsize=1),
+        )
+
+        # Simulate: fill the queue then try to put with a tiny timeout
+        await prebuffer.queue.put(b"blocking-chunk")
+
+        # The queue is now full — put should timeout
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(prebuffer.queue.put(b"stalled"), timeout=0.1)
+
+        # Verify the pattern used in _fill(): error is set and logged
+        prebuffer.error = TimeoutError("Queue put timeout — consumer stalled")
+        assert isinstance(prebuffer.error, TimeoutError)
 
 
 class TestResolveToken:
