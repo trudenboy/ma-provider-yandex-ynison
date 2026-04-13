@@ -1114,10 +1114,10 @@ class YandexYnisonProvider(PluginProvider):
             for player in all_players:
                 if player.state.playback_state == PlaybackState.PLAYING:
                     self.logger.debug("Auto-selecting playing player: %s", player.display_name)
-                    return player.player_id
+                    return str(player.player_id)
             # Fallback to first available
             if all_players:
-                return all_players[0].player_id
+                return str(all_players[0].player_id)
             return None
 
         # Specific configured player
