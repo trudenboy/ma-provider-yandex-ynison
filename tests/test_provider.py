@@ -28,7 +28,12 @@ from provider.constants import (
     DEFAULT_DISPLAY_NAME,
     PLAYER_ID_AUTO,
 )
-from provider.provider import _PCM_LOSSLESS, _PCM_LOSSY, YandexYnisonProvider
+from provider.provider import (
+    _PCM_LOSSLESS_PARAMS,
+    _PCM_LOSSY_PARAMS,
+    YandexYnisonProvider,
+    _make_pcm_format,
+)
 from provider.ynison_client import YnisonState
 
 
@@ -906,7 +911,7 @@ class TestPCMNormalization:
         mock_ffmpeg.assert_called_once()
         call_kwargs = mock_ffmpeg.call_args
         # Default (no YM provider linked) → lossy profile
-        assert call_kwargs.kwargs["output_format"] is provider._normalized_format
+        assert call_kwargs.kwargs["output_format"] == provider._normalized_format
         assert call_kwargs.kwargs["output_format"].content_type == ContentType.PCM_S16LE
         # No seek args when seek_ms=0, but readrate is always present
         args = call_kwargs.kwargs.get("extra_input_args", [])
@@ -976,7 +981,7 @@ class TestPCMNormalization:
         assert provider._normalized_format.content_type == ContentType.PCM_S24LE
         assert provider._normalized_format.sample_rate == 48000
         assert provider._normalized_format.bit_depth == 24
-        assert provider._source_details.audio_format is provider._normalized_format
+        assert provider._source_details.audio_format == provider._normalized_format
 
     async def test_balanced_quality_uses_lossy_profile(self) -> None:
         """When YM quality=balanced, format stays PCM s16le/44.1kHz."""
@@ -1393,7 +1398,7 @@ class TestPCMFrameAlignment:
     async def test_frame_alignment_padding_s24le(self) -> None:
         """Verify padding math for s24le stereo (frame_size=6)."""
         provider = _make_provider()
-        provider._normalized_format = _PCM_LOSSLESS
+        provider._normalized_format = _make_pcm_format(_PCM_LOSSLESS_PARAMS)
         fmt = provider._normalized_format
         frame_size = (fmt.bit_depth // 8) * fmt.channels
         assert frame_size == 6  # 3 bytes x 2 channels
@@ -1408,7 +1413,7 @@ class TestPCMFrameAlignment:
     async def test_frame_alignment_padding_s16le(self) -> None:
         """Verify padding math for s16le stereo (frame_size=4)."""
         provider = _make_provider()
-        provider._normalized_format = _PCM_LOSSY
+        provider._normalized_format = _make_pcm_format(_PCM_LOSSY_PARAMS)
         fmt = provider._normalized_format
         frame_size = (fmt.bit_depth // 8) * fmt.channels
         assert frame_size == 4  # 2 bytes x 2 channels
@@ -1422,7 +1427,7 @@ class TestPCMFrameAlignment:
 
     async def test_no_padding_when_aligned(self) -> None:
         """No padding needed when bytes_yielded is already frame-aligned."""
-        fmt = _PCM_LOSSLESS
+        fmt = _make_pcm_format(_PCM_LOSSLESS_PARAMS)
         frame_size = (fmt.bit_depth // 8) * fmt.channels
         # 6000 bytes = 1000 frames of s24le stereo
         assert 6000 % frame_size == 0
