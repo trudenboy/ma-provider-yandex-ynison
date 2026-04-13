@@ -60,6 +60,23 @@ class TestPreBuffer:
         await pb.cancel()
         assert pb.task.cancelled() or pb.task.done()
 
+    def test_ready_event_initially_unset(self) -> None:
+        """PreBuffer.ready is unset on creation."""
+        pb = make_prebuffer(track_id="t:1", seek_ms=0, output_format=MagicMock())
+        assert not pb.ready.is_set()
+
+    def test_ready_threshold_default(self) -> None:
+        """Default ready_threshold is 8."""
+        pb = make_prebuffer(track_id="t:1", seek_ms=0, output_format=MagicMock())
+        assert pb.ready_threshold == 8
+
+    def test_ready_threshold_custom(self) -> None:
+        """make_prebuffer respects custom ready_threshold."""
+        pb = make_prebuffer(
+            track_id="t:1", seek_ms=0, output_format=MagicMock(), ready_threshold=3
+        )
+        assert pb.ready_threshold == 3
+
 
 class TestRunFill:
     """Unit tests for the run_fill() function."""
@@ -236,6 +253,98 @@ class TestRunFill:
 
         assert isinstance(pb.error, TimeoutError)
 
+    async def test_ready_event_fires_after_threshold(self) -> None:
+        """run_fill sets ready after ready_threshold chunks are queued."""
+        fmt = MagicMock()
+        pb = make_prebuffer(
+            track_id="t:1", seek_ms=0, output_format=fmt, ready_threshold=3
+        )
+
+        sd = MagicMock()
+        sd.audio_format = MagicMock()
+        get_stream_details = AsyncMock(return_value=sd)
+
+        async def _audio_stream(_sd: object) -> Any:
+            yield b"raw"
+
+        chunks = [b"c1", b"c2", b"c3", b"c4", b"c5"]
+
+        async def _fake_ffmpeg(**_kwargs: object) -> Any:
+            for c in chunks:
+                yield c
+
+        logger = MagicMock()
+
+        with patch("provider.prebuffer.get_ffmpeg_stream", side_effect=_fake_ffmpeg):
+            await run_fill(
+                prebuffer=pb,
+                get_stream_details=get_stream_details,
+                get_audio_stream=_audio_stream,
+                output_format=fmt,
+                logger=logger,
+            )
+
+        assert pb.ready.is_set()
+        assert pb.chunks_queued == 5
+
+    async def test_ready_event_fires_on_short_track(self) -> None:
+        """run_fill sets ready even if fewer chunks than threshold (via finally)."""
+        fmt = MagicMock()
+        pb = make_prebuffer(
+            track_id="t:1", seek_ms=0, output_format=fmt, ready_threshold=10
+        )
+
+        sd = MagicMock()
+        sd.audio_format = MagicMock()
+        get_stream_details = AsyncMock(return_value=sd)
+
+        async def _audio_stream(_sd: object) -> Any:
+            yield b"raw"
+
+        async def _fake_ffmpeg(**_kwargs: object) -> Any:
+            yield b"c1"
+            yield b"c2"
+
+        logger = MagicMock()
+
+        with patch("provider.prebuffer.get_ffmpeg_stream", side_effect=_fake_ffmpeg):
+            await run_fill(
+                prebuffer=pb,
+                get_stream_details=get_stream_details,
+                get_audio_stream=_audio_stream,
+                output_format=fmt,
+                logger=logger,
+            )
+
+        # Only 2 chunks < threshold of 10, but ready should still be set
+        assert pb.ready.is_set()
+        assert pb.chunks_queued == 2
+
+    async def test_ready_event_fires_on_error(self) -> None:
+        """run_fill sets ready even when an error occurs (prevents deadlock)."""
+        fmt = MagicMock()
+        pb = make_prebuffer(
+            track_id="t:1", seek_ms=0, output_format=fmt, ready_threshold=10
+        )
+
+        get_stream_details = AsyncMock(side_effect=RuntimeError("fail"))
+
+        async def _audio_stream(_sd: object) -> Any:
+            yield b"raw"
+
+        logger = MagicMock()
+
+        await run_fill(
+            prebuffer=pb,
+            get_stream_details=get_stream_details,
+            get_audio_stream=_audio_stream,
+            output_format=fmt,
+            logger=logger,
+        )
+
+        assert pb.ready.is_set()
+        assert pb.error is not None
+
 
 class TestYieldFromPrebuffer:
     """Unit tests for yield_from_prebuffer()."""
@@ -245,6 +354,7 @@ class TestYieldFromPrebuffer:
         pb = PreBuffer(
             track_id="t:1", seek_ms=0, output_format=MagicMock()
         )
+        pb.ready.set()
         await pb.queue.put(b"a")
         await pb.queue.put(b"b")
         await pb.queue.put(None)
@@ -260,6 +370,7 @@ class TestYieldFromPrebuffer:
         pb = PreBuffer(
             track_id="t:1", seek_ms=0, output_format=MagicMock()
         )
+        pb.ready.set()
         await pb.queue.put(None)
 
         collected = []
@@ -267,3 +378,29 @@ class TestYieldFromPrebuffer:
             collected.append(chunk)
 
         assert collected == []
+
+    async def test_waits_for_ready_event(self) -> None:
+        """yield_from_prebuffer blocks until ready event is set."""
+        pb = PreBuffer(
+            track_id="t:1", seek_ms=0, output_format=MagicMock()
+        )
+        await pb.queue.put(b"data")
+        await pb.queue.put(None)
+
+        collected: list[bytes] = []
+        started = asyncio.Event()
+
+        async def _consume() -> None:
+            started.set()
+            async for chunk in yield_from_prebuffer(pb):
+                collected.append(chunk)
+
+        task = asyncio.create_task(_consume())
+        await started.wait()
+        # Give consumer a chance to run — should be blocked on ready
+        await asyncio.sleep(0.05)
+        assert collected == [], "Should not yield before ready"
+
+        pb.ready.set()
+        await task
+        assert collected == [b"data"]

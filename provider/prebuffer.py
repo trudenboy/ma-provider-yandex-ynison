@@ -39,6 +39,8 @@ class PreBuffer:
     error: Exception | None = None
     task: asyncio.Task[None] | None = None
     chunks_queued: int = 0
+    ready: asyncio.Event = field(default_factory=asyncio.Event)
+    ready_threshold: int = 8
 
     async def cancel(self) -> None:
         """Cancel the prebuffer task, drain the queue and unblock consumers."""
@@ -99,6 +101,11 @@ async def run_fill(
             extra_input_args=extra_input_args,
         ):
             prebuffer.chunks_queued += 1
+            if (
+                not prebuffer.ready.is_set()
+                and prebuffer.chunks_queued >= prebuffer.ready_threshold
+            ):
+                prebuffer.ready.set()
             try:
                 await asyncio.wait_for(
                     prebuffer.queue.put(chunk), timeout=_QUEUE_PUT_TIMEOUT
@@ -119,6 +126,7 @@ async def run_fill(
         prebuffer.error = err
         logger.warning("Prebuffer failed for %s: %s", prebuffer.track_id, err)
     finally:
+        prebuffer.ready.set()
         logger.debug(
             "Prebuffer fill done for %s: %d chunks queued, error=%s",
             prebuffer.track_id,
@@ -137,7 +145,12 @@ async def run_fill(
 
 
 async def yield_from_prebuffer(prebuffer: PreBuffer) -> AsyncGenerator[bytes, None]:
-    """Yield chunks from a prebuffer queue until EOF sentinel (None)."""
+    """Yield chunks from a prebuffer queue until EOF sentinel (None).
+
+    Waits for the ``ready`` event before yielding the first chunk, so downstream
+    consumers don't start until a minimum amount of audio has been buffered.
+    """
+    await prebuffer.ready.wait()
     while True:
         chunk = await prebuffer.queue.get()
         if chunk is None:
@@ -151,6 +164,7 @@ def make_prebuffer(
     output_format: AudioFormat,
     *,
     maxsize: int = 64,
+    ready_threshold: int = 8,
 ) -> PreBuffer:
     """Create a new PreBuffer with the given parameters."""
     return PreBuffer(
@@ -158,4 +172,5 @@ def make_prebuffer(
         seek_ms=seek_ms,
         output_format=output_format,
         queue=asyncio.Queue(maxsize=maxsize),
+        ready_threshold=ready_threshold,
     )
