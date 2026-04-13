@@ -515,8 +515,10 @@ class YnisonClient:
             "current_playable_index", -1
         )
 
-        # Deep-merge player_state so incremental updates (e.g. progress-only)
-        # don't drop previously-known player_queue data.
+        # One-level-deep merge of player_state: Ynison sends sub-objects like
+        # "player_queue" and "status" as complete replacements, so shallow
+        # dict-union at the first nesting level is sufficient. Deeper recursion
+        # would risk merging stale list items (e.g. playable_list entries).
         incoming_ps = data.get("player_state")
         if incoming_ps is not None:
             existing_ps = self.state.player_state
