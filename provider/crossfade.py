@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 from music_assistant.controllers.streams.smart_fades.fades import StandardCrossFade
 from music_assistant.helpers.audio import (
     align_audio_to_frame_boundary,
+    iter_pcm_slices,
     strip_silence,
 )
 
@@ -130,15 +131,17 @@ async def apply_crossfade(
     fade_out = align_audio_to_frame_boundary(fade_out, pcm_format)
 
     if len(fade_out) == 0:
-        # Nothing left after stripping — just yield fade_in as-is
+        # Nothing left after stripping — yield fade_in in frame-aligned slices
         if isinstance(fade_in, bytes):
-            if fade_in:
-                yield fade_in
+            for sl in iter_pcm_slices(fade_in, pcm_format):
+                yield sl
         else:
             async for chunk in fade_in:
-                yield chunk
+                for sl in iter_pcm_slices(chunk, pcm_format):
+                    yield sl
         return
 
     crossfader = StandardCrossFade(logger=logger, crossfade_duration=duration_s)
     async for chunk in crossfader.apply(fade_out, fade_in, pcm_format):
-        yield chunk
+        for sl in iter_pcm_slices(chunk, pcm_format):
+            yield sl
