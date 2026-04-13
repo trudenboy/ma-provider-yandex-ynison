@@ -77,6 +77,10 @@ def _make_pcm_format(params: dict[str, Any]) -> AudioFormat:
     return AudioFormat(**params)
 
 
+_SIGNED_24BIT_MAX = 0x800000
+_SIGNED_24BIT_RANGE = 0x1000000
+
+
 def _log_first_chunk(logger: Any, chunk: bytes, fmt: AudioFormat) -> None:
     """Log diagnostic info about the first chunk of a track stream.
 
@@ -112,8 +116,8 @@ def _log_first_chunk(logger: Any, chunk: bytes, fmt: AudioFormat) -> None:
             # 24-bit little-endian signed
             b = chunk[offset : offset + 3]
             val = int.from_bytes(b, "little", signed=False)
-            if val >= 0x800000:
-                val -= 0x1000000
+            if val >= _SIGNED_24BIT_MAX:
+                val -= _SIGNED_24BIT_RANGE
             sample = val
         sum_sq += sample * sample
 
