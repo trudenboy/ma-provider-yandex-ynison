@@ -1034,11 +1034,10 @@ class YandexYnisonProvider(PluginProvider):
 
     def _bytes_to_ms(self, byte_count: int) -> int:
         """Convert PCM byte count to milliseconds using the normalized format."""
-        fmt = self._normalized_format
-        byte_rate = fmt.sample_rate * fmt.channels * (fmt.bit_depth // 8)
-        if byte_rate == 0:
+        bps = self._normalized_format.pcm_sample_size
+        if bps == 0:
             return 0
-        return (byte_count * 1000) // byte_rate
+        return (byte_count * 1000) // bps
 
     async def _sync_progress(self, seek_ms: int, bytes_yielded: int, player_id: str | None) -> None:
         """Push real playback progress to MA metadata and Ynison."""
