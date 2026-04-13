@@ -32,9 +32,7 @@ class PreBuffer:
     track_id: str
     seek_ms: int
     output_format: AudioFormat
-    queue: asyncio.Queue[bytes | None] = field(
-        default_factory=lambda: asyncio.Queue(maxsize=64)
-    )
+    queue: asyncio.Queue[bytes | None] = field(default_factory=lambda: asyncio.Queue(maxsize=64))
     stream_details: StreamDetails | None = None
     error: Exception | None = None
     task: asyncio.Task[None] | None = None
@@ -107,13 +105,9 @@ async def run_fill(
             ):
                 prebuffer.ready.set()
             try:
-                await asyncio.wait_for(
-                    prebuffer.queue.put(chunk), timeout=_QUEUE_PUT_TIMEOUT
-                )
+                await asyncio.wait_for(prebuffer.queue.put(chunk), timeout=_QUEUE_PUT_TIMEOUT)
             except TimeoutError:
-                prebuffer.error = TimeoutError(
-                    "Queue put timeout — consumer stalled"
-                )
+                prebuffer.error = TimeoutError("Queue put timeout — consumer stalled")
                 logger.warning(
                     "Prebuffer queue full for %.0fs, aborting for %s",
                     _QUEUE_PUT_TIMEOUT,
@@ -134,9 +128,7 @@ async def run_fill(
             prebuffer.error,
         )
         try:
-            await asyncio.wait_for(
-                prebuffer.queue.put(None), timeout=_EOF_PUT_TIMEOUT
-            )
+            await asyncio.wait_for(prebuffer.queue.put(None), timeout=_EOF_PUT_TIMEOUT)
         except (TimeoutError, asyncio.CancelledError):
             with suppress(asyncio.QueueEmpty):
                 prebuffer.queue.get_nowait()

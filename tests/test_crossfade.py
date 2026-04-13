@@ -18,9 +18,7 @@ from provider.crossfade import (
 from provider.prebuffer import PreBuffer
 
 
-def _make_pcm_format(
-    sample_rate: int = 48000, bit_depth: int = 24, channels: int = 2
-) -> MagicMock:
+def _make_pcm_format(sample_rate: int = 48000, bit_depth: int = 24, channels: int = 2) -> MagicMock:
     """Create a mock AudioFormat with pcm_sample_size computed correctly."""
     fmt = MagicMock()
     fmt.sample_rate = sample_rate
@@ -187,9 +185,7 @@ class TestApplyCrossfade:
 
         mock_apply_results = [b"mixed1", b"mixed2"]
 
-        async def _mock_apply(
-            _self: Any, _fo: bytes, _fi: Any, _pf: Any
-        ) -> Any:
+        async def _mock_apply(_self: Any, _fo: bytes, _fi: Any, _pf: Any) -> Any:
             for chunk in mock_apply_results:
                 yield chunk
 
@@ -257,9 +253,7 @@ class TestApplyCrossfade:
             ),
         ):
             collected: list[bytes] = []
-            async for chunk in apply_crossfade(
-                b"tail", _fade_in_gen(), fmt, 5.0, logger
-            ):
+            async for chunk in apply_crossfade(b"tail", _fade_in_gen(), fmt, 5.0, logger):
                 collected.append(chunk)
 
         assert collected == [b"part1", b"part2"]
@@ -272,9 +266,7 @@ class TestApplyCrossfade:
         mock_strip = AsyncMock(return_value=b"stripped")
         mock_align = MagicMock(return_value=b"aligned")
 
-        async def _mock_apply(
-            _self: Any, fo: bytes, _fi: Any, _pf: Any
-        ) -> Any:
+        async def _mock_apply(_self: Any, fo: bytes, _fi: Any, _pf: Any) -> Any:
             assert fo == b"aligned", "fade_out should be aligned"
             yield b"out"
 

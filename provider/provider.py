@@ -71,7 +71,6 @@ _PCM_LOSSY_PARAMS = PCM_LOSSY_PARAMS
 _make_pcm_format = make_pcm_format
 
 
-
 # How often (seconds) to sync progress to MA UI and Ynison.
 _PROGRESS_SYNC_INTERVAL = 5.0
 
@@ -389,15 +388,10 @@ class YandexYnisonProvider(PluginProvider):
                     self._prebuffer.chunks_queued,
                 )
 
-                use_crossfade = (
-                    self._crossfade_duration_s > 0
-                    and self._prebuffer_next_enabled
-                )
+                use_crossfade = self._crossfade_duration_s > 0 and self._prebuffer_next_enabled
                 tail_buf: TailBuffer | None = None
                 if use_crossfade:
-                    cf_bytes = crossfade_bytes_for(
-                        self._crossfade_duration_s, track_fmt
-                    )
+                    cf_bytes = crossfade_bytes_for(self._crossfade_duration_s, track_fmt)
                     if cf_bytes > 0:
                         tail_buf = TailBuffer(cf_bytes)
 
@@ -432,9 +426,7 @@ class YandexYnisonProvider(PluginProvider):
                 # Crossfade: mix tail with head of next track
                 if tail_buf is not None and not interrupted:
                     tail_data = tail_buf.flush()
-                    async for chunk in self._do_crossfade(
-                        tail_data, track_fmt
-                    ):
+                    async for chunk in self._do_crossfade(tail_data, track_fmt):
                         yield chunk
                         bytes_yielded += len(chunk)
                 elif tail_buf is not None:
@@ -625,9 +617,7 @@ class YandexYnisonProvider(PluginProvider):
         )
 
         try:
-            head_data, _eof = await collect_crossfade_head(
-                next_pb, target_bytes=target_bytes
-            )
+            head_data, _eof = await collect_crossfade_head(next_pb, target_bytes=target_bytes)
         except Exception:
             self.logger.warning("Crossfade: head collection failed", exc_info=True)
             yield tail_data

@@ -27,16 +27,12 @@ class TestPreBuffer:
 
     def test_make_prebuffer_custom_maxsize(self) -> None:
         """make_prebuffer respects custom maxsize."""
-        pb = make_prebuffer(
-            track_id="t:2", seek_ms=0, output_format=MagicMock(), maxsize=8
-        )
+        pb = make_prebuffer(track_id="t:2", seek_ms=0, output_format=MagicMock(), maxsize=8)
         assert pb.queue.maxsize == 8
 
     async def test_cancel_drains_and_sends_eof(self) -> None:
         """cancel() drains queue and puts EOF sentinel."""
-        pb = PreBuffer(
-            track_id="t:1", seek_ms=0, output_format=MagicMock()
-        )
+        pb = PreBuffer(track_id="t:1", seek_ms=0, output_format=MagicMock())
         # Fill some data
         await pb.queue.put(b"chunk1")
         await pb.queue.put(b"chunk2")
@@ -49,9 +45,7 @@ class TestPreBuffer:
 
     async def test_cancel_with_running_task(self) -> None:
         """cancel() cancels a running task before draining."""
-        pb = PreBuffer(
-            track_id="t:1", seek_ms=0, output_format=MagicMock()
-        )
+        pb = PreBuffer(track_id="t:1", seek_ms=0, output_format=MagicMock())
 
         async def _slow_fill() -> None:
             await asyncio.sleep(100)
@@ -72,9 +66,7 @@ class TestPreBuffer:
 
     def test_ready_threshold_custom(self) -> None:
         """make_prebuffer respects custom ready_threshold."""
-        pb = make_prebuffer(
-            track_id="t:1", seek_ms=0, output_format=MagicMock(), ready_threshold=3
-        )
+        pb = make_prebuffer(track_id="t:1", seek_ms=0, output_format=MagicMock(), ready_threshold=3)
         assert pb.ready_threshold == 3
 
 
@@ -101,7 +93,6 @@ class TestRunFill:
                 yield c
 
         logger = MagicMock()
-
 
         with patch("provider.prebuffer.get_ffmpeg_stream", side_effect=_fake_ffmpeg):
             await run_fill(
@@ -143,7 +134,6 @@ class TestRunFill:
         callback = AsyncMock()
         logger = MagicMock()
 
-
         with patch("provider.prebuffer.get_ffmpeg_stream", side_effect=_fake_ffmpeg):
             await run_fill(
                 prebuffer=pb,
@@ -175,7 +165,6 @@ class TestRunFill:
             yield b"pcm"
 
         logger = MagicMock()
-
 
         with patch("provider.prebuffer.get_ffmpeg_stream", side_effect=_fake_ffmpeg):
             await run_fill(
@@ -235,7 +224,6 @@ class TestRunFill:
 
         logger = MagicMock()
 
-
         # Pre-fill the queue so it's full
         await pb.queue.put(b"blocking")
 
@@ -256,9 +244,7 @@ class TestRunFill:
     async def test_ready_event_fires_after_threshold(self) -> None:
         """run_fill sets ready after ready_threshold chunks are queued."""
         fmt = MagicMock()
-        pb = make_prebuffer(
-            track_id="t:1", seek_ms=0, output_format=fmt, ready_threshold=3
-        )
+        pb = make_prebuffer(track_id="t:1", seek_ms=0, output_format=fmt, ready_threshold=3)
 
         sd = MagicMock()
         sd.audio_format = MagicMock()
@@ -290,9 +276,7 @@ class TestRunFill:
     async def test_ready_event_fires_on_short_track(self) -> None:
         """run_fill sets ready even if fewer chunks than threshold (via finally)."""
         fmt = MagicMock()
-        pb = make_prebuffer(
-            track_id="t:1", seek_ms=0, output_format=fmt, ready_threshold=10
-        )
+        pb = make_prebuffer(track_id="t:1", seek_ms=0, output_format=fmt, ready_threshold=10)
 
         sd = MagicMock()
         sd.audio_format = MagicMock()
@@ -323,9 +307,7 @@ class TestRunFill:
     async def test_ready_event_fires_on_error(self) -> None:
         """run_fill sets ready even when an error occurs (prevents deadlock)."""
         fmt = MagicMock()
-        pb = make_prebuffer(
-            track_id="t:1", seek_ms=0, output_format=fmt, ready_threshold=10
-        )
+        pb = make_prebuffer(track_id="t:1", seek_ms=0, output_format=fmt, ready_threshold=10)
 
         get_stream_details = AsyncMock(side_effect=RuntimeError("fail"))
 
@@ -351,9 +333,7 @@ class TestYieldFromPrebuffer:
 
     async def test_yields_until_eof(self) -> None:
         """yield_from_prebuffer yields chunks until None sentinel."""
-        pb = PreBuffer(
-            track_id="t:1", seek_ms=0, output_format=MagicMock()
-        )
+        pb = PreBuffer(track_id="t:1", seek_ms=0, output_format=MagicMock())
         pb.ready.set()
         await pb.queue.put(b"a")
         await pb.queue.put(b"b")
@@ -367,9 +347,7 @@ class TestYieldFromPrebuffer:
 
     async def test_empty_stream(self) -> None:
         """yield_from_prebuffer handles immediate EOF."""
-        pb = PreBuffer(
-            track_id="t:1", seek_ms=0, output_format=MagicMock()
-        )
+        pb = PreBuffer(track_id="t:1", seek_ms=0, output_format=MagicMock())
         pb.ready.set()
         await pb.queue.put(None)
 
@@ -381,9 +359,7 @@ class TestYieldFromPrebuffer:
 
     async def test_waits_for_ready_event(self) -> None:
         """yield_from_prebuffer blocks until ready event is set."""
-        pb = PreBuffer(
-            track_id="t:1", seek_ms=0, output_format=MagicMock()
-        )
+        pb = PreBuffer(track_id="t:1", seek_ms=0, output_format=MagicMock())
         await pb.queue.put(b"data")
         await pb.queue.put(None)
 

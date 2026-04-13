@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import AsyncGenerator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -21,14 +22,17 @@ from ya_passport_auth import SecretStr
 from provider.config_helpers import find_sibling_token
 from provider.constants import (
     CONF_ALLOW_PLAYER_SWITCH,
+    CONF_CROSSFADE_DURATION,
     CONF_DEVICE_ID,
     CONF_DISPLAY_NAME,
     CONF_PLAYER,
+    CONF_PREBUFFER_NEXT,
     CONF_TOKEN,
     CONF_X_TOKEN,
     DEFAULT_DISPLAY_NAME,
     PLAYER_ID_AUTO,
 )
+from provider.crossfade import crossfade_bytes_for
 from provider.prebuffer import PreBuffer
 from provider.provider import (
     _PCM_LOSSLESS_PARAMS,
@@ -2072,3 +2076,418 @@ class TestActivatePlayback:
         await provider._activate_playback(state)
 
         assert provider._active_player_id is None
+
+
+# ------------------------------------------------------------------
+# _do_crossfade
+# ------------------------------------------------------------------
+
+
+def _make_mock_pcm_format(
+    sample_rate: int = 48000,
+    bit_depth: int = 24,
+    channels: int = 2,
+) -> MagicMock:
+    """Create a mock AudioFormat for crossfade tests."""
+    fmt = MagicMock()
+    fmt.sample_rate = sample_rate
+    fmt.bit_depth = bit_depth
+    fmt.channels = channels
+    fmt.pcm_sample_size = sample_rate * (bit_depth // 8) * channels
+    fmt.content_type = MagicMock()
+    fmt.content_type.value = f"s{bit_depth}le"
+    return fmt
+
+
+@pytest.mark.asyncio
+class TestDoCrossfade:
+    """Tests for YandexYnisonProvider._do_crossfade."""
+
+    async def test_empty_tail_yields_nothing(self) -> None:
+        """Empty tail data produces no output."""
+        provider = _make_provider()
+        chunks = [c async for c in provider._do_crossfade(b"", _make_mock_pcm_format())]
+        assert chunks == []
+
+    async def test_no_next_prebuffer_yields_tail(self) -> None:
+        """No next_prebuffer → yields tail as-is (fallback)."""
+        provider = _make_provider()
+        provider._next_prebuffer = None
+        tail = b"\x01\x02\x03"
+        chunks = [c async for c in provider._do_crossfade(tail, _make_mock_pcm_format())]
+        assert chunks == [tail]
+
+    async def test_next_prebuffer_error_yields_tail(self) -> None:
+        """Next prebuffer has error → yields tail as-is."""
+        provider = _make_provider()
+        pb = MagicMock(spec=PreBuffer)
+        pb.error = RuntimeError("fill failed")
+        provider._next_prebuffer = pb
+        tail = b"\x01\x02\x03"
+        chunks = [c async for c in provider._do_crossfade(tail, _make_mock_pcm_format())]
+        assert chunks == [tail]
+
+    async def test_format_mismatch_yields_tail(self) -> None:
+        """Format mismatch between current and next → yields tail as-is."""
+        provider = _make_provider()
+        pb = MagicMock(spec=PreBuffer)
+        pb.error = None
+        pb.track_id = "next-track"
+        # Different format: 16-bit vs 24-bit
+        next_fmt = _make_mock_pcm_format(bit_depth=16)
+        pb.output_format = next_fmt
+        provider._next_prebuffer = pb
+
+        cur_fmt = _make_mock_pcm_format(bit_depth=24)
+        tail = b"\x01\x02\x03"
+        chunks = [c async for c in provider._do_crossfade(tail, cur_fmt)]
+        assert chunks == [tail]
+
+    async def test_sample_rate_mismatch_yields_tail(self) -> None:
+        """Sample rate mismatch → yields tail as-is."""
+        provider = _make_provider()
+        pb = MagicMock(spec=PreBuffer)
+        pb.error = None
+        pb.track_id = "next-track"
+        pb.output_format = _make_mock_pcm_format(sample_rate=44100)
+        provider._next_prebuffer = pb
+
+        cur_fmt = _make_mock_pcm_format(sample_rate=48000)
+        tail = b"\x01\x02\x03"
+        chunks = [c async for c in provider._do_crossfade(tail, cur_fmt)]
+        assert chunks == [tail]
+
+    @patch("provider.provider.collect_crossfade_head")
+    async def test_head_collection_failure_yields_tail(self, mock_collect: AsyncMock) -> None:
+        """Exception during head collection → yields tail as-is."""
+        mock_collect.side_effect = RuntimeError("queue timeout")
+        provider = _make_provider()
+        provider._crossfade_duration_s = 5
+
+        fmt = _make_mock_pcm_format()
+        pb = MagicMock(spec=PreBuffer)
+        pb.error = None
+        pb.track_id = "next-track"
+        pb.output_format = fmt
+        provider._next_prebuffer = pb
+
+        tail = b"\xff" * 100
+        chunks = [c async for c in provider._do_crossfade(tail, fmt)]
+        assert chunks == [tail]
+
+    @patch("provider.provider.collect_crossfade_head")
+    async def test_empty_head_yields_tail(self, mock_collect: AsyncMock) -> None:
+        """Head collection returns empty → yields tail as-is."""
+        mock_collect.return_value = (b"", False)
+        provider = _make_provider()
+        provider._crossfade_duration_s = 5
+
+        fmt = _make_mock_pcm_format()
+        pb = MagicMock(spec=PreBuffer)
+        pb.error = None
+        pb.track_id = "next-track"
+        pb.output_format = fmt
+        provider._next_prebuffer = pb
+
+        tail = b"\xff" * 100
+        chunks = [c async for c in provider._do_crossfade(tail, fmt)]
+        assert chunks == [tail]
+
+    @patch("provider.provider.apply_crossfade")
+    @patch("provider.provider.collect_crossfade_head")
+    async def test_successful_crossfade(
+        self, mock_collect: AsyncMock, mock_apply: MagicMock
+    ) -> None:
+        """Successful crossfade yields mixed audio chunks."""
+        head = b"\xaa" * 200
+        mock_collect.return_value = (head, False)
+
+        mixed_chunks = [b"\xbb" * 100, b"\xcc" * 100]
+
+        async def _mock_gen(*_args: Any, **_kwargs: Any) -> AsyncGenerator[bytes, None]:
+            for c in mixed_chunks:
+                yield c
+
+        mock_apply.return_value = _mock_gen()
+
+        provider = _make_provider()
+        provider._crossfade_duration_s = 5
+
+        fmt = _make_mock_pcm_format()
+        pb = MagicMock(spec=PreBuffer)
+        pb.error = None
+        pb.track_id = "next-track"
+        pb.output_format = fmt
+        provider._next_prebuffer = pb
+
+        tail = b"\xff" * 200
+        chunks = [c async for c in provider._do_crossfade(tail, fmt)]
+        assert chunks == mixed_chunks
+        mock_apply.assert_called_once()
+        call_kw = mock_apply.call_args
+        assert call_kw.kwargs["fade_out"] == tail
+        assert call_kw.kwargs["fade_in"] == head
+
+    @patch("provider.provider.apply_crossfade")
+    @patch("provider.provider.collect_crossfade_head")
+    async def test_apply_failure_yields_tail_and_head(
+        self, mock_collect: AsyncMock, mock_apply: MagicMock
+    ) -> None:
+        """apply_crossfade raises → yields tail + head separately."""
+        head = b"\xaa" * 100
+        mock_collect.return_value = (head, False)
+
+        async def _failing_gen(*_a: Any, **_kw: Any) -> AsyncGenerator[bytes, None]:
+            raise RuntimeError("ffmpeg exploded")
+            yield b""
+
+        mock_apply.return_value = _failing_gen()
+
+        provider = _make_provider()
+        provider._crossfade_duration_s = 5
+
+        fmt = _make_mock_pcm_format()
+        pb = MagicMock(spec=PreBuffer)
+        pb.error = None
+        pb.track_id = "next-track"
+        pb.output_format = fmt
+        provider._next_prebuffer = pb
+
+        tail = b"\xff" * 100
+        chunks = [c async for c in provider._do_crossfade(tail, fmt)]
+        assert chunks == [tail, head]
+
+
+# ------------------------------------------------------------------
+# Crossfade integration in get_audio_stream
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestCrossfadeIntegration:
+    """Tests for crossfade integration in the get_audio_stream prebuffer path."""
+
+    @staticmethod
+    def _setup_provider_for_stream(
+        provider: YandexYnisonProvider,
+        track_id: str = "track-1",
+        player_id: str = "player-1",
+        crossfade_s: int = 0,
+        prebuffer_next: bool = True,
+        pcm_format: MagicMock | None = None,
+    ) -> None:
+        """Wire up mocks so get_audio_stream reaches the prebuffer path."""
+        provider._crossfade_duration_s = crossfade_s
+        provider._prebuffer_next_enabled = prebuffer_next
+        provider._seek_position_ms = 0
+
+        # Align normalized format to the prebuffer format so the
+        # format-match check in get_audio_stream passes.
+        if pcm_format is not None:
+            provider._normalized_format = pcm_format
+
+        # Source details
+        provider._source_details = MagicMock()
+        provider._source_details.in_use_by = player_id
+
+        # Ynison state: playing (not paused), with the target track
+        ynison = MagicMock()
+        ynison.state = YnisonState(
+            player_state={
+                "status": {"paused": False, "progress_ms": 0, "duration_ms": 240000},
+                "player_queue": {
+                    "current_playable_index": 0,
+                    "playable_list": [{"playable_id": track_id}],
+                },
+            },
+        )
+        provider._ynison = ynison
+        provider._yandex_provider = MagicMock()
+
+        # Async mocks
+        provider._sync_progress = AsyncMock()
+        provider._signal_track_completion = AsyncMock()
+        provider._wait_for_track_change = AsyncMock(return_value=False)
+
+    async def test_crossfade_disabled_no_tail_buffer(self) -> None:
+        """When crossfade_duration_s=0, chunks pass through directly."""
+        provider = _make_provider()
+        fmt = _make_mock_pcm_format()
+        chunks_data = [b"\x01" * 100, b"\x02" * 100]
+
+        pb = MagicMock(spec=PreBuffer)
+        pb.track_id = "track-1"
+        pb.seek_ms = 0
+        pb.error = None
+        pb.output_format = fmt
+        pb.chunks_queued = 10
+        provider._prebuffer = pb
+
+        self._setup_provider_for_stream(provider, crossfade_s=0, pcm_format=fmt)
+
+        async def _yield_prebuffer() -> AsyncGenerator[bytes, None]:
+            for c in chunks_data:
+                yield c
+
+        provider._yield_from_prebuffer = _yield_prebuffer  # type: ignore[assignment]
+
+        result = []
+        async for chunk in provider.get_audio_stream("player-1"):
+            result.append(chunk)
+
+        # Chunks should pass through without TailBuffer wrapping
+        total = b"".join(result)
+        assert chunks_data[0] in total
+        assert chunks_data[1] in total
+
+    async def test_crossfade_remainder_yielded_first(self) -> None:
+        """Leftover from previous crossfade is yielded at start of iteration."""
+        provider = _make_provider()
+        provider._crossfade_remainder = b"\xdd" * 50
+
+        fmt = _make_mock_pcm_format()
+        pb = MagicMock(spec=PreBuffer)
+        pb.track_id = "track-1"
+        pb.seek_ms = 0
+        pb.error = None
+        pb.output_format = fmt
+        pb.chunks_queued = 10
+        provider._prebuffer = pb
+
+        self._setup_provider_for_stream(provider, crossfade_s=0, pcm_format=fmt)
+
+        async def _yield_prebuffer() -> AsyncGenerator[bytes, None]:
+            yield b"\xee" * 100
+
+        provider._yield_from_prebuffer = _yield_prebuffer  # type: ignore[assignment]
+
+        result = []
+        async for chunk in provider.get_audio_stream("player-1"):
+            result.append(chunk)
+
+        # First yielded data should be the remainder
+        assert result[0] == b"\xdd" * 50
+        assert provider._crossfade_remainder == b""
+
+    async def test_interrupted_stream_flushes_tail(self) -> None:
+        """When stream is interrupted, tail buffer is flushed as-is."""
+        provider = _make_provider()
+        fmt = _make_mock_pcm_format()
+        cf_bytes = crossfade_bytes_for(5.0, fmt)
+
+        big_chunk = b"\x01" * (cf_bytes + 1000)
+        pb = MagicMock(spec=PreBuffer)
+        pb.track_id = "track-1"
+        pb.seek_ms = 0
+        pb.error = None
+        pb.output_format = fmt
+        pb.chunks_queued = 10
+        provider._prebuffer = pb
+
+        self._setup_provider_for_stream(provider, crossfade_s=5, pcm_format=fmt)
+
+        async def _yield_prebuffer() -> AsyncGenerator[bytes, None]:
+            yield big_chunk
+            # Simulate interruption after first chunk
+            provider._stream_stop_event.set()
+            yield b"\x02" * 500
+
+        provider._yield_from_prebuffer = _yield_prebuffer  # type: ignore[assignment]
+
+        result = []
+        async for chunk in provider.get_audio_stream("player-1"):
+            result.append(chunk)
+
+        total = b"".join(result)
+        assert len(total) > 0
+        # Crossfade should NOT have been attempted (stream was interrupted)
+        provider._signal_track_completion.assert_not_called()
+
+    async def test_crossfade_enabled_uses_tail_buffer(self) -> None:
+        """With crossfade enabled, chunks go through TailBuffer."""
+        provider = _make_provider()
+        fmt = _make_mock_pcm_format()
+        cf_bytes = crossfade_bytes_for(3.0, fmt)
+
+        # Yield enough data to exceed tail buffer capacity
+        chunk_size = cf_bytes // 2
+        chunks_data = [b"\x01" * chunk_size, b"\x02" * chunk_size, b"\x03" * chunk_size]
+
+        pb = MagicMock(spec=PreBuffer)
+        pb.track_id = "track-1"
+        pb.seek_ms = 0
+        pb.error = None
+        pb.output_format = fmt
+        pb.chunks_queued = 10
+        provider._prebuffer = pb
+        provider._next_prebuffer = None  # No next → tail flushed as-is
+
+        self._setup_provider_for_stream(provider, crossfade_s=3, pcm_format=fmt)
+
+        async def _yield_prebuffer() -> AsyncGenerator[bytes, None]:
+            for c in chunks_data:
+                yield c
+
+        provider._yield_from_prebuffer = _yield_prebuffer  # type: ignore[assignment]
+
+        result = []
+        async for chunk in provider.get_audio_stream("player-1"):
+            result.append(chunk)
+
+        # Total yielded should equal total input (overflow + tail flush + pad)
+        total_in = sum(len(c) for c in chunks_data)
+        total_out = sum(len(c) for c in result)
+        assert total_out >= total_in
+
+    async def test_config_crossfade_duration_read(self) -> None:
+        """Provider reads crossfade_duration from config."""
+        provider = _make_provider()
+        assert provider._crossfade_duration_s == 0
+
+        config = _make_mock_config({CONF_CROSSFADE_DURATION: 7})
+        mass = _make_mock_mass()
+        manifest = _make_mock_manifest()
+        provider2 = YandexYnisonProvider(mass, manifest, config, {ProviderFeature.AUDIO_SOURCE})
+        assert provider2._crossfade_duration_s == 7
+
+    async def test_crossfade_disabled_when_prebuffer_next_off(self) -> None:
+        """Crossfade not used when prebuffer_next is disabled."""
+        config = _make_mock_config(
+            {
+                CONF_CROSSFADE_DURATION: 5,
+                CONF_PREBUFFER_NEXT: False,
+            }
+        )
+        mass = _make_mock_mass()
+        manifest = _make_mock_manifest()
+        provider = YandexYnisonProvider(mass, manifest, config, {ProviderFeature.AUDIO_SOURCE})
+        assert provider._crossfade_duration_s == 5
+        assert not provider._prebuffer_next_enabled
+
+        fmt = _make_mock_pcm_format()
+        pb = MagicMock(spec=PreBuffer)
+        pb.track_id = "t1"
+        pb.seek_ms = 0
+        pb.error = None
+        pb.output_format = fmt
+        pb.chunks_queued = 10
+        provider._prebuffer = pb
+
+        self._setup_provider_for_stream(
+            provider,
+            track_id="t1",
+            player_id="p1",
+            crossfade_s=5,
+            prebuffer_next=False,
+            pcm_format=fmt,
+        )
+
+        async def _yield_prebuffer() -> AsyncGenerator[bytes, None]:
+            yield b"\x01" * 100
+
+        provider._yield_from_prebuffer = _yield_prebuffer  # type: ignore[assignment]
+
+        result = []
+        async for chunk in provider.get_audio_stream("p1"):
+            result.append(chunk)
+        assert b"\x01" * 100 in result
