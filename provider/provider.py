@@ -26,6 +26,7 @@ from music_assistant.models.plugin import PluginProvider, PluginSource
 
 from .constants import (
     CONF_ALLOW_PLAYER_SWITCH,
+    CONF_CROSSFADE_DURATION,
     CONF_DEVICE_ID,
     CONF_DISPLAY_NAME,
     CONF_OUTPUT_BIT_DEPTH,
@@ -99,6 +100,10 @@ class YandexYnisonProvider(PluginProvider):
         prebuffer_next_value = self.config.get_value(CONF_PREBUFFER_NEXT)
         self._prebuffer_next_enabled: bool = (
             cast("bool", prebuffer_next_value) if prebuffer_next_value is not None else False
+        )
+        crossfade_value = self.config.get_value(CONF_CROSSFADE_DURATION)
+        self._crossfade_duration_s: int = (
+            cast("int", crossfade_value) if crossfade_value is not None else 0
         )
         self._cfg_sample_rate: str = (
             cast("str", self.config.get_value(CONF_OUTPUT_SAMPLE_RATE)) or OUTPUT_AUTO

@@ -13,6 +13,7 @@ from .constants import (
     CONF_ACTION_AUTH_QR,
     CONF_ACTION_CLEAR_AUTH,
     CONF_ALLOW_PLAYER_SWITCH,
+    CONF_CROSSFADE_DURATION,
     CONF_DEVICE_ID,
     CONF_DISPLAY_NAME,
     CONF_OUTPUT_BIT_DEPTH,
@@ -198,6 +199,16 @@ async def get_config_entries(
             description="When enabled, the next track in the queue is pre-buffered at ~80% "
             "progress for near-gapless transition. May increase network and memory usage.",
             default_value=False,
+        ),
+        # Crossfade duration between tracks (0 = disabled)
+        ConfigEntry(
+            key=CONF_CROSSFADE_DURATION,
+            type=ConfigEntryType.INTEGER,
+            label="Crossfade duration (seconds)",
+            description="Duration of the crossfade between tracks in seconds. "
+            "Set to 0 to disable crossfade. Requires pre-buffering to be enabled.",
+            default_value=0,
+            range=(0, 10),
         ),
         # Output sample rate
         ConfigEntry(
