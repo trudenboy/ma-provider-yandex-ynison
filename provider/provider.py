@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import struct
 import time
 from collections.abc import AsyncGenerator, Callable
 from contextlib import suppress
@@ -19,8 +18,7 @@ from music_assistant_models.enums import (
     StreamType,
 )
 from music_assistant_models.errors import LoginFailed, UnsupportedFeaturedException
-from music_assistant_models.media_items import AudioFormat
-from music_assistant_models.streamdetails import StreamDetails, StreamMetadata
+from music_assistant_models.streamdetails import StreamMetadata
 from ya_passport_auth import SecretStr
 
 from music_assistant.helpers.ffmpeg import get_ffmpeg_stream
@@ -41,103 +39,29 @@ from .constants import (
     PLAYER_ID_AUTO,
 )
 from .prebuffer import PreBuffer, make_prebuffer, run_fill, yield_from_prebuffer
+from .streaming import (
+    PCM_LOSSLESS_PARAMS,
+    PCM_LOSSY_PARAMS,
+    log_first_chunk,
+    make_pcm_format,
+)
 from .yandex_auth import refresh_music_token
 from .ynison_client import YnisonClient, YnisonDeviceInfo, YnisonState, generate_device_id
 
 if TYPE_CHECKING:
     from music_assistant_models.config_entries import ProviderConfig
     from music_assistant_models.event import MassEvent
+    from music_assistant_models.media_items import AudioFormat
     from music_assistant_models.provider import ProviderManifest
+    from music_assistant_models.streamdetails import StreamDetails
 
     from music_assistant.mass import MusicAssistant
 
+# Backward-compatible aliases (referenced in tests and internally)
+_PCM_LOSSLESS_PARAMS = PCM_LOSSLESS_PARAMS
+_PCM_LOSSY_PARAMS = PCM_LOSSY_PARAMS
+_make_pcm_format = make_pcm_format
 
-# PCM normalization profiles by YM quality tier.
-# Ensures MA's single ffmpeg receives a consistent format between tracks.
-# NOTE: AudioFormat is a *mutable* dataclass — MA's FFMpeg._log_reader_task
-# mutates input_format.codec_type in-place.  We MUST create a fresh copy for
-# every place that stores a reference (PluginSource.audio_format, PreBuffer,
-# ffmpeg output_format) so that mutation of one doesn't corrupt the others.
-_PCM_LOSSLESS_PARAMS: dict[str, Any] = {
-    "content_type": ContentType.PCM_S24LE,
-    "sample_rate": 48000,
-    "bit_depth": 24,
-    "channels": 2,
-}
-_PCM_LOSSY_PARAMS: dict[str, Any] = {
-    "content_type": ContentType.PCM_S16LE,
-    "sample_rate": 44100,
-    "bit_depth": 16,
-    "channels": 2,
-}
-
-
-def _make_pcm_format(params: dict[str, Any]) -> AudioFormat:
-    """Create a fresh AudioFormat from stored params (safe from mutation)."""
-    return AudioFormat(**params)
-
-
-_SIGNED_24BIT_MAX = 0x800000
-_SIGNED_24BIT_RANGE = 0x1000000
-
-
-def _log_first_chunk(logger: Any, chunk: bytes, fmt: AudioFormat) -> None:
-    """Log diagnostic info about the first chunk of a track stream.
-
-    Computes RMS amplitude of the first 1024 samples to help detect garbage
-    data (which appears as near-maximum amplitude white noise / hissing).
-    """
-    if not chunk:
-        return
-    sample_width = fmt.bit_depth // 8
-    if sample_width == 2:
-        pack_fmt = "<h"
-    elif sample_width == 3:
-        pack_fmt = None  # 24-bit needs manual unpacking
-    else:
-        logger.debug(
-            "First chunk: %d bytes (unsupported bit_depth=%d for RMS)",
-            len(chunk),
-            fmt.bit_depth,
-        )
-        return
-
-    n_samples = min(1024, len(chunk) // sample_width)
-    if n_samples == 0:
-        logger.debug("First chunk: %d bytes (too small for RMS)", len(chunk))
-        return
-
-    sum_sq = 0.0
-    for i in range(n_samples):
-        offset = i * sample_width
-        if pack_fmt:
-            (sample,) = struct.unpack_from(pack_fmt, chunk, offset)
-        else:
-            # 24-bit little-endian signed
-            b = chunk[offset : offset + 3]
-            val = int.from_bytes(b, "little", signed=False)
-            if val >= _SIGNED_24BIT_MAX:
-                val -= _SIGNED_24BIT_RANGE
-            sample = val
-        sum_sq += sample * sample
-
-    rms = (sum_sq / n_samples) ** 0.5
-    max_val = (1 << (fmt.bit_depth - 1)) - 1
-    rms_pct = (rms / max_val) * 100 if max_val else 0
-
-    # RMS > 70% of max for raw PCM almost certainly indicates garbage data
-    level = "WARNING" if rms_pct > 70 else "DEBUG"
-    log_fn = logger.warning if level == "WARNING" else logger.debug
-    log_fn(
-        "First chunk: %d bytes, RMS=%.0f (%.1f%% of max %d), fmt=%s/%dHz/%dbit",
-        len(chunk),
-        rms,
-        rms_pct,
-        max_val,
-        fmt.content_type.value,
-        fmt.sample_rate,
-        fmt.bit_depth,
-    )
 
 
 # How often (seconds) to sync progress to MA UI and Ynison.
@@ -447,7 +371,7 @@ class YandexYnisonProvider(PluginProvider):
                 chunk_idx = 0
                 async for chunk in self._yield_from_prebuffer():
                     if chunk_idx == 0:
-                        _log_first_chunk(self.logger, chunk, self._prebuffer.output_format)
+                        log_first_chunk(self.logger, chunk, self._prebuffer.output_format)
                     chunk_idx += 1
                     yield chunk
                     bytes_yielded += len(chunk)
@@ -592,7 +516,7 @@ class YandexYnisonProvider(PluginProvider):
             extra_input_args=extra_input_args,
         ):
             if chunk_idx == 0:
-                _log_first_chunk(self.logger, chunk, out_fmt)
+                log_first_chunk(self.logger, chunk, out_fmt)
             chunk_idx += 1
             yield chunk
 
