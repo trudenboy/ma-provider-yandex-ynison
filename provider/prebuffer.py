@@ -17,6 +17,7 @@ from music_assistant_models.enums import MediaType
 from music_assistant_models.streamdetails import StreamDetails
 
 from music_assistant.helpers.ffmpeg import get_ffmpeg_stream
+from music_assistant.helpers.util import close_async_generator
 
 if TYPE_CHECKING:
     from music_assistant_models.media_items import AudioFormat
@@ -39,13 +40,19 @@ class PreBuffer:
     chunks_queued: int = 0
     ready: asyncio.Event = field(default_factory=asyncio.Event)
     ready_threshold: int = 8
+    _audio_gen: AsyncGenerator[bytes, None] | None = field(default=None, repr=False)
 
     async def cancel(self) -> None:
-        """Cancel the prebuffer task, drain the queue and unblock consumers."""
+        """Cancel the prebuffer task, close generators, drain queue."""
         if self.task and not self.task.done():
             self.task.cancel()
             with suppress(asyncio.CancelledError):
                 await self.task
+        # Close the ffmpeg generator after the task exits to avoid
+        # "generator is already running" errors.
+        if self._audio_gen is not None:
+            await close_async_generator(self._audio_gen)
+            self._audio_gen = None
         while True:
             try:
                 self.queue.get_nowait()
@@ -92,12 +99,15 @@ async def run_fill(
         if prebuffer.seek_ms > 0:
             extra_input_args += ["-ss", f"{prebuffer.seek_ms / 1000.0:.3f}"]
 
-        async for chunk in get_ffmpeg_stream(
+        audio_gen = get_ffmpeg_stream(
             audio_input=get_audio_stream(sd),
             input_format=sd.audio_format,
             output_format=output_format,
             extra_input_args=extra_input_args,
-        ):
+        )
+        prebuffer._audio_gen = audio_gen
+
+        async for chunk in audio_gen:
             prebuffer.chunks_queued += 1
             if (
                 not prebuffer.ready.is_set()
@@ -120,6 +130,7 @@ async def run_fill(
         prebuffer.error = err
         logger.warning("Prebuffer failed for %s: %s", prebuffer.track_id, err)
     finally:
+        prebuffer._audio_gen = None
         prebuffer.ready.set()
         logger.debug(
             "Prebuffer fill done for %s: %d chunks queued, error=%s",
