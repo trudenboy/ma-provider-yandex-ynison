@@ -21,6 +21,7 @@ from music_assistant_models.errors import LoginFailed, UnsupportedFeaturedExcept
 from music_assistant_models.streamdetails import StreamMetadata
 from ya_passport_auth import SecretStr
 
+from music_assistant.helpers.audio import align_audio_to_frame_boundary
 from music_assistant.helpers.ffmpeg import get_ffmpeg_stream
 from music_assistant.models.plugin import PluginProvider, PluginSource
 
@@ -458,15 +459,15 @@ class YandexYnisonProvider(PluginProvider):
                     ):
                         break
 
-            # Pad to PCM frame boundary — prevents frame misalignment in
-            # MA's single ffmpeg when a track stream is interrupted mid-chunk.
-            # Use track_fmt captured at stream start (not self._normalized_format
-            # which may have changed mid-stream due to quality/config update).
+            # Align to PCM frame boundary — prevents misalignment in MA's
+            # downstream ffmpeg when a track stream is interrupted mid-chunk.
+            # We pad with zeros (MA's align_audio_to_frame_boundary truncates,
+            # but we can't un-yield bytes already sent downstream).
             frame_size = (track_fmt.bit_depth // 8) * track_fmt.channels
-            remainder = bytes_yielded % frame_size
-            if remainder:
-                pad = frame_size - remainder
-                yield b"\x00" * pad
+            if frame_size > 0:
+                excess = bytes_yielded % frame_size
+                if excess:
+                    yield b"\x00" * (frame_size - excess)
 
             # Don't clear _current_streaming_track_id yet — keep it set
             # during advance/wait so Ynison echo of the same track doesn't
@@ -649,8 +650,8 @@ class YandexYnisonProvider(PluginProvider):
                 "Crossfade: mixing failed, yielding tail + head separately",
                 exc_info=True,
             )
-            yield tail_data
-            yield head_data
+            yield align_audio_to_frame_boundary(tail_data, pcm_format)
+            yield align_audio_to_frame_boundary(head_data, pcm_format)
             return
 
         # Any head bytes beyond the crossfade overlap will be yielded
