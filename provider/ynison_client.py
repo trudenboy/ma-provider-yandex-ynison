@@ -369,7 +369,8 @@ class YnisonClient:
         :return: (host, redirect_ticket, session_id)
         :raises LoginFailed: If authentication fails.
         """
-        assert self._session is not None
+        if self._session is None:
+            raise RuntimeError("HTTP session not initialized — call connect() first")
         headers = self._build_headers()
 
         ws_timeout = aiohttp.ClientWSTimeout(ws_close=WS_CONNECT_TIMEOUT)
@@ -405,7 +406,8 @@ class YnisonClient:
 
     async def _connect_state(self, host: str, ticket: str, session_id: int) -> None:
         """Connect to Ynison state service and start message loop."""
-        assert self._session is not None
+        if self._session is None:
+            raise RuntimeError("HTTP session not initialized — call connect() first")
         url = f"wss://{host}{YNISON_STATE_PATH}"
         headers = self._build_headers(redirect_ticket=ticket, session_id=session_id)
 
@@ -427,7 +429,8 @@ class YnisonClient:
 
     async def _message_loop(self) -> None:
         """Read messages from state service and dispatch callbacks."""
-        assert self._ws is not None
+        if self._ws is None:
+            raise RuntimeError("WebSocket not connected — call connect() first")
         try:
             async for msg in self._ws:
                 if self._stop_event.is_set():
