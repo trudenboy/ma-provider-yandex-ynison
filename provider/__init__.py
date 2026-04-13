@@ -15,11 +15,11 @@ from .constants import (
     CONF_ALLOW_PLAYER_SWITCH,
     CONF_CROSSFADE_DURATION,
     CONF_DEVICE_ID,
-    CONF_DISPLAY_NAME,
+    CONF_MASS_PLAYER_ID,
     CONF_OUTPUT_BIT_DEPTH,
     CONF_OUTPUT_SAMPLE_RATE,
-    CONF_PLAYER,
     CONF_PREBUFFER_NEXT,
+    CONF_PUBLISH_NAME,
     CONF_REMEMBER_SESSION,
     CONF_TOKEN,
     CONF_X_TOKEN,
@@ -56,6 +56,12 @@ async def get_config_entries(
     """Return Config entries to setup this provider."""
     if values is None:
         values = {}
+
+    # Migrate legacy config keys (renamed in v1.5.0)
+    if "player" in values and CONF_MASS_PLAYER_ID not in values:
+        values[CONF_MASS_PLAYER_ID] = values.pop("player")
+    if "display_name" in values and CONF_PUBLISH_NAME not in values:
+        values[CONF_PUBLISH_NAME] = values.pop("display_name")
 
     # Pre-fill token from sibling instance if this instance has no token yet
     sibling_token, sibling_x_token = find_sibling_token(mass, instance_id)
@@ -161,7 +167,7 @@ async def get_config_entries(
         ),
         # Target MA player
         ConfigEntry(
-            key=CONF_PLAYER,
+            key=CONF_MASS_PLAYER_ID,
             type=ConfigEntryType.STRING,
             label="Connected Music Assistant Player",
             description="The Music Assistant player connected to this Ynison plugin. "
@@ -209,6 +215,7 @@ async def get_config_entries(
             "Set to 0 to disable crossfade. Requires pre-buffering to be enabled.",
             default_value=0,
             range=(0, 10),
+            depends_on=CONF_PREBUFFER_NEXT,
         ),
         # Output sample rate
         ConfigEntry(
@@ -224,6 +231,7 @@ async def get_config_entries(
                 ConfigValueOption("48000 Hz", "48000"),
                 ConfigValueOption("96000 Hz (Hi-Res)", "96000"),
             ],
+            advanced=True,
         ),
         # Output bit depth
         ConfigEntry(
@@ -238,14 +246,16 @@ async def get_config_entries(
                 ConfigValueOption("16-bit", "16"),
                 ConfigValueOption("24-bit", "24"),
             ],
+            advanced=True,
         ),
-        # Display name in Yandex Music app
+        # Device name in Yandex Music app
         ConfigEntry(
-            key=CONF_DISPLAY_NAME,
+            key=CONF_PUBLISH_NAME,
             type=ConfigEntryType.STRING,
             label="Device name in Yandex Music",
             description="How this device appears in the Yandex Music app.",
             default_value=DEFAULT_DISPLAY_NAME,
+            advanced=True,
         ),
         # Device ID (internal, hidden)
         ConfigEntry(

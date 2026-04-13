@@ -24,9 +24,9 @@ from provider.constants import (
     CONF_ALLOW_PLAYER_SWITCH,
     CONF_CROSSFADE_DURATION,
     CONF_DEVICE_ID,
-    CONF_DISPLAY_NAME,
-    CONF_PLAYER,
+    CONF_MASS_PLAYER_ID,
     CONF_PREBUFFER_NEXT,
+    CONF_PUBLISH_NAME,
     CONF_TOKEN,
     CONF_X_TOKEN,
     DEFAULT_DISPLAY_NAME,
@@ -49,9 +49,9 @@ def _make_mock_config(values: dict[str, Any] | None = None) -> MagicMock:
     defaults: dict[str, Any] = {
         CONF_TOKEN: "test-music-token",
         CONF_X_TOKEN: None,
-        CONF_PLAYER: PLAYER_ID_AUTO,
+        CONF_MASS_PLAYER_ID: PLAYER_ID_AUTO,
         CONF_ALLOW_PLAYER_SWITCH: True,
-        CONF_DISPLAY_NAME: DEFAULT_DISPLAY_NAME,
+        CONF_PUBLISH_NAME: DEFAULT_DISPLAY_NAME,
         CONF_DEVICE_ID: "test-device-uuid",
         "log_level": "GLOBAL",
     }
@@ -102,7 +102,7 @@ def _make_mock_manifest() -> MagicMock:
 def _make_provider(player_id: str = PLAYER_ID_AUTO) -> YandexYnisonProvider:
     """Create a YandexYnisonProvider with mock dependencies."""
     mass = _make_mock_mass()
-    config = _make_mock_config({CONF_PLAYER: player_id})
+    config = _make_mock_config({CONF_MASS_PLAYER_ID: player_id})
     manifest = _make_mock_manifest()
     return YandexYnisonProvider(mass, manifest, config, {ProviderFeature.AUDIO_SOURCE})
 
@@ -1398,7 +1398,7 @@ class TestInstanceNamePostfix:
 
     def test_returns_custom_display_name(self) -> None:
         """Returns display_name when it differs from the default."""
-        config = _make_mock_config({CONF_DISPLAY_NAME: "Living Room"})
+        config = _make_mock_config({CONF_PUBLISH_NAME: "Living Room"})
         mass = _make_mock_mass()
         manifest = _make_mock_manifest()
         provider = YandexYnisonProvider(mass, manifest, config, {ProviderFeature.AUDIO_SOURCE})

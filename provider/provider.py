@@ -31,11 +31,11 @@ from .constants import (
     CONF_ALLOW_PLAYER_SWITCH,
     CONF_CROSSFADE_DURATION,
     CONF_DEVICE_ID,
-    CONF_DISPLAY_NAME,
+    CONF_MASS_PLAYER_ID,
     CONF_OUTPUT_BIT_DEPTH,
     CONF_OUTPUT_SAMPLE_RATE,
-    CONF_PLAYER,
     CONF_PREBUFFER_NEXT,
+    CONF_PUBLISH_NAME,
     CONF_TOKEN,
     CONF_X_TOKEN,
     DEFAULT_DISPLAY_NAME,
@@ -100,7 +100,7 @@ class YandexYnisonProvider(PluginProvider):
 
         # Config values
         self._default_player_id: str = (
-            cast("str", self.config.get_value(CONF_PLAYER)) or PLAYER_ID_AUTO
+            cast("str", self.config.get_value(CONF_MASS_PLAYER_ID)) or PLAYER_ID_AUTO
         )
         allow_switch_value = self.config.get_value(CONF_ALLOW_PLAYER_SWITCH)
         self._allow_player_switch: bool = (
@@ -121,7 +121,7 @@ class YandexYnisonProvider(PluginProvider):
             cast("str", self.config.get_value(CONF_OUTPUT_BIT_DEPTH)) or OUTPUT_AUTO
         )
         self._display_name: str = (
-            cast("str", self.config.get_value(CONF_DISPLAY_NAME)) or DEFAULT_DISPLAY_NAME
+            cast("str", self.config.get_value(CONF_PUBLISH_NAME)) or DEFAULT_DISPLAY_NAME
         )
 
         # Device ID — persist in config so re-registration uses the same ID
