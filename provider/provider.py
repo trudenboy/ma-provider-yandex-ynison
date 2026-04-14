@@ -660,6 +660,12 @@ class YandexYnisonProvider(PluginProvider):
         msg = f"get_stream_details failed after {_API_MAX_RETRIES} attempts for {track_id}"
         raise RuntimeError(msg) from last_err
 
+    async def _invalidate_stream_cache(self, track_id: str) -> None:
+        """Evict cached stream details for a track so the next fetch is fresh."""
+        cache_key = f"ynison_sd_{track_id}"
+        await self.mass.cache.delete(cache_key, provider=self.instance_id)
+        self.logger.debug("Invalidated stream cache for %s", track_id)
+
     # ------------------------------------------------------------------
     # Crossfade
     # ------------------------------------------------------------------
@@ -777,6 +783,7 @@ class YandexYnisonProvider(PluginProvider):
                 logger=self.logger,
                 on_stream_details=self._update_metadata_from_stream,
                 pacing_mode=self._ffmpeg_pacing,
+                invalidate_cache=self._invalidate_stream_cache,
             )
         )
 
@@ -812,6 +819,7 @@ class YandexYnisonProvider(PluginProvider):
                 output_format=fmt,
                 logger=self.logger,
                 pacing_mode=self._ffmpeg_pacing,
+                invalidate_cache=self._invalidate_stream_cache,
             )
         )
 
