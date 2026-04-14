@@ -212,6 +212,7 @@ class YandexYnisonProvider(PluginProvider):
             on_state_update=self._handle_ynison_state,
             on_disconnect=self._handle_ynison_disconnect,
             logger=self.logger,
+            on_auth_failure=self._refresh_ynison_token,
         )
 
         self._runner_task = self.mass.create_task(self._ynison.connect())
@@ -881,6 +882,21 @@ class YandexYnisonProvider(PluginProvider):
             return SecretStr(token)
 
         raise LoginFailed("No Yandex Music token configured")
+
+    async def _refresh_ynison_token(self) -> SecretStr:
+        """Refresh the OAuth token for Ynison reconnection.
+
+        Called by YnisonClient on auth failure (401/403) during reconnect.
+        Uses x_token to obtain a fresh music token. If x_token is not
+        configured or refresh fails, raises LoginFailed.
+        """
+        x_token = cast("str | None", self.config.get_value(CONF_X_TOKEN))
+        if not x_token:
+            raise LoginFailed("Cannot refresh token: x_token not configured")
+        self.logger.info("Refreshing Yandex Music token for Ynison reconnect")
+        new_token = await refresh_music_token(SecretStr(x_token))
+        self._update_config_value(CONF_TOKEN, new_token.get_secret(), encrypted=True)
+        return new_token
 
     # ------------------------------------------------------------------
     # Ynison state handling
