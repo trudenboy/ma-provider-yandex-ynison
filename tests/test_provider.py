@@ -36,11 +36,9 @@ from provider.crossfade import crossfade_bytes_for
 from provider.prebuffer import PreBuffer
 from provider.provider import (
     _API_MAX_RETRIES,
-    PCM_LOSSLESS_PARAMS,
-    PCM_LOSSY_PARAMS,
     YandexYnisonProvider,
-    make_pcm_format,
 )
+from provider.streaming import PCM_LOSSLESS_PARAMS, PCM_LOSSY_PARAMS, make_pcm_format
 from provider.ynison_client import YnisonState
 
 if TYPE_CHECKING:
@@ -265,7 +263,7 @@ class TestClearActivePlayer:
 
         assert provider._active_player_id is None
         assert provider._source_details.in_use_by is None  # type: ignore[unreachable]
-        provider.mass.players.trigger_player_update.assert_called_with("some-player")
+        provider.mass.players.trigger_player_update.assert_called_with("some-player")  # type: ignore[attr-defined]
 
 
 # ------------------------------------------------------------------
@@ -1777,7 +1775,7 @@ class TestPausePlayback:
         await provider._pause_playback()
 
         assert provider._stream_stop_event.is_set()
-        provider.mass.players.cmd_stop.assert_awaited_once_with("player1")
+        provider.mass.players.cmd_stop.assert_awaited_once_with("player1")  # type: ignore[attr-defined]
         assert provider._source_details.in_use_by is None
         # Progress is preserved for resume
         assert provider._streaming_progress_ms == 50000
@@ -1792,7 +1790,7 @@ class TestPausePlayback:
         await provider._pause_playback()
 
         assert provider._stream_stop_event.is_set()
-        provider.mass.players.cmd_stop.assert_not_called()
+        provider.mass.players.cmd_stop.assert_not_called()  # type: ignore[attr-defined]
 
 
 # ------------------------------------------------------------------
@@ -1858,7 +1856,7 @@ class TestSyncProgress:
 
         meta = provider._source_details.metadata
         assert meta.elapsed_time == 5
-        provider.mass.players.trigger_player_update.assert_called_with("player1")
+        provider.mass.players.trigger_player_update.assert_called_with("player1")  # type: ignore[attr-defined]
         provider._ynison.update_playing_status.assert_awaited_once()
 
     async def test_with_seek_offset(self) -> None:
@@ -1888,7 +1886,7 @@ class TestSyncProgress:
 
         await provider._sync_progress(0, 0, None)
 
-        provider.mass.players.trigger_player_update.assert_not_called()
+        provider.mass.players.trigger_player_update.assert_not_called()  # type: ignore[attr-defined]
 
 
 # ------------------------------------------------------------------
@@ -1940,15 +1938,15 @@ class TestGetStreamDetailsWithRetry:
         assert result is sd
         mock_yp.get_stream_details.assert_awaited_once()
         # Verify cache.set was called with data field preserved
-        provider.mass.cache.set.assert_awaited_once()
-        cached_value = provider.mass.cache.set.call_args[0][1]
+        provider.mass.cache.set.assert_awaited_once()  # type: ignore[attr-defined]
+        cached_value = provider.mass.cache.set.call_args[0][1]  # type: ignore[attr-defined]
         assert cached_value["data"] == sd.data
 
     async def test_cache_hit_skips_api(self) -> None:
         """Returns cached stream details without API call."""
         provider = _make_provider()
         cached_sd = MagicMock()
-        provider.mass.cache.get = AsyncMock(return_value=cached_sd)
+        provider.mass.cache.get = AsyncMock(return_value=cached_sd)  # type: ignore[method-assign]
         mock_yp = MagicMock()
         mock_yp.get_stream_details = AsyncMock()
         provider._yandex_provider = mock_yp
@@ -2099,15 +2097,15 @@ class TestActivatePlayback:
         player.player_id = "player1"
         player.display_name = "Player 1"
         player.state.playback_state = PlaybackState.IDLE
-        provider.mass.players.all_players.return_value = [player]
-        provider.mass.players.get_player.return_value = player
+        provider.mass.players.all_players.return_value = [player]  # type: ignore[attr-defined]
+        provider.mass.players.get_player.return_value = player  # type: ignore[attr-defined]
 
         state = _make_ynison_state(progress_ms=0, paused=False)
 
         await provider._activate_playback(state)
 
         assert provider._active_player_id == "player1"
-        provider.mass.create_task.assert_called()
+        provider.mass.create_task.assert_called()  # type: ignore[attr-defined]
 
     async def test_detects_track_change(self) -> None:
         """Detects track change and updates streaming track id."""
@@ -2116,8 +2114,8 @@ class TestActivatePlayback:
 
         player = MagicMock()
         player.player_id = "player1"
-        provider.mass.players.all_players.return_value = [player]
-        provider.mass.players.get_player.return_value = player
+        provider.mass.players.all_players.return_value = [player]  # type: ignore[attr-defined]
+        provider.mass.players.get_player.return_value = player  # type: ignore[attr-defined]
         provider._active_player_id = "player1"
 
         state = _make_ynison_state(
@@ -2140,7 +2138,7 @@ class TestActivatePlayback:
 
         player = MagicMock()
         player.player_id = "player1"
-        provider.mass.players.get_player.return_value = player
+        provider.mass.players.get_player.return_value = player  # type: ignore[attr-defined]
 
         state = _make_ynison_state(
             progress_ms=50000,
@@ -2156,8 +2154,8 @@ class TestActivatePlayback:
     async def test_no_target_player_returns(self) -> None:
         """Returns early when no target player is available."""
         provider = _make_provider()
-        provider.mass.players.all_players.return_value = []
-        provider.mass.players.get_player.return_value = None
+        provider.mass.players.all_players.return_value = []  # type: ignore[attr-defined]
+        provider.mass.players.get_player.return_value = None  # type: ignore[attr-defined]
 
         state = _make_ynison_state()
 
@@ -2328,7 +2326,7 @@ class TestDoCrossfade:
 
         async def _failing_gen(*_a: Any, **_kw: Any) -> AsyncGenerator[bytes, None]:
             raise RuntimeError("ffmpeg exploded")
-            yield b""
+            yield b""  # type: ignore[unreachable]
 
         mock_apply.return_value = _failing_gen()
 
@@ -2400,9 +2398,9 @@ class TestCrossfadeIntegration:
         provider._yandex_provider = MagicMock()
 
         # Async mocks
-        provider._sync_progress = AsyncMock()
-        provider._signal_track_completion = AsyncMock()
-        provider._wait_for_track_change = AsyncMock(return_value=False)
+        provider._sync_progress = AsyncMock()  # type: ignore[method-assign]
+        provider._signal_track_completion = AsyncMock()  # type: ignore[method-assign]
+        provider._wait_for_track_change = AsyncMock(return_value=False)  # type: ignore[method-assign]
 
     async def test_crossfade_disabled_no_tail_buffer(self) -> None:
         """When crossfade_duration_s=0, chunks pass through directly."""
@@ -2424,7 +2422,7 @@ class TestCrossfadeIntegration:
             for c in chunks_data:
                 yield c
 
-        provider._yield_from_prebuffer = _yield_prebuffer  # type: ignore[assignment]
+        provider._yield_from_prebuffer = _yield_prebuffer  # type: ignore[assignment,method-assign]
 
         result = []
         async for chunk in provider.get_audio_stream("player-1"):
@@ -2454,7 +2452,7 @@ class TestCrossfadeIntegration:
         async def _yield_prebuffer() -> AsyncGenerator[bytes, None]:
             yield b"\xee" * 100
 
-        provider._yield_from_prebuffer = _yield_prebuffer  # type: ignore[assignment]
+        provider._yield_from_prebuffer = _yield_prebuffer  # type: ignore[assignment,method-assign]
 
         result = []
         async for chunk in provider.get_audio_stream("player-1"):
@@ -2487,7 +2485,7 @@ class TestCrossfadeIntegration:
             provider._stream_stop_event.set()
             yield b"\x02" * 500
 
-        provider._yield_from_prebuffer = _yield_prebuffer  # type: ignore[assignment]
+        provider._yield_from_prebuffer = _yield_prebuffer  # type: ignore[assignment,method-assign]
 
         result = []
         async for chunk in provider.get_audio_stream("player-1"):
@@ -2496,7 +2494,7 @@ class TestCrossfadeIntegration:
         total = b"".join(result)
         assert len(total) > 0
         # Crossfade should NOT have been attempted (stream was interrupted)
-        provider._signal_track_completion.assert_not_called()
+        provider._signal_track_completion.assert_not_called()  # type: ignore[attr-defined]
 
     async def test_crossfade_enabled_uses_tail_buffer(self) -> None:
         """With crossfade enabled, chunks go through TailBuffer."""
@@ -2523,7 +2521,7 @@ class TestCrossfadeIntegration:
             for c in chunks_data:
                 yield c
 
-        provider._yield_from_prebuffer = _yield_prebuffer  # type: ignore[assignment]
+        provider._yield_from_prebuffer = _yield_prebuffer  # type: ignore[assignment,method-assign]
 
         result = []
         async for chunk in provider.get_audio_stream("player-1"):
@@ -2580,7 +2578,7 @@ class TestCrossfadeIntegration:
         async def _yield_prebuffer() -> AsyncGenerator[bytes, None]:
             yield b"\x01" * 100
 
-        provider._yield_from_prebuffer = _yield_prebuffer  # type: ignore[assignment]
+        provider._yield_from_prebuffer = _yield_prebuffer  # type: ignore[assignment,method-assign]
 
         result = []
         async for chunk in provider.get_audio_stream("p1"):
