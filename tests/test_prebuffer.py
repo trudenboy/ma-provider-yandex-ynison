@@ -205,10 +205,10 @@ class TestRunFill:
         # EOF sentinel still delivered
         assert pb.queue.get_nowait() is None
 
-    async def test_put_timeout_aborts_fill(self) -> None:
-        """run_fill aborts when queue.put times out."""
+    async def test_backpressure_blocks_producer(self) -> None:
+        """run_fill blocks on a full queue until the consumer drains it."""
         fmt = MagicMock()
-        # Tiny queue that fills instantly
+        # Queue of size 1 — fills immediately after the first chunk
         pb = make_prebuffer(track_id="t:1", seek_ms=0, output_format=fmt, maxsize=1)
 
         sd = MagicMock()
@@ -218,29 +218,41 @@ class TestRunFill:
         async def _audio_stream(_sd: object) -> Any:
             yield b"raw"
 
-        # Produce many chunks — second one should timeout
+        produced: list[bytes] = []
+
         async def _fake_ffmpeg(**_kwargs: object) -> Any:
-            for i in range(100):
-                yield f"chunk-{i}".encode()
+            for i in range(5):
+                chunk = f"chunk-{i}".encode()
+                produced.append(chunk)
+                yield chunk
 
         logger = MagicMock()
 
-        # Pre-fill the queue so it's full
-        await pb.queue.put(b"blocking")
-
-        with (
-            patch("provider.prebuffer.get_ffmpeg_stream", side_effect=_fake_ffmpeg),
-            patch("provider.prebuffer._QUEUE_PUT_TIMEOUT", 0.05),
-        ):
-            await run_fill(
-                prebuffer=pb,
-                get_stream_details=get_stream_details,
-                get_audio_stream=_audio_stream,
-                output_format=fmt,
-                logger=logger,
+        with patch("provider.prebuffer.get_ffmpeg_stream", side_effect=_fake_ffmpeg):
+            # Start fill in background — it will block on the full queue
+            task = asyncio.create_task(
+                run_fill(
+                    prebuffer=pb,
+                    get_stream_details=get_stream_details,
+                    get_audio_stream=_audio_stream,
+                    output_format=fmt,
+                    logger=logger,
+                )
             )
+            # Drain the queue — producer resumes as consumer reads
+            consumed: list[bytes | None] = []
+            while True:
+                chunk = await asyncio.wait_for(pb.queue.get(), timeout=2.0)
+                consumed.append(chunk)
+                if chunk is None:
+                    break
 
-        assert isinstance(pb.error, TimeoutError)
+            await task
+
+        # All 5 chunks produced plus EOF sentinel
+        assert len(produced) == 5
+        assert consumed[-1] is None
+        assert pb.error is None
 
     async def test_ready_event_fires_after_threshold(self) -> None:
         """run_fill sets ready after ready_threshold chunks are queued."""
