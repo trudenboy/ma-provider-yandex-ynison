@@ -8,7 +8,7 @@ Music app via the Ynison protocol (Yandex's equivalent of Spotify Connect).
 - **Type**: `PluginProvider` with `ProviderFeature.AUDIO_SOURCE`
 - **Manifest type**: `plugin` (`multi_instance: true`, `depends_on: yandex_music`)
 - **Domain**: `yandex_ynison`
-- **Stage**: `beta` (v1.4.0)
+- **Stage**: `beta` (v1.5.0)
 - **Architecture reference**: `spotify_connect` provider in MA server
 
 ## Architecture
@@ -27,7 +27,6 @@ YandexYnisonProvider (provider.py)
   ├─ resolves StreamDetails via linked yandex_music provider
   ├─ fetches audio from Yandex CDN (raw or encrypted FLAC/MP3/AAC)
   ├─ per-track ffmpeg → fixed PCM (s16le or s24le)
-  ├─ optional: pre-buffer next track + crossfade
   │
   ▼
 PluginSource → MA Player (Chromecast / DLNA / AirPlay / etc.)
@@ -44,7 +43,7 @@ PluginSource → MA Player (Chromecast / DLNA / AirPlay / etc.)
   at session start. Mid-session format changes (e.g. provider reload) only
   apply on the next session.
 - **Fresh AudioFormat copies**: `AudioFormat` is mutable; MA's ffmpeg mutates
-  `input_format.codec_type` in-place. Every reference (PluginSource, PreBuffer,
+  `input_format.codec_type` in-place. Every reference (PluginSource,
   ffmpeg output_format) uses a fresh `make_pcm_format()` copy.
 - **Progress clamped**: Ynison rejects `progress > duration` (error 400030001,
   disconnects WS). Always `min(progress_ms, duration_ms)` before sending.
@@ -59,9 +58,7 @@ PluginSource → MA Player (Chromecast / DLNA / AirPlay / etc.)
 | `provider/__init__.py` | Setup function, config entries, `SUPPORTED_FEATURES` |
 | `provider/provider.py` | `YandexYnisonProvider(PluginProvider)` — main plugin class |
 | `provider/ynison_client.py` | `YnisonClient` — WebSocket client for Ynison protocol |
-| `provider/streaming.py` | PCM normalization profiles, ffmpeg pacing args, RMS diagnostics |
-| `provider/prebuffer.py` | `PreBuffer` — async queue-based pre-buffering with garbage detection |
-| `provider/crossfade.py` | `TailBuffer`, crossfade via MA's `StandardCrossFade` |
+| `provider/streaming.py` | PCM normalization profiles, ffmpeg pacing args |
 | `provider/protocols.py` | `YandexMusicProviderLike` — structural Protocol for yandex_music |
 | `provider/yandex_auth.py` | QR auth + token refresh via `ya-passport-auth` library |
 | `provider/config_helpers.py` | Sibling instance token discovery |
@@ -76,9 +73,7 @@ PluginSource → MA Player (Chromecast / DLNA / AirPlay / etc.)
 | `x_token` | SecureString | — | Long-lived session token for auto-refresh (hidden) |
 | `mass_player_id` | String | `__auto__` | Target MA player ID or auto-select |
 | `allow_player_switch` | Boolean | `true` | Allow selecting plugin source on any player |
-| `prebuffer_next_track` | Boolean | `false` | Pre-buffer next track at ~80% for gapless |
-| `crossfade_duration` | Integer(0-10) | `0` | Crossfade seconds (requires prebuffer) |
-| `ffmpeg_pacing` | String | `readrate` | Pacing: `readrate` / `realtime` / `unlimited` |
+| `ffmpeg_pacing` | String | `realtime` | Pacing: `realtime` / `unlimited` |
 | `output_sample_rate` | String | `auto` | PCM sample rate: `auto` / `44100` / `48000` / `96000` |
 | `output_bit_depth` | String | `auto` | PCM bit depth: `auto` / `16` / `24` |
 | `publish_name` | String | `Music Assistant` | Device name in Yandex Music app |
@@ -92,23 +87,17 @@ Auto-detection: `superb`/`lossless` → 24-bit/48kHz, else → 16-bit/44.1kHz.
    is active and not paused
 2. **Track change detected** → `_activate_playback()` compares `current_track_id`
    with `_current_streaming_track_id`, signals `_track_changed_event`
-3. **Pre-buffer start** → `_start_prebuffer()` kicks off `run_fill()` which:
-   - Fetches `StreamDetails` via `_get_stream_details_with_retry()` (cached 5min, 3 retries with exponential backoff)
-   - Pipes audio through per-track ffmpeg to fixed PCM format
-   - Feeds chunks into `asyncio.Queue(maxsize=64)`
-   - First chunk RMS check (>55% = garbage → retry with fresh stream details)
-4. **get_audio_stream()** outer loop:
-   - Checks for pre-buffer hit → `_yield_from_prebuffer()`
-   - Falls back to direct `_stream_track()` on miss
+3. **get_audio_stream()** outer loop:
+   - Streams via `_stream_track()` which fetches StreamDetails
+     (cached 5min, 3 retries with exponential backoff), pipes audio through
+     per-track ffmpeg to fixed PCM format
    - Progress synced every 5s to both MA metadata and Ynison
    - PCM frame boundary padding on interruptions
-5. **Track end** → `_signal_track_completion()`:
+4. **Track end** → `_signal_track_completion()`:
    - Sends `progress=duration` to Ynison
    - For RADIO: replenishes queue via `get_rotor_station_tracks()`
    - Advances `current_playable_index` via `update_player_state`
    - Waits for Ynison to confirm new track (ignoring echoes)
-6. **Next-track pre-buffer** → `_maybe_prebuffer_next()` triggers at 80% progress
-   into a separate `_next_prebuffer` slot, promoted on actual track transition
 
 ## Development setup
 

@@ -13,7 +13,7 @@ Connect).
 
 ## Status
 
-**Beta** (v1.4.0) — see [CHANGELOG.md](CHANGELOG.md) and [ROADMAP.md](ROADMAP.md).
+**Beta** (v1.5.0) — see [CHANGELOG.md](CHANGELOG.md) and [ROADMAP.md](ROADMAP.md).
 
 ## Architecture
 
@@ -30,7 +30,6 @@ YandexYnisonProvider (provider.py)
   ├─ resolves StreamDetails via linked yandex_music provider
   ├─ fetches audio from Yandex CDN (raw or encrypted FLAC/MP3/AAC)
   ├─ per-track ffmpeg → fixed PCM (s16le or s24le)
-  ├─ optional: pre-buffer next track + crossfade
   │
   ▼
 PluginSource → MA Player (Chromecast / DLNA / AirPlay / etc.)
@@ -55,9 +54,8 @@ outer ffmpeg never encounters mid-stream format changes.
 
 ```
 Yandex CDN → raw audio (FLAC/MP3/AAC)
-  → ffmpeg (per-track, configurable pacing)
+  → ffmpeg (per-track, realtime pacing)
   → PCM s16le@44.1kHz or s24le@48kHz (based on quality tier)
-  → [optional: pre-buffer queue → crossfade mixer]
   → yield chunks via get_audio_stream()
   → MA outer ffmpeg → target player
 ```
@@ -65,17 +63,6 @@ Yandex CDN → raw audio (FLAC/MP3/AAC)
 The PCM format is **frozen at session start** — if the normalization format
 changes mid-session (e.g. provider reload), the new format applies only to the
 next session, preventing bit-depth/sample-rate mismatches.
-
-### Pre-buffering and crossfade
-
-When **pre-buffer** is enabled, the next track begins downloading at ~80%
-progress of the current track. Audio data fills an `asyncio.Queue` (max 64
-chunks), and a `ready` event fires after 8 chunks are buffered.
-
-When **crossfade** is enabled (requires pre-buffer), a `TailBuffer` accumulates
-the tail of the outgoing track while a matching amount of head bytes is
-collected from the next track's prebuffer. MA's `StandardCrossFade` engine mixes
-the two with silence stripping and frame alignment.
 
 ### Ynison echo detection
 
@@ -99,9 +86,7 @@ nearing the end of the queue, then pushing the expanded list to Ynison via
 | `provider/__init__.py` | Setup function, config entries, `SUPPORTED_FEATURES` |
 | `provider/provider.py` | `YandexYnisonProvider(PluginProvider)` — main plugin class |
 | `provider/ynison_client.py` | `YnisonClient` — WebSocket client for Ynison protocol |
-| `provider/streaming.py` | PCM normalization profiles, ffmpeg pacing, RMS diagnostics |
-| `provider/prebuffer.py` | `PreBuffer` — async queue-based pre-buffering for gapless transitions |
-| `provider/crossfade.py` | `TailBuffer`, crossfade mixing via MA's `StandardCrossFade` |
+| `provider/streaming.py` | PCM normalization profiles, ffmpeg pacing args |
 | `provider/protocols.py` | `YandexMusicProviderLike` — structural Protocol for yandex_music dependency |
 | `provider/yandex_auth.py` | QR authentication and token refresh via `ya-passport-auth` |
 | `provider/config_helpers.py` | Sibling instance token discovery |
@@ -130,14 +115,12 @@ New instances auto-detect and reuse tokens from existing sibling instances.
 |-----------|------|---------|-------------|
 | **Connected MA Player** | Dropdown | `Auto` | Target MA player. `Auto` prefers a currently playing player, falls back to first available |
 | **Allow manual player switching** | Boolean | `true` | When enabled, selecting this plugin as a source on any player switches playback to it. When disabled, playback is fixed to the configured player |
-| **Pre-buffer next track** | Boolean | `false` | Pre-buffers the next track at ~80% progress for near-gapless transition. Increases network and memory usage |
-| **Crossfade duration** | Integer (0–10) | `0` | Crossfade between tracks in seconds. Requires pre-buffering. `0` = disabled |
 
 ### Advanced
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| **FFmpeg pacing mode** | Dropdown | `Readrate 1.1x` | Controls inner per-track ffmpeg read speed. `Readrate 1.1x + burst` — soft throttle with 5 s initial burst (recommended). `Realtime (-re)` — strict 1x, may add latency. `Unlimited` — no rate limit, lowest latency but higher memory |
+| **FFmpeg pacing mode** | Dropdown | `Realtime` | Controls inner per-track ffmpeg read speed. `Realtime (-re)` — strict 1x pacing (default). `Unlimited` — no rate limit, lowest latency but higher memory |
 | **Output sample rate** | Dropdown | `Auto` | PCM output sample rate. `Auto` selects 44.1 kHz for lossy, 48 kHz for lossless sources. Options: 44100, 48000, 96000 Hz |
 | **Output bit depth** | Dropdown | `Auto` | PCM output bit depth. `Auto` selects 16-bit for lossy, 24-bit for lossless. Options: 16, 24 bit |
 | **Device name** | String | `Music Assistant` | How this device appears in the Yandex Music app |

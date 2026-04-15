@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.0] - 2026-04-15
+
+### Removed
+- **Pre-buffer system**: removed `prebuffer.py`, `PreBuffer`, `run_fill`, `_start_prebuffer`, `_yield_from_prebuffer`, `_maybe_prebuffer_next` — simplifies streaming to direct `_stream_track()` path
+- **Crossfade**: removed `crossfade.py`, `TailBuffer`, `_do_crossfade`, `apply_crossfade`, `collect_crossfade_head` — MA's outer ffmpeg handles transitions
+- **RMS diagnostics**: removed `compute_rms_pct`, `log_first_chunk`, 24-bit PCM constants from `streaming.py`
+- **Readrate pacing**: removed `readrate 1.1x + burst` FFmpeg pacing mode; default changed to `realtime (-re)`
+- Config entries: `prebuffer_next_track`, `crossfade_duration`
+- ~2,800 lines of code and tests removed
+
+### Changed
+- FFmpeg pacing default changed from `readrate` to `realtime (-re)`
+- Pacing options reduced to: `realtime` (default) and `unlimited`
+
 ## [1.4.0] - 2026-04-13
 
 ### Added
