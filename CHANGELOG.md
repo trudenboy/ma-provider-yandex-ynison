@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.2] - 2026-04-15
+
+### Removed
+- **Unlimited pacing mode**: removed `PACING_UNLIMITED`, `CONF_FFMPEG_PACING` config entry; realtime (`-re`) is now always applied
+
 ## [1.5.1] - 2026-04-15
 
 ### Fixed
