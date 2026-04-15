@@ -18,10 +18,10 @@ test = [
   "codespell>=2.4",
   "music-assistant @ git+https://github.com/music-assistant/server.git@dev",
   "aiohttp>=3.9.0",
-  "ruff==0.14.13",
-  "mypy==1.19.1",
-  "pre-commit==4.5.1",
-  "pre-commit-hooks==6.0.0",
+  "ruff>=0.14",
+  "mypy>=1.19",
+  "pre-commit>=4.5",
+  "pre-commit-hooks>=6.0",
 ]
 
 [build-system]
