@@ -49,7 +49,7 @@ filterwarnings = [
 skip = "*.min.js,*.svg,docs-site/package-lock.json"
 
 [tool.mypy]
-python_version = "3.12"
+python_version = "3.14"
 platform = "linux"
 follow_imports = "silent"
 ignore_missing_imports = true
