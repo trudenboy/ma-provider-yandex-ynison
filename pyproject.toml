@@ -2,11 +2,9 @@
 [project]
 name = "ma-provider-yandex-ynison"
 description = "Yandex Music Connect (Ynison) provider for Music Assistant"
-requires-python = ">=3.14"
+requires-python = ">=3.12"
 dynamic = ["version"]
-dependencies = [
-  "ya-passport-auth>=1.0.0",
-]
+dependencies = []
 
 [project.optional-dependencies]
 test = [
@@ -17,11 +15,10 @@ test = [
   "syrupy>=5.0",
   "codespell>=2.4",
   "music-assistant @ git+https://github.com/music-assistant/server.git@dev",
-  "aiohttp>=3.9.0",
-  "ruff==0.14.13",
-  "mypy==1.19.1",
-  "pre-commit==4.5.1",
-  "pre-commit-hooks==6.0.0",
+  "ruff>=0.14",
+  "mypy>=1.19",
+  "pre-commit>=4.5",
+  "pre-commit-hooks>=6.0",
 ]
 
 [build-system]
@@ -49,7 +46,7 @@ filterwarnings = [
 skip = "*.min.js,*.svg,docs-site/package-lock.json"
 
 [tool.mypy]
-python_version = "3.14"
+python_version = "3.12"
 platform = "linux"
 follow_imports = "silent"
 ignore_missing_imports = true
