@@ -128,6 +128,6 @@ Uses reusable workflows from `trudenboy/ma-provider-tools`:
 - State URL: `wss://{host}/ynison_state.YnisonStateService/PutYnisonState`
 - Auth: `Authorization: OAuth {token}`, device info in `Sec-WebSocket-Protocol` header
 - Reconnect: exponential backoff (2, 4, 8, 16, 30, 60s) with ±20% jitter, max 5 attempts
-- State merging: one-level-deep dict union (sub-objects like `player_queue` and `status` are complete replacements)
+- State merging: top-level sub-object replacement (Ynison sends `player_queue` and `status` as complete objects, so each top-level key is replaced wholesale; top-level keys absent from an update are retained)
 - Radio queue replenishment is done by the active device via REST API — Ynison only syncs state
 - Reference implementations: `bulatorr/go-yaynison` (Go), `FozerG/YandexMusicRPC` (Python)
