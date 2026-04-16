@@ -5,7 +5,7 @@ description = "Yandex Music Connect (Ynison) provider for Music Assistant"
 requires-python = ">=3.14"
 dynamic = ["version"]
 dependencies = [
-  "ya-passport-auth>=1.0.0",
+  "ya-passport-auth>=1.2.3",
 ]
 
 [project.optional-dependencies]
