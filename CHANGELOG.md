@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- **Quality auto-detection**: `_update_normalized_format` now reads the yandex_music quality tier from `provider.config.get_value("quality")` instead of a non-existent `get_quality()` method, so superb/lossless quality correctly maps to 24-bit/48 kHz PCM without manual overrides (PR #3614 review)
+
+### Changed
+- `YandexMusicProviderLike` Protocol: removed `get_quality()` (the in-tree yandex_music provider does not implement it); quality is read from the shared `ProviderConfig`
+
 ## [1.5.2] - 2026-04-15
 
 ### Removed
