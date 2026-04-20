@@ -36,8 +36,10 @@ YM_INSTANCE_OWN: Final[str] = "__own__"
 # Player selection
 PLAYER_ID_AUTO: Final[str] = "__auto__"
 
-# yandex_music provider config key for audio quality tier (read via provider.config.get_value)
+# yandex_music provider config keys (read via provider.config.get_value)
 YANDEX_MUSIC_CONF_QUALITY: Final[str] = "quality"
+YANDEX_MUSIC_CONF_TOKEN: Final[str] = "token"
+YANDEX_MUSIC_CONF_X_TOKEN: Final[str] = "x_token"
 YANDEX_MUSIC_LOSSLESS_QUALITIES: Final[frozenset[str]] = frozenset({"superb", "lossless"})
 
 # Defaults

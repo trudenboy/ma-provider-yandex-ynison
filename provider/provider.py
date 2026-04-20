@@ -44,6 +44,8 @@ from .constants import (
     OUTPUT_AUTO,
     PLAYER_ID_AUTO,
     YANDEX_MUSIC_CONF_QUALITY,
+    YANDEX_MUSIC_CONF_TOKEN,
+    YANDEX_MUSIC_CONF_X_TOKEN,
     YANDEX_MUSIC_LOSSLESS_QUALITIES,
     YM_INSTANCE_OWN,
 )
@@ -519,8 +521,8 @@ class YandexYnisonProvider(PluginProvider):
                 f"Linked Yandex Music instance '{self._ym_instance_id}' is not loaded. "
                 "Check that the Yandex Music provider is enabled and configured."
             )
-        token = cast("str | None", ym_provider.config.get_value(CONF_TOKEN))
-        x_token = cast("str | None", ym_provider.config.get_value("x_token"))
+        token = cast("str | None", ym_provider.config.get_value(YANDEX_MUSIC_CONF_TOKEN))
+        x_token = cast("str | None", ym_provider.config.get_value(YANDEX_MUSIC_CONF_X_TOKEN))
         return (token, x_token)
 
     async def _resolve_token(self) -> SecretStr:
