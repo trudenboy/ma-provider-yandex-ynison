@@ -94,6 +94,24 @@ async def test_selected_own_shows_token() -> None:
     assert token.required is True
 
 
+async def test_upgrade_with_existing_token_preserves_own_mode() -> None:
+    """Upgrade from own-mode (CONF_TOKEN set, CONF_YM_INSTANCE absent) stays OWN.
+
+    Even if exactly one yandex_music instance exists, we must not silently
+    switch the user's auth source on a no-op Save after upgrade.
+    """
+    mass = _make_mock_mass({"ym-a": {"domain": "yandex_music", "name": "Primary"}})
+    entries = await get_config_entries(mass, values={CONF_TOKEN: "legacy-token"})
+    by_key = _entries_by_key(entries)
+
+    ym_source = by_key[CONF_YM_INSTANCE]
+    assert ym_source.default_value == YM_INSTANCE_OWN
+
+    token = by_key[CONF_TOKEN]
+    assert token.hidden is False
+    assert token.required is True
+
+
 async def test_stale_ym_selection_clamps_default_to_own() -> None:
     """A saved selection pointing at a removed YM instance clamps to OWN.
 

@@ -64,9 +64,14 @@ async def get_config_entries(
     # Determine the currently selected source (borrow vs own)
     selected = cast("str | None", values.get(CONF_YM_INSTANCE))
     if selected is None:
-        # Fresh install / upgrade: default to the single YM instance if exactly
-        # one is available, otherwise require explicit user choice.
-        selected = ym_instances[0][0] if len(ym_instances) == 1 else YM_INSTANCE_OWN
+        # Preserve existing own-token configs on upgrade (CONF_TOKEN already set
+        # but CONF_YM_INSTANCE absent). Only auto-select borrowing for truly
+        # fresh installs with no stored token and exactly one YM instance.
+        has_manual_token = bool(values.get(CONF_TOKEN))
+        if has_manual_token:
+            selected = YM_INSTANCE_OWN
+        else:
+            selected = ym_instances[0][0] if len(ym_instances) == 1 else YM_INSTANCE_OWN
     borrowing = selected != YM_INSTANCE_OWN and selected in ym_instance_ids
 
     # Dynamic label
