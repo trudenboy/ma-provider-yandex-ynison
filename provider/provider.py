@@ -504,17 +504,15 @@ class YandexYnisonProvider(PluginProvider):
     # Token handling
     # ------------------------------------------------------------------
 
-    def _read_ym_tokens(self) -> tuple[str | None, str | None] | None:
+    def _read_ym_tokens(self) -> tuple[str | None, str | None]:
         """Read token/x_token from the linked yandex_music provider's config.
 
-        Returns None when this instance is in own-token mode (no borrowing).
-        Raises LoginFailed with a distinct message when borrow is configured
-        but the linked YM provider is not currently loaded — this is separate
-        from the "loaded but unauthenticated" case so operators can tell the
-        two apart.
+        Borrow-mode only — callers must check ``self._ym_instance_id is not None``
+        before calling. Raises LoginFailed with a distinct message when the
+        linked YM provider is not currently loaded — separate from the
+        "loaded but unauthenticated" case so operators can tell the two apart.
         """
-        if self._ym_instance_id is None:
-            return None
+        assert self._ym_instance_id is not None, "Caller must check borrow mode before calling"
         ym_provider = self.mass.get_provider(self._ym_instance_id)
         if ym_provider is None:
             raise LoginFailed(
@@ -535,11 +533,7 @@ class YandexYnisonProvider(PluginProvider):
         In own mode: return the manually entered CONF_TOKEN. No auto-refresh.
         """
         if self._ym_instance_id is not None:
-            pair = self._read_ym_tokens()
-            if pair is None:
-                # Unreachable: _ym_instance_id is set, so _read_ym_tokens returns a tuple
-                raise LoginFailed("Invalid borrow-mode state")
-            token, x_token = pair
+            token, x_token = self._read_ym_tokens()
             if token:
                 return SecretStr(token)
             if x_token:
@@ -564,8 +558,7 @@ class YandexYnisonProvider(PluginProvider):
         to paste a new token manually.
         """
         if self._ym_instance_id is not None:
-            pair = self._read_ym_tokens()
-            x_token = pair[1] if pair else None
+            _, x_token = self._read_ym_tokens()
             if not x_token:
                 raise LoginFailed("Cannot refresh: linked Yandex Music instance has no x_token")
             self.logger.info("Refreshing Yandex Music token for Ynison reconnect (borrow mode)")
