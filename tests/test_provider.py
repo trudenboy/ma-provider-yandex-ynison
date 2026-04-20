@@ -1150,12 +1150,12 @@ class TestResolveTokenBorrowMode:
             await provider._resolve_token()
 
     async def test_raises_when_ym_instance_unavailable(self) -> None:
-        """Raises LoginFailed when the linked YM instance is not loaded."""
+        """Raises LoginFailed with a distinct 'not loaded' message when YM is missing."""
         provider = _make_provider()
         provider._ym_instance_id = "ym-inst"
         provider.mass.get_provider = MagicMock(return_value=None)
 
-        with pytest.raises(LoginFailed, match="no credentials"):
+        with pytest.raises(LoginFailed, match="not loaded"):
             await provider._resolve_token()
 
 
@@ -1198,6 +1198,15 @@ class TestRefreshYnisonToken:
         provider.mass.get_provider = MagicMock(return_value=ym)
 
         with pytest.raises(LoginFailed, match="no x_token"):
+            await provider._refresh_ynison_token()
+
+    async def test_borrow_mode_raises_when_ym_not_loaded(self) -> None:
+        """Raises LoginFailed with a distinct 'not loaded' message on reactive refresh."""
+        provider = _make_provider()
+        provider._ym_instance_id = "ym-inst"
+        provider.mass.get_provider = MagicMock(return_value=None)
+
+        with pytest.raises(LoginFailed, match="not loaded"):
             await provider._refresh_ynison_token()
 
 

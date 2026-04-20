@@ -92,6 +92,10 @@ async def get_config_entries(
     ]
     source_options.append(ConfigValueOption("Use own token (manual entry)", YM_INSTANCE_OWN))
 
+    # Guard against a stale selection pointing at a removed YM instance — the
+    # UI would otherwise render with a default that isn't in `options`.
+    dropdown_default = selected if borrowing or selected == YM_INSTANCE_OWN else YM_INSTANCE_OWN
+
     return (
         ConfigEntry(
             key="label_text",
@@ -106,7 +110,7 @@ async def get_config_entries(
             "instance. Requires configuring Yandex Music first. Select 'Use own token' "
             "to enter a music token manually.",
             options=source_options,
-            default_value=selected,
+            default_value=dropdown_default,
             required=True,
         ),
         ConfigEntry(

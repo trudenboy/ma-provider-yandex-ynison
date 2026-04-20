@@ -92,3 +92,23 @@ async def test_selected_own_shows_token() -> None:
     token = by_key[CONF_TOKEN]
     assert token.hidden is False
     assert token.required is True
+
+
+async def test_stale_ym_selection_clamps_default_to_own() -> None:
+    """A saved selection pointing at a removed YM instance clamps to OWN.
+
+    Guards against the dropdown rendering with a default_value that is not
+    in its options (which would show as an invalid/empty selection).
+    """
+    mass = _make_mock_mass({"ym-b": {"domain": "yandex_music", "name": "B"}})
+    entries = await get_config_entries(mass, values={CONF_YM_INSTANCE: "ym-removed"})
+    by_key = _entries_by_key(entries)
+
+    ym_source = by_key[CONF_YM_INSTANCE]
+    option_values = {opt.value for opt in ym_source.options}
+    assert ym_source.default_value == YM_INSTANCE_OWN
+    assert ym_source.default_value in option_values
+
+    token = by_key[CONF_TOKEN]
+    assert token.hidden is False
+    assert token.required is True

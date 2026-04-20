@@ -506,14 +506,19 @@ class YandexYnisonProvider(PluginProvider):
         """Read token/x_token from the linked yandex_music provider's config.
 
         Returns None when this instance is in own-token mode (no borrowing).
-        Returns (None, None) when borrow is configured but the linked YM
-        instance is not currently available.
+        Raises LoginFailed with a distinct message when borrow is configured
+        but the linked YM provider is not currently loaded — this is separate
+        from the "loaded but unauthenticated" case so operators can tell the
+        two apart.
         """
         if self._ym_instance_id is None:
             return None
         ym_provider = self.mass.get_provider(self._ym_instance_id)
         if ym_provider is None:
-            return (None, None)
+            raise LoginFailed(
+                f"Linked Yandex Music instance '{self._ym_instance_id}' is not loaded. "
+                "Check that the Yandex Music provider is enabled and configured."
+            )
         token = cast("str | None", ym_provider.config.get_value(CONF_TOKEN))
         x_token = cast("str | None", ym_provider.config.get_value("x_token"))
         return (token, x_token)
