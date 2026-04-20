@@ -15,7 +15,7 @@ YNISON_ORIGIN: Final[str] = "https://music.yandex.ru"
 
 # Configuration keys
 CONF_TOKEN: Final[str] = "token"
-CONF_X_TOKEN: Final[str] = "x_token"
+CONF_YM_INSTANCE: Final[str] = "ym_instance"
 CONF_MASS_PLAYER_ID: Final[str] = "mass_player_id"
 CONF_PUBLISH_NAME: Final[str] = "publish_name"
 CONF_ALLOW_PLAYER_SWITCH: Final[str] = "allow_player_switch"
@@ -30,10 +30,8 @@ PACING_REALTIME: Final[str] = "realtime"
 # Special value for "auto" config options
 OUTPUT_AUTO: Final[str] = "auto"
 
-# Actions
-CONF_ACTION_AUTH_QR: Final[str] = "auth_qr"
-CONF_ACTION_CLEAR_AUTH: Final[str] = "clear_auth"
-CONF_REMEMBER_SESSION: Final[str] = "remember_session"
+# Sentinel value for CONF_YM_INSTANCE — use own manually entered token
+YM_INSTANCE_OWN: Final[str] = "__own__"
 
 # Player selection
 PLAYER_ID_AUTO: Final[str] = "__auto__"
