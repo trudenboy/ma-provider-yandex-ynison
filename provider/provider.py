@@ -519,6 +519,15 @@ class YandexYnisonProvider(PluginProvider):
                 f"Linked Yandex Music instance '{self._ym_instance_id}' is not loaded. "
                 "Check that the Yandex Music provider is enabled and configured."
             )
+        # Guard against a stale/manually-edited instance id pointing at a non-YM
+        # provider — otherwise reading unrelated config keys yields a misleading
+        # "no credentials" error further down.
+        if ym_provider.domain != "yandex_music" or ym_provider.type != ProviderType.MUSIC:
+            raise LoginFailed(
+                f"Linked provider instance '{self._ym_instance_id}' is not a Yandex Music "
+                f"music provider (domain={ym_provider.domain!r}, type={ym_provider.type!r}). "
+                "Re-select the Yandex Music source in this plugin's configuration."
+            )
         token = cast("str | None", ym_provider.config.get_value(YANDEX_MUSIC_CONF_TOKEN))
         x_token = cast("str | None", ym_provider.config.get_value(YANDEX_MUSIC_CONF_X_TOKEN))
         return (token, x_token)

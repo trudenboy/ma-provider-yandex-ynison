@@ -1158,6 +1158,17 @@ class TestResolveTokenBorrowMode:
         with pytest.raises(LoginFailed, match="not loaded"):
             await provider._resolve_token()
 
+    async def test_raises_when_linked_provider_is_not_yandex_music(self) -> None:
+        """Stale/edited instance id pointing at a non-YM provider yields a clear error."""
+        provider = _make_provider()
+        provider._ym_instance_id = "some-other-id"
+        wrong = _make_ym_provider_stub()
+        wrong.domain = "spotify"  # not yandex_music
+        provider.mass.get_provider = MagicMock(return_value=wrong)
+
+        with pytest.raises(LoginFailed, match="not a Yandex Music"):
+            await provider._resolve_token()
+
 
 class TestRefreshYnisonToken:
     """_refresh_ynison_token on YnisonClient auth-failure callback."""
