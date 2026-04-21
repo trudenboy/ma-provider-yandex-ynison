@@ -327,6 +327,48 @@ class TestYnisonClientParseState:
         )
         assert client.state.last_update_is_echo is True
 
+    def test_parse_state_coerces_int_timestamps_to_strings(self, client: YnisonClient) -> None:
+        """Inbound int timestamps are stringified so outbound echoes stay safe.
+
+        Guards the reconnect path (send_full_state echoes self.state.player_state)
+        and queue-mutating update_player_state calls that shallow-copy status.
+        """
+        client._parse_state(
+            {
+                "player_state": {
+                    "status": {
+                        "paused": False,
+                        "progress_ms": 1234,
+                        "duration_ms": 56789,
+                        "player_action_timestamp_ms": 111,
+                        "version": {
+                            "device_id": "peer",
+                            "version": 42,
+                            "timestamp_ms": 0,
+                        },
+                    },
+                    "player_queue": {
+                        "current_playable_index": 0,
+                        "playable_list": [],
+                        "version": {
+                            "device_id": "peer",
+                            "version": 99,
+                            "timestamp_ms": 0,
+                        },
+                    },
+                }
+            }
+        )
+        status = client.state.player_state["status"]
+        assert status["progress_ms"] == "1234"
+        assert status["duration_ms"] == "56789"
+        assert status["player_action_timestamp_ms"] == "111"
+        assert status["version"]["version"] == "42"
+        assert status["version"]["timestamp_ms"] == "0"
+        queue_version = client.state.player_state["player_queue"]["version"]
+        assert queue_version["version"] == "99"
+        assert queue_version["timestamp_ms"] == "0"
+
 
 # ------------------------------------------------------------------
 # YnisonClient send methods

@@ -47,6 +47,37 @@ def make_version_block(device_id: str) -> dict[str, Any]:
     }
 
 
+def _stringify_version(version: Any) -> None:
+    """Coerce int `version.version`/`version.timestamp_ms` fields to str in-place."""
+    if not isinstance(version, dict):
+        return
+    for key in ("version", "timestamp_ms"):
+        val = version.get(key)
+        if isinstance(val, int) and not isinstance(val, bool):
+            version[key] = str(val)
+
+
+def normalize_player_state_timestamps(player_state: dict[str, Any]) -> None:
+    """Coerce Ynison timestamp fields to strings in-place.
+
+    Ynison rejects integer `status.progress_ms`/`duration_ms`/`version.*`
+    (HTTP 500 + WS teardown), so we normalize inbound state at the ingestion
+    boundary. This guarantees that every outbound echo — whether via
+    `update_player_state` (from shallow-copied state) or `send_full_state`
+    on reconnect — carries string-typed timestamps by construction.
+    """
+    status = player_state.get("status")
+    if isinstance(status, dict):
+        for key in ("progress_ms", "duration_ms", "player_action_timestamp_ms"):
+            val = status.get(key)
+            if isinstance(val, int) and not isinstance(val, bool):
+                status[key] = str(val)
+        _stringify_version(status.get("version"))
+    queue = player_state.get("player_queue")
+    if isinstance(queue, dict):
+        _stringify_version(queue.get("version"))
+
+
 @dataclass
 class YnisonDeviceInfo:
     """Device identification for Ynison registration."""
@@ -575,6 +606,11 @@ class YnisonClient:
         # absent from the update.
         incoming_ps = data.get("player_state")
         if incoming_ps is not None:
+            # Normalize timestamp fields before storing: Ynison rejects int
+            # `status.progress_ms`/`duration_ms`/`version.*` on outbound
+            # messages, and stored state is round-tripped via send_full_state
+            # (on reconnect) and update_player_state (on queue edits).
+            normalize_player_state_timestamps(incoming_ps)
             existing_ps = self.state.player_state
             for key, value in incoming_ps.items():
                 existing_ps[key] = value
