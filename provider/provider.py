@@ -1011,7 +1011,7 @@ class YandexYnisonProvider(PluginProvider):
 
         # Apply config overrides. MA's ConfigEntry options constrain the UI to
         # known-good strings, but a stale persisted value or hand-edited config
-        # could still surface something unparseable or off-list — fall back to
+        # could still surface something unparsable or off-list — fall back to
         # the auto-detected base with a warning instead of crashing the load.
         sample_rate = base["sample_rate"]
         bit_depth = base["bit_depth"]
