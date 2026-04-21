@@ -100,7 +100,6 @@ class YnisonState:
 
 # Type alias for the state update callback
 StateUpdateCallback = Callable[[YnisonState], Awaitable[None]]
-DisconnectCallback = Callable[[], Awaitable[None]]
 # Callback invoked on auth failure; should return a fresh token (or raise).
 AuthRefreshCallback = Callable[[], Awaitable["SecretStr"]]
 
@@ -117,7 +116,6 @@ class YnisonClient:
         token: SecretStr,
         device_info: YnisonDeviceInfo,
         on_state_update: StateUpdateCallback,
-        on_disconnect: DisconnectCallback,
         logger: logging.Logger,
         http_session: aiohttp.ClientSession | None = None,
         on_auth_failure: AuthRefreshCallback | None = None,
@@ -127,7 +125,6 @@ class YnisonClient:
         :param token: Yandex Music OAuth token (wrapped in SecretStr).
         :param device_info: Device identification for Ynison.
         :param on_state_update: Callback for state updates from Ynison.
-        :param on_disconnect: Callback when connection is permanently lost.
         :param logger: Logger instance.
         :param http_session: Optional shared aiohttp session.
         :param on_auth_failure: Optional callback invoked on auth failure during
@@ -137,7 +134,6 @@ class YnisonClient:
         self._token = token
         self._device_info = device_info
         self._on_state_update = on_state_update
-        self._on_disconnect = on_disconnect
         self._logger = logger
         self._external_session = http_session
         self._on_auth_failure = on_auth_failure

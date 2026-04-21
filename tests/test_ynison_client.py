@@ -37,23 +37,21 @@ def device_info() -> YnisonDeviceInfo:
 
 
 @pytest.fixture
-def mock_callbacks() -> tuple[AsyncMock, AsyncMock]:
-    """Create mock callbacks for state update and disconnect."""
-    return AsyncMock(), AsyncMock()
+def mock_state_callback() -> AsyncMock:
+    """Create a mock callback for state updates."""
+    return AsyncMock()
 
 
 @pytest.fixture
 def client(
     device_info: YnisonDeviceInfo,
-    mock_callbacks: tuple[AsyncMock, AsyncMock],
+    mock_state_callback: AsyncMock,
 ) -> YnisonClient:
     """Create a YnisonClient instance for testing."""
-    on_state_update, on_disconnect = mock_callbacks
     return YnisonClient(
         token=SecretStr("test-token"),
         device_info=device_info,
-        on_state_update=on_state_update,
-        on_disconnect=on_disconnect,
+        on_state_update=mock_state_callback,
         logger=MagicMock(),
     )
 
@@ -421,7 +419,7 @@ class TestReconnectSessionOwnership:
 
     async def test_reconnect_reuses_external_session(self) -> None:
         """Reconnect reuses a still-open external session instead of creating a new one."""
-        on_state, on_disconnect = AsyncMock(), AsyncMock()
+        on_state = AsyncMock()
         ext_session = MagicMock(spec=aiohttp.ClientSession)
         ext_session.closed = False
 
@@ -429,7 +427,6 @@ class TestReconnectSessionOwnership:
             token=SecretStr("test-token"),
             device_info=YnisonDeviceInfo(device_id="dev1", title="Test"),
             on_state_update=on_state,
-            on_disconnect=on_disconnect,
             logger=MagicMock(),
             http_session=ext_session,
         )
@@ -458,7 +455,7 @@ class TestReconnectSessionOwnership:
 
     async def test_reconnect_raises_on_closed_external_session(self) -> None:
         """Reconnect with closed external session retries until stop_event is set."""
-        on_state, on_disconnect = AsyncMock(), AsyncMock()
+        on_state = AsyncMock()
         ext_session = MagicMock(spec=aiohttp.ClientSession)
         ext_session.closed = True
 
@@ -466,7 +463,6 @@ class TestReconnectSessionOwnership:
             token=SecretStr("test-token"),
             device_info=YnisonDeviceInfo(device_id="dev1", title="Test"),
             on_state_update=on_state,
-            on_disconnect=on_disconnect,
             logger=MagicMock(),
             http_session=ext_session,
         )
@@ -496,7 +492,7 @@ class TestReconnectSessionOwnership:
 
     async def test_connect_raises_on_closed_external_session(self) -> None:
         """connect() raises RuntimeError if external session is already closed."""
-        on_state, on_disconnect = AsyncMock(), AsyncMock()
+        on_state = AsyncMock()
         ext_session = MagicMock(spec=aiohttp.ClientSession)
         ext_session.closed = True
 
@@ -504,7 +500,6 @@ class TestReconnectSessionOwnership:
             token=SecretStr("test-token"),
             device_info=YnisonDeviceInfo(device_id="dev1", title="Test"),
             on_state_update=on_state,
-            on_disconnect=on_disconnect,
             logger=MagicMock(),
             http_session=ext_session,
         )
@@ -523,12 +518,11 @@ class TestConnectTransientError:
 
     async def test_connect_transient_schedules_reconnect(self) -> None:
         """Non-auth error during connect schedules _reconnect task."""
-        on_state, on_disconnect = AsyncMock(), AsyncMock()
+        on_state = AsyncMock()
         client = YnisonClient(
             token=SecretStr("test-token"),
             device_info=YnisonDeviceInfo(device_id="d1", title="T"),
             on_state_update=on_state,
-            on_disconnect=on_disconnect,
             logger=MagicMock(),
         )
         with (
@@ -550,12 +544,11 @@ class TestConnectTransientError:
 
     async def test_connect_transient_closes_ws_and_session(self) -> None:
         """Transient connect error closes stale ws and owned session."""
-        on_state, on_disconnect = AsyncMock(), AsyncMock()
+        on_state = AsyncMock()
         client = YnisonClient(
             token=SecretStr("test-token"),
             device_info=YnisonDeviceInfo(device_id="d1", title="T"),
             on_state_update=on_state,
-            on_disconnect=on_disconnect,
             logger=MagicMock(),
         )
         mock_ws = AsyncMock()
@@ -591,12 +584,11 @@ class TestDisconnectReconnectCancellation:
 
     async def test_disconnect_cancels_reconnect_task(self) -> None:
         """disconnect() cancels and awaits pending reconnect task."""
-        on_state, on_disconnect = AsyncMock(), AsyncMock()
+        on_state = AsyncMock()
         client = YnisonClient(
             token=SecretStr("test-token"),
             device_info=YnisonDeviceInfo(device_id="d1", title="T"),
             on_state_update=on_state,
-            on_disconnect=on_disconnect,
             logger=MagicMock(),
         )
 
@@ -940,10 +932,10 @@ class TestMessageLoop:
     async def test_text_message_parses_and_calls_callback(
         self,
         client: YnisonClient,
-        mock_callbacks: tuple[AsyncMock, AsyncMock],
+        mock_state_callback: AsyncMock,
     ) -> None:
         """TEXT message: parses JSON, updates state, invokes callback."""
-        on_state_update, _ = mock_callbacks
+        on_state_update = mock_state_callback
         payload = {
             "player_state": {
                 "status": {"paused": False, "progress_ms": 1000, "duration_ms": 5000},
@@ -979,10 +971,10 @@ class TestMessageLoop:
     async def test_rebalance_error_breaks_loop(
         self,
         client: YnisonClient,
-        mock_callbacks: tuple[AsyncMock, AsyncMock],
+        mock_state_callback: AsyncMock,
     ) -> None:
         """Ynison re-balance error (300100001) breaks the loop for immediate reconnect."""
-        on_state_update, _ = mock_callbacks
+        on_state_update = mock_state_callback
         rebalance_msg = _make_ws_msg(
             aiohttp.WSMsgType.TEXT,
             json.dumps(
@@ -1012,10 +1004,10 @@ class TestMessageLoop:
     async def test_not_served_error_breaks_loop(
         self,
         client: YnisonClient,
-        mock_callbacks: tuple[AsyncMock, AsyncMock],
+        mock_state_callback: AsyncMock,
     ) -> None:
         """Ynison 'not served' error (300100002) also breaks the loop."""
-        on_state_update, _ = mock_callbacks
+        on_state_update = mock_state_callback
         not_served_msg = _make_ws_msg(
             aiohttp.WSMsgType.TEXT,
             json.dumps(
@@ -1051,10 +1043,10 @@ class TestMessageLoop:
     async def test_callback_exception_continues(
         self,
         client: YnisonClient,
-        mock_callbacks: tuple[AsyncMock, AsyncMock],
+        mock_state_callback: AsyncMock,
     ) -> None:
         """Exception in state callback is caught, loop continues."""
-        on_state_update, _ = mock_callbacks
+        on_state_update = mock_state_callback
         on_state_update.side_effect = [ValueError("boom"), None]
 
         msg1 = _make_ws_msg(
@@ -1228,9 +1220,6 @@ class TestReconnect:
         client._session = MagicMock()
         client._session.closed = False
 
-        on_disconnect = AsyncMock()
-        client._on_disconnect = on_disconnect
-
         attempt_count = 0
         stop_after = 8  # well past the old MAX_RECONNECT_ATTEMPTS of 5
 
@@ -1254,9 +1243,6 @@ class TestReconnect:
             await client._reconnect()
 
         assert attempt_count >= stop_after
-        # With infinite retry, we do NOT notify the provider of a "permanent"
-        # disconnect — the loop only exits on explicit stop().
-        on_disconnect.assert_not_awaited()
 
     async def test_stop_event_before_attempt(self, client: YnisonClient) -> None:
         """stop_event set before reconnect → exits immediately."""
@@ -1437,12 +1423,11 @@ class TestConnectSessionCreation:
 
     async def test_connect_creates_session(self) -> None:
         """connect() creates a new session when no external session given."""
-        on_state, on_disconnect = AsyncMock(), AsyncMock()
+        on_state = AsyncMock()
         client = YnisonClient(
             token=SecretStr("test-token"),
             device_info=YnisonDeviceInfo(device_id="d1", title="T"),
             on_state_update=on_state,
-            on_disconnect=on_disconnect,
             logger=MagicMock(),
         )
         with (
@@ -1462,7 +1447,7 @@ class TestConnectSessionCreation:
 
     async def test_disconnect_does_not_close_external_session(self) -> None:
         """disconnect() does not close an externally-provided session."""
-        on_state, on_disconnect = AsyncMock(), AsyncMock()
+        on_state = AsyncMock()
         ext_session = MagicMock(spec=aiohttp.ClientSession)
         ext_session.closed = False
         ext_session.close = AsyncMock()
@@ -1471,7 +1456,6 @@ class TestConnectSessionCreation:
             token=SecretStr("test-token"),
             device_info=YnisonDeviceInfo(device_id="d1", title="T"),
             on_state_update=on_state,
-            on_disconnect=on_disconnect,
             logger=MagicMock(),
             http_session=ext_session,
         )
@@ -1492,14 +1476,13 @@ class TestTokenRefreshOnReconnect:
 
     async def test_auth_failure_triggers_token_refresh(self) -> None:
         """LoginFailed during reconnect invokes on_auth_failure callback."""
-        on_state, on_disconnect = AsyncMock(), AsyncMock()
+        on_state = AsyncMock()
         on_auth_failure = AsyncMock(return_value=SecretStr("new-token"))
 
         client = YnisonClient(
             token=SecretStr("old-token"),
             device_info=YnisonDeviceInfo(device_id="d1", title="T"),
             on_state_update=on_state,
-            on_disconnect=on_disconnect,
             logger=MagicMock(),
             on_auth_failure=on_auth_failure,
         )
@@ -1536,13 +1519,12 @@ class TestTokenRefreshOnReconnect:
 
     async def test_auth_failure_no_callback(self) -> None:
         """LoginFailed without on_auth_failure keeps retrying on the same token."""
-        on_state, on_disconnect = AsyncMock(), AsyncMock()
+        on_state = AsyncMock()
 
         client = YnisonClient(
             token=SecretStr("old-token"),
             device_info=YnisonDeviceInfo(device_id="d1", title="T"),
             on_state_update=on_state,
-            on_disconnect=on_disconnect,
             logger=MagicMock(),
         )
         client._session = MagicMock()
@@ -1569,19 +1551,17 @@ class TestTokenRefreshOnReconnect:
             await client._reconnect()
 
         assert attempt_count >= 4
-        on_disconnect.assert_not_awaited()
         assert client._token == SecretStr("old-token")
 
     async def test_auth_failure_callback_raises(self) -> None:
         """on_auth_failure raises → logs warning, keeps retrying until stopped."""
-        on_state, on_disconnect = AsyncMock(), AsyncMock()
+        on_state = AsyncMock()
         on_auth_failure = AsyncMock(side_effect=RuntimeError("refresh failed"))
 
         client = YnisonClient(
             token=SecretStr("old-token"),
             device_info=YnisonDeviceInfo(device_id="d1", title="T"),
             on_state_update=on_state,
-            on_disconnect=on_disconnect,
             logger=MagicMock(),
             on_auth_failure=on_auth_failure,
         )
@@ -1613,7 +1593,6 @@ class TestTokenRefreshOnReconnect:
         assert on_auth_failure.await_count == attempt_count
         # Token unchanged since callback always fails
         assert client._token == SecretStr("old-token")
-        on_disconnect.assert_not_awaited()
 
 
 class TestUpdateToken:
@@ -1621,12 +1600,11 @@ class TestUpdateToken:
 
     def test_update_token_replaces_stored_token(self) -> None:
         """update_token swaps the internal _token."""
-        on_state, on_disconnect = AsyncMock(), AsyncMock()
+        on_state = AsyncMock()
         client = YnisonClient(
             token=SecretStr("old-token"),
             device_info=YnisonDeviceInfo(device_id="d1", title="T"),
             on_state_update=on_state,
-            on_disconnect=on_disconnect,
             logger=MagicMock(),
         )
         assert client._token == SecretStr("old-token")

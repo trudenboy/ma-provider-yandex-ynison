@@ -204,7 +204,6 @@ class YandexYnisonProvider(PluginProvider):
             token=token,
             device_info=device_info,
             on_state_update=self._handle_ynison_state,
-            on_disconnect=self._handle_ynison_disconnect,
             logger=self.logger,
             on_auth_failure=self._refresh_ynison_token,
         )
@@ -841,11 +840,6 @@ class YandexYnisonProvider(PluginProvider):
             if self._source_details.in_use_by == player_id:
                 self._source_details.in_use_by = None
                 self.mass.players.trigger_player_update(player_id)
-
-    async def _handle_ynison_disconnect(self) -> None:
-        """Handle permanent disconnect from Ynison."""
-        self.logger.error("Ynison connection permanently lost")
-        self._clear_active_player()
 
     # ------------------------------------------------------------------
     # Player selection
