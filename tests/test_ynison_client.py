@@ -307,6 +307,26 @@ class TestYnisonClientParseState:
         client._parse_state({"active_device_id_optional": "some-device"})
         assert client.state.last_update_is_echo is False
 
+    def test_echo_flag_true_on_own_authored_status(self, client: YnisonClient) -> None:
+        """status.version.device_id == own → echo True even without player_queue version."""
+        client._parse_state(
+            {
+                "player_state": {
+                    "status": {
+                        "paused": False,
+                        "progress_ms": "1000",
+                        "duration_ms": "5000",
+                        "version": {
+                            "device_id": "test-device-id",
+                            "version": "42",
+                            "timestamp_ms": "0",
+                        },
+                    },
+                },
+            }
+        )
+        assert client.state.last_update_is_echo is True
+
 
 # ------------------------------------------------------------------
 # YnisonClient send methods
@@ -453,7 +473,9 @@ class TestReconnectSessionOwnership:
         assert mock_redir.await_count == 1
         assert client._session is ext_session
 
-    async def test_reconnect_raises_on_closed_external_session(self) -> None:
+    async def test_reconnect_retries_on_closed_external_session_until_stopped(
+        self,
+    ) -> None:
         """Reconnect with closed external session retries until stop_event is set."""
         on_state = AsyncMock()
         ext_session = MagicMock(spec=aiohttp.ClientSession)

@@ -65,9 +65,12 @@ class YnisonState:
     player_state: dict[str, Any] = field(default_factory=dict)
     active_device_id: str | None = None
     devices: list[dict[str, Any]] = field(default_factory=list)
-    # True iff the most recent update_full_state carried a player_queue
-    # authored by our own device_id (i.e. it is an echo of our own update).
-    # Consumers can inspect this to suppress feedback loops.
+    # True iff the most recent state update carried a version block
+    # (on player_queue or status) authored by our own device_id — i.e.
+    # it is Ynison echoing back an update we originated. Consumers can
+    # inspect this to suppress feedback loops. False when no authored
+    # version block is present (e.g. status-only update from a peer
+    # that did not round-trip via our device).
     last_update_is_echo: bool = False
 
     @property
@@ -575,17 +578,17 @@ class YnisonClient:
             existing_ps = self.state.player_state
             for key, value in incoming_ps.items():
                 existing_ps[key] = value
-            # Echo detection via player_queue.version.device_id: Ynison preserves
-            # the `version` block we sent, so if the author matches us, the
-            # broadcast is our own update round-tripping back. Updates that
-            # don't carry a player_queue (e.g. status-only) leave the flag False.
-            incoming_queue = incoming_ps.get("player_queue") or {}
-            incoming_version = incoming_queue.get("version") or {}
-            self.state.last_update_is_echo = (
-                incoming_version.get("device_id") == self._device_info.device_id
-                if incoming_version
-                else False
+            # Echo detection via version.device_id: Ynison preserves the
+            # `version` block we authored, so a broadcast whose version
+            # author matches us is our own update round-tripping back.
+            # Check both player_queue and status so status-only echoes
+            # (e.g. of update_playing_status) are caught too.
+            own_id = self._device_info.device_id
+            queue_author = (
+                (incoming_ps.get("player_queue") or {}).get("version", {}).get("device_id")
             )
+            status_author = (incoming_ps.get("status") or {}).get("version", {}).get("device_id")
+            self.state.last_update_is_echo = own_id in (queue_author, status_author)
         else:
             self.state.last_update_is_echo = False
         self.state.active_device_id = data.get(
