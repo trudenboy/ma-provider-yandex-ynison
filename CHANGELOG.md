@@ -2,13 +2,49 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [1.7.0] - 2026-04-21
 
 ### Fixed
-- **Quality auto-detection**: `_update_normalized_format` now reads the yandex_music quality tier from `provider.config.get_value("quality")` instead of a non-existent `get_quality()` method, so superb/lossless quality correctly maps to 24-bit/48 kHz PCM without manual overrides (PR #3614 review)
+- **Ynison state protocol hardening**: all outbound `version`/`timestamp_ms`/`progress_ms`/`duration_ms`/`player_action_timestamp_ms` fields are string-typed (integers trigger HTTP 500 + WS teardown, as observed upstream in YandexMusicLMS@2f24a54)
+- **Echo detection**: replaced the ±2s/5s heuristic timing window with `version.device_id`-based author inspection on both `player_queue` and `status` blocks — catches queue and status-only echoes alike, eliminates false positives when peer seeks happen to match our last-sent timing
+- **Inbound state normalization**: `_parse_state` coerces int timestamp fields to strings at ingestion, so the reconnect path (`send_full_state(self.state.player_state)`) and queue edits (`update_player_state` shallow-copying `status`) stay safe by construction regardless of what peers inject
+- **Own-authored state**: `_advance_queue_index`/`_update_queue_list` now stamp their own `version` block on outbound `player_queue`/`status` so Ynison sees the correct author and downstream echo detection works
 
 ### Changed
-- `YandexMusicProviderLike` Protocol: removed `get_quality()` (the in-tree yandex_music provider does not implement it); quality is read from the shared `ProviderConfig`
+- **Reconnect**: retries indefinitely with exponential backoff + ±20% jitter (5s → 10s → 30s → 60s, saturating). Previously capped at 5 attempts, which surrendered the session on short network outages
+
+### Removed
+- `on_disconnect` callback on `YnisonClient` (dead API — the plugin never observed it)
+- `MAX_RECONNECT_ATTEMPTS` constant
+- Heuristic echo-tracking fields (`_ECHO_TOLERANCE_MS`, `_ECHO_WINDOW_S`, `_last_sent_to_ynison_ms`, `_last_sent_to_ynison_time`)
+
+## [1.6.0] - 2026-04-20
+
+### Added
+- **Borrow tokens from yandex_music**: new default auth mode reads OAuth credentials from a linked `yandex_music` MusicProvider instance — no duplicate QR flow, no separate token storage. A `Yandex Music source` dropdown in config picks which YM instance to borrow from. Own-mode (manual token paste) remains as an escape hatch and is preserved on upgrades from standalone configs.
+- Reactive token refresh from `x_token` on 401 (in-memory only; scheduled refresh stays with the `yandex_music` provider)
+
+### Changed
+- **State merging**: replaced nested merge of `player_state` sub-objects with top-level replacement — Ynison sends `player_queue` and `status` as complete objects, so merging retained stale keys absent from the update
+- `YandexMusicProviderLike` Protocol: removed `get_quality()` (not implemented by the in-tree yandex_music provider); quality is now read from the shared `ProviderConfig`
+
+### Fixed
+- **Quality auto-detection**: `_update_normalized_format` reads the yandex_music quality tier from `provider.config.get_value("quality")` instead of the non-existent `get_quality()` method, so superb/lossless quality correctly maps to 24-bit/48 kHz PCM without manual overrides (PR #3614 review)
+
+## [1.5.4] - 2026-04-16
+
+### Fixed
+- **Reconnect state restoration**: restore last-known player state on Ynison reconnect after re-balance (previously the client returned to empty state post-reconnect)
+
+## [1.5.3] - 2026-04-15
+
+### Changed
+- Required Python version bumped to >= 3.14
+
+### Fixed
+- Raise `PlayerCommandFailed` when the Ynison WebSocket is disconnected (previously failed silently)
+- Restore provider-specific deps in `pyproject.toml` after workflow-wrapper sync
+- Correct assert-guard comment in `_stream_track`
 
 ## [1.5.2] - 2026-04-15
 
