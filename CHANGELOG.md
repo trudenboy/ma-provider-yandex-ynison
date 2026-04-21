@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.7.1] - 2026-04-21
+
+### Fixed
+- **Output format overrides**: `_update_normalized_format` now rejects stale/tampered `output_sample_rate`/`output_bit_depth` config values (off-list strings, unparseable input) and falls back to the auto-detected base with a warning instead of raising `ValueError` or silently producing an inconsistent `content_type`/`bit_depth` pair (PR #3614 review)
+
 ## [1.7.0] - 2026-04-21
 
 ### Fixed
