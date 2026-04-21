@@ -16,7 +16,6 @@ from ya_passport_auth import SecretStr
 from provider.constants import (
     DEFAULT_APP_NAME,
     DEVICE_TYPE_WEB,
-    MAX_RECONNECT_ATTEMPTS,
     YNISON_ORIGIN,
 )
 from provider.ynison_client import (
@@ -24,6 +23,7 @@ from provider.ynison_client import (
     YnisonDeviceInfo,
     YnisonState,
     generate_device_id,
+    make_version_block,
 )
 
 
@@ -193,6 +193,34 @@ class TestYnisonClientBuildMethods:
         assert state["status"]["paused"] is True
         assert state["player_queue"]["playable_list"] == []
 
+    def test_build_initial_state_string_fields(self, client: YnisonClient) -> None:
+        """Ynison rejects integer timestamps; all time/version fields must be str."""
+        state = client._build_initial_state()
+        for block in (state["status"], state["player_queue"]):
+            version = block["version"]
+            assert version["device_id"] == "test-device-id"
+            assert isinstance(version["version"], str)
+            assert version["version"].isdigit()
+            assert version["timestamp_ms"] == "0"
+        assert state["status"]["progress_ms"] == "0"
+        assert state["status"]["duration_ms"] == "0"
+
+    def test_device_id_property(self, client: YnisonClient) -> None:
+        """device_id property exposes the registered device id."""
+        assert client.device_id == "test-device-id"
+
+
+class TestMakeVersionBlock:
+    """Tests for the module-level make_version_block helper."""
+
+    def test_fields_are_strings(self) -> None:
+        """Version and timestamp_ms must be strings (Ynison 500s on ints)."""
+        block = make_version_block("dev-42")
+        assert block["device_id"] == "dev-42"
+        assert isinstance(block["version"], str)
+        assert block["version"].isdigit()
+        assert block["timestamp_ms"] == "0"
+
 
 # ------------------------------------------------------------------
 # YnisonClient parse state
@@ -226,6 +254,61 @@ class TestYnisonClientParseState:
         client._parse_state({"player_state": {"status": {"paused": True}}})
         assert client.state.active_device_id == "old-device"
 
+    def test_echo_flag_true_on_own_authored_queue(self, client: YnisonClient) -> None:
+        """player_queue.version.device_id == own → last_update_is_echo True."""
+        client._parse_state(
+            {
+                "player_state": {
+                    "player_queue": {
+                        "playable_list": [{"playable_id": "t1"}],
+                        "current_playable_index": 0,
+                        "version": {
+                            "device_id": "test-device-id",
+                            "version": "42",
+                            "timestamp_ms": "0",
+                        },
+                    },
+                },
+            }
+        )
+        assert client.state.last_update_is_echo is True
+
+    def test_echo_flag_false_on_foreign_author(self, client: YnisonClient) -> None:
+        """player_queue.version.device_id != own → not an echo."""
+        client._parse_state(
+            {
+                "player_state": {
+                    "player_queue": {
+                        "playable_list": [{"playable_id": "t1"}],
+                        "current_playable_index": 0,
+                        "version": {
+                            "device_id": "some-other-device",
+                            "version": "42",
+                            "timestamp_ms": "0",
+                        },
+                    },
+                },
+            }
+        )
+        assert client.state.last_update_is_echo is False
+
+    def test_echo_flag_false_when_version_missing(self, client: YnisonClient) -> None:
+        """No version block in player_queue → not an echo (safe default)."""
+        client._parse_state(
+            {
+                "player_state": {
+                    "player_queue": {"playable_list": [], "current_playable_index": -1},
+                },
+            }
+        )
+        assert client.state.last_update_is_echo is False
+
+    def test_echo_flag_false_when_player_state_missing(self, client: YnisonClient) -> None:
+        """status-only or non-player_state updates cannot be echoes."""
+        client.state.last_update_is_echo = True  # sticky from a prior update
+        client._parse_state({"active_device_id_optional": "some-device"})
+        assert client.state.last_update_is_echo is False
+
 
 # ------------------------------------------------------------------
 # YnisonClient send methods
@@ -244,13 +327,14 @@ class TestYnisonClientSend:
         client._connected = True
 
     async def test_update_playing_status(self, client: YnisonClient) -> None:
-        """Sends correct playing status message."""
+        """Sends correct playing status message with string-typed timestamps."""
         await client.update_playing_status(1000, 5000, paused=False)
         call_args = self.mock_ws.send_str.call_args[0][0]
         msg = json.loads(call_args)
         status = msg["update_playing_status"]["playing_status"]
-        assert status["progress_ms"] == 1000
-        assert status["duration_ms"] == 5000
+        # Ynison expects strings for timestamp fields (integers trigger 500)
+        assert status["progress_ms"] == "1000"
+        assert status["duration_ms"] == "5000"
         assert status["paused"] is False
 
     async def test_update_active_device(self, client: YnisonClient) -> None:
@@ -373,7 +457,7 @@ class TestReconnectSessionOwnership:
         assert client._session is ext_session
 
     async def test_reconnect_raises_on_closed_external_session(self) -> None:
-        """Reconnect raises RuntimeError if external session is closed."""
+        """Reconnect with closed external session retries until stop_event is set."""
         on_state, on_disconnect = AsyncMock(), AsyncMock()
         ext_session = MagicMock(spec=aiohttp.ClientSession)
         ext_session.closed = True
@@ -388,16 +472,26 @@ class TestReconnectSessionOwnership:
         )
         client._session = None  # simulate session lost
 
-        # Patch sleep to avoid delays, and redirect to test the session logic
+        # Simulate an operator calling disconnect() after a few failures —
+        # without this the reconnect loop would retry forever.
+        sleep_calls = 0
+
+        async def stop_after_n_sleeps(*_args: object, **_kw: object) -> None:
+            nonlocal sleep_calls
+            sleep_calls += 1
+            if sleep_calls >= 3:
+                client._stop_event.set()
+
         sleep_path = "provider.ynison_client.asyncio.sleep"
         with (
-            patch(sleep_path, new_callable=AsyncMock),
+            patch(sleep_path, side_effect=stop_after_n_sleeps),
             patch.object(client, "_get_redirect_ticket", new_callable=AsyncMock) as mock_redir,
         ):
             mock_redir.side_effect = AssertionError("should not reach here")
             await client._reconnect()
 
-        # All attempts should fail because external session is closed
+        # Never reached the redirect step because session is closed.
+        mock_redir.assert_not_awaited()
         assert not client._connected
 
     async def test_connect_raises_on_closed_external_session(self) -> None:
@@ -540,7 +634,9 @@ class TestMessageBuildingMethods:
         assert call_data["sync_state_from_eov"]["actual_queue_id"] == "q123"
         assert "rid" in call_data
         assert call_data["activity_interception_type"] == "DO_NOT_INTERCEPT_BY_DEFAULT"
-        assert call_data["player_action_timestamp_ms"] == 0
+        # Ynison expects string-typed timestamps (integers cause 500s)
+        assert isinstance(call_data["player_action_timestamp_ms"], str)
+        assert call_data["player_action_timestamp_ms"].isdigit()
 
     async def test_update_player_state(self, client: YnisonClient) -> None:
         """update_player_state builds correct message and logs queue info."""
@@ -1127,13 +1223,24 @@ class TestReconnect:
 
         client._logger.info.assert_any_call("Ynison reconnected successfully")  # type: ignore[attr-defined]
 
-    async def test_all_attempts_fail(self, client: YnisonClient) -> None:
-        """All attempts fail → calls _on_disconnect, cleans up."""
+    async def test_retries_indefinitely_until_stopped(self, client: YnisonClient) -> None:
+        """Reconnect keeps retrying past the old 5-attempt cap until stop_event."""
         client._session = MagicMock()
         client._session.closed = False
 
         on_disconnect = AsyncMock()
         client._on_disconnect = on_disconnect
+
+        attempt_count = 0
+        stop_after = 8  # well past the old MAX_RECONNECT_ATTEMPTS of 5
+
+        async def failing_redirect() -> tuple[str, str, int]:
+            nonlocal attempt_count
+            attempt_count += 1
+            if attempt_count >= stop_after:
+                client._stop_event.set()
+            msg = "fail"
+            raise ConnectionError(msg)
 
         with (
             patch(SLEEP_PATH, new_callable=AsyncMock),
@@ -1141,18 +1248,15 @@ class TestReconnect:
                 client,
                 "_get_redirect_ticket",
                 new_callable=AsyncMock,
-                side_effect=ConnectionError("fail"),
+                side_effect=failing_redirect,
             ),
         ):
             await client._reconnect()
 
-        assert client._connected is False
-        assert client._stop_event.is_set()
-        on_disconnect.assert_awaited_once()
-        client._logger.error.assert_called_once_with(  # type: ignore[attr-defined]
-            "Ynison: all %d reconnect attempts failed",
-            MAX_RECONNECT_ATTEMPTS,
-        )
+        assert attempt_count >= stop_after
+        # With infinite retry, we do NOT notify the provider of a "permanent"
+        # disconnect — the loop only exits on explicit stop().
+        on_disconnect.assert_not_awaited()
 
     async def test_stop_event_before_attempt(self, client: YnisonClient) -> None:
         """stop_event set before reconnect → exits immediately."""
@@ -1431,7 +1535,7 @@ class TestTokenRefreshOnReconnect:
         )
 
     async def test_auth_failure_no_callback(self) -> None:
-        """LoginFailed without on_auth_failure retries with same token."""
+        """LoginFailed without on_auth_failure keeps retrying on the same token."""
         on_state, on_disconnect = AsyncMock(), AsyncMock()
 
         client = YnisonClient(
@@ -1444,23 +1548,32 @@ class TestTokenRefreshOnReconnect:
         client._session = MagicMock()
         client._session.closed = False
 
+        attempt_count = 0
+
+        async def failing_redirect() -> tuple[str, str, int]:
+            nonlocal attempt_count
+            attempt_count += 1
+            if attempt_count >= 4:
+                client._stop_event.set()
+            raise LoginFailed("expired")
+
         with (
             patch(SLEEP_PATH, new_callable=AsyncMock),
             patch.object(
                 client,
                 "_get_redirect_ticket",
                 new_callable=AsyncMock,
-                side_effect=LoginFailed("expired"),
+                side_effect=failing_redirect,
             ),
         ):
             await client._reconnect()
 
-        # All attempts fail → disconnect
-        on_disconnect.assert_awaited_once()
+        assert attempt_count >= 4
+        on_disconnect.assert_not_awaited()
         assert client._token == SecretStr("old-token")
 
     async def test_auth_failure_callback_raises(self) -> None:
-        """on_auth_failure raises → logs warning, continues retry."""
+        """on_auth_failure raises → logs warning, keeps retrying until stopped."""
         on_state, on_disconnect = AsyncMock(), AsyncMock()
         on_auth_failure = AsyncMock(side_effect=RuntimeError("refresh failed"))
 
@@ -1475,22 +1588,32 @@ class TestTokenRefreshOnReconnect:
         client._session = MagicMock()
         client._session.closed = False
 
+        attempt_count = 0
+        stop_after = 6
+
+        async def failing_redirect() -> tuple[str, str, int]:
+            nonlocal attempt_count
+            attempt_count += 1
+            if attempt_count >= stop_after:
+                client._stop_event.set()
+            raise LoginFailed("expired")
+
         with (
             patch(SLEEP_PATH, new_callable=AsyncMock),
             patch.object(
                 client,
                 "_get_redirect_ticket",
                 new_callable=AsyncMock,
-                side_effect=LoginFailed("expired"),
+                side_effect=failing_redirect,
             ),
         ):
             await client._reconnect()
 
-        # Callback was called on every attempt
-        assert on_auth_failure.await_count == MAX_RECONNECT_ATTEMPTS
+        # Callback was called on every attempt — no cap
+        assert on_auth_failure.await_count == attempt_count
         # Token unchanged since callback always fails
         assert client._token == SecretStr("old-token")
-        on_disconnect.assert_awaited_once()
+        on_disconnect.assert_not_awaited()
 
 
 class TestUpdateToken:
