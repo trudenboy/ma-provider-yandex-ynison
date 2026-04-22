@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.7.2] - 2026-04-22
+
+### Changed
+- **Reconnect backoff**: `RECONNECT_DELAYS` is now `(5s, 10s, 30s, 60s, saturating)` to match the schedule advertised in 1.7.0 notes — previously the constant still held the legacy `(2, 4, 8, 16, 30, 60)s` tuple inherited from the capped-retry design (PR #3614 review)
+
+### Removed
+- Dead `CONF_FFMPEG_PACING` / `PACING_REALTIME` constants and the `FFmpeg pacing mode` docs row — never wired into a `ConfigEntry`; `pacing_args()` always returns `['-re']`. Drop the misleading config surface rather than pretending it's tunable (PR #3614 review)
+
 ## [1.7.1] - 2026-04-21
 
 ### Fixed

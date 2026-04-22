@@ -73,7 +73,6 @@ PluginSource → MA Player (Chromecast / DLNA / AirPlay / etc.)
 | `x_token` | SecureString | — | Long-lived session token for auto-refresh (hidden) |
 | `mass_player_id` | String | `__auto__` | Target MA player ID or auto-select |
 | `allow_player_switch` | Boolean | `true` | Allow selecting plugin source on any player |
-| `ffmpeg_pacing` | String | `realtime` | Pacing: `realtime` / `unlimited` |
 | `output_sample_rate` | String | `auto` | PCM sample rate: `auto` / `44100` / `48000` / `96000` |
 | `output_bit_depth` | String | `auto` | PCM bit depth: `auto` / `16` / `24` |
 | `publish_name` | String | `Music Assistant` | Device name in Yandex Music app |
@@ -127,7 +126,7 @@ Uses reusable workflows from `trudenboy/ma-provider-tools`:
 - Redirect URL: `wss://ynison.music.yandex.ru/redirector.YnisonRedirectService/GetRedirectToYnison`
 - State URL: `wss://{host}/ynison_state.YnisonStateService/PutYnisonState`
 - Auth: `Authorization: OAuth {token}`, device info in `Sec-WebSocket-Protocol` header
-- Reconnect: exponential backoff (2, 4, 8, 16, 30, 60s) with ±20% jitter, max 5 attempts
+- Reconnect: exponential backoff (5, 10, 30, 60s saturating) with ±20% jitter, retries indefinitely
 - State merging: top-level sub-object replacement (Ynison sends `player_queue` and `status` as complete objects, so each top-level key is replaced wholesale; top-level keys absent from an update are retained)
 - Radio queue replenishment is done by the active device via REST API — Ynison only syncs state
 - Reference implementations: `bulatorr/go-yaynison` (Go), `FozerG/YandexMusicRPC` (Python)

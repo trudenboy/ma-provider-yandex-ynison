@@ -120,7 +120,6 @@ New instances auto-detect and reuse tokens from existing sibling instances.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| **FFmpeg pacing mode** | Dropdown | `Realtime` | Controls inner per-track ffmpeg read speed. `Realtime (-re)` — strict 1x pacing (default). `Unlimited` — no rate limit, lowest latency but higher memory |
 | **Output sample rate** | Dropdown | `Auto` | PCM output sample rate. `Auto` selects 44.1 kHz for lossy, 48 kHz for lossless sources. Options: 44100, 48000, 96000 Hz |
 | **Output bit depth** | Dropdown | `Auto` | PCM output bit depth. `Auto` selects 16-bit for lossy, 24-bit for lossless. Options: 16, 24 bit |
 | **Device name** | String | `Music Assistant` | How this device appears in the Yandex Music app |
@@ -139,7 +138,7 @@ yandex_music provider's quality setting:
   - Redirect URL: `wss://ynison.music.yandex.ru/redirector.YnisonRedirectService/GetRedirectToYnison`
   - State URL: `wss://{host}/ynison_state.YnisonStateService/PutYnisonState`
 - **Auth**: `Authorization: OAuth {token}`, device info in `Sec-WebSocket-Protocol` header
-- **Reconnect**: exponential backoff (2, 4, 8, 16, 30, 60 s) with ±20% jitter, max 5 attempts
+- **Reconnect**: exponential backoff (5, 10, 30, 60 s saturating) with ±20% jitter, retries indefinitely
 - **Constraint**: Ynison rejects `progress > duration` with error 400030001 and disconnects — progress is always clamped
 - **Reference implementations**: [bulatorr/go-yaynison](https://github.com/bulatorr/go-yaynison) (Go), [FozerG/YandexMusicRPC](https://github.com/FozerG/YandexMusicRPC) (Python)
 
