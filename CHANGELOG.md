@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.7.4] - 2026-04-22
+
+### Fixed
+- **`_wait_for_track_change` early-advance race**: the method used to `clear()` `_track_changed_event` before inspecting state, so a state update that arrived between `_signal_track_completion()` returning and the wait starting lost its `set()` signal — the stream stalled for the full 30s timeout and then gave up. Now the state is checked before the clear, and the method returns immediately when Ynison has already advanced. Added a regression test; also fixed pre-existing out-of-bounds `current_playable_index` values in two existing tests that were masking the issue (PR #3614 review)
+
 ## [1.7.3] - 2026-04-22
 
 ### Changed
