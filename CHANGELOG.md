@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.7.3] - 2026-04-22
+
+### Changed
+- **Task creation**: replaced all 4 `asyncio.ensure_future(...)` sites in `ynison_client.py` (reconnect + message loop) with `asyncio.create_task(...)` — drop-in for plain coroutines, binds to the running loop without the legacy loop-selection path (PR #3614 review)
+
 ## [1.7.2] - 2026-04-22
 
 ### Changed
