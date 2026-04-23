@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.8.1] - 2026-04-23
+
+### Fixed
+- **`_yandex_provider` None-race in streaming paths**: `_get_stream_details_with_retry` and `_stream_track` used to dereference `self._yandex_provider` across `await` points. When the linked `yandex_music` MusicProvider unloaded mid-stream, the background `_check_yandex_provider_match` task would null the attribute in-between, causing `AttributeError` (and in one spot an `AssertionError`) that hard-stopped the audio generator. Both methods now capture a local reference at entry and surface a clean `LoginFailed` / stop-event exit when the provider is gone. Added two regression tests (PR #3614 review)
+
 ## [1.8.0] - 2026-04-23
 
 ### Added
