@@ -19,11 +19,6 @@ from music_assistant_models.errors import LoginFailed
 from ya_passport_auth import PassportClient, SecretStr
 from ya_passport_auth.exceptions import QRTimeoutError, YaPassportError
 
-# AuthenticationHelper is provided by music_assistant (the server, not the
-# models package). It is only used inside the running MA process; tests mock
-# perform_qr_auth wholesale and never import this symbol.
-from music_assistant.helpers.auth import AuthenticationHelper
-
 if TYPE_CHECKING:
     from music_assistant.mass import MusicAssistant
 
@@ -32,13 +27,20 @@ async def perform_qr_auth(mass: MusicAssistant, session_id: str) -> tuple[str, s
     """Run a QR login flow and return ``(x_token, music_token, display_login)``.
 
     Opens the QR popup in the MA frontend via
-    :class:`AuthenticationHelper`, polls the Yandex Passport endpoint until
-    the user confirms the scan in the Yandex app, then returns the resulting
-    tokens as plain strings (suitable for MA config storage).
+    :class:`music_assistant.helpers.auth.AuthenticationHelper`, polls the
+    Yandex Passport endpoint until the user confirms the scan in the Yandex
+    app, then returns the resulting tokens as plain strings (suitable for
+    MA config storage).
 
     ``display_login`` is the Yandex login name when the server returns it
     (used by the config UI to render "Logged in as X"); may be ``None``.
     """
+    # AuthenticationHelper lives in the music_assistant *server* package,
+    # which isn't always installed in the plugin's standalone test/dev
+    # environment. Lazy import keeps `provider.auth` importable for unit
+    # tests that don't exercise this code path.
+    from music_assistant.helpers.auth import AuthenticationHelper  # noqa: PLC0415
+
     try:
         async with PassportClient.create() as client:
             qr = await client.start_qr_login()

@@ -123,9 +123,10 @@ multiple `yandex_music` providers.
 | **Reset authentication** | Action | Own mode only. Clears the music token, session token, and stored login |
 | **Yandex Music Token** | Secure string | Own mode only. Auto-populated by QR; can also be filled manually |
 
-Tokens are `SecretStr` throughout the codebase; they're only unwrapped at
-three points: the QR auth result, `_resolve_token`, and
-`YnisonClient._build_headers`.
+Tokens are `SecretStr` throughout the codebase; `get_secret()` is only
+called at two sites: `perform_qr_auth` (extracting plain strings from the
+Passport response for MA config storage) and `YnisonClient._build_headers`
+(building the `Authorization: OAuth …` header for the WebSocket handshake).
 
 ### Playback
 

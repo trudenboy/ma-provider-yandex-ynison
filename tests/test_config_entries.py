@@ -211,6 +211,39 @@ async def test_qr_action_without_remember_session_skips_x_token() -> None:
     assert values[CONF_ACCOUNT_LOGIN] == "alice"
 
 
+async def test_qr_action_in_borrow_mode_is_refused() -> None:
+    """A stray QR action while the dropdown is on borrow must not mutate values."""
+    mass = _make_mock_mass({"ym-a": {"domain": "yandex_music", "name": "Primary"}})
+    values: dict[str, Any] = {CONF_YM_INSTANCE: "ym-a", "session_id": "sess-1"}
+
+    with (
+        mock.patch("provider.perform_qr_auth", new=mock.AsyncMock()) as mocked,
+        pytest.raises(LoginFailed, match="own-mode action"),
+    ):
+        await get_config_entries(mass, action=CONF_ACTION_AUTH_QR, values=values)
+
+    mocked.assert_not_awaited()
+    assert CONF_TOKEN not in values
+    assert CONF_X_TOKEN not in values
+
+
+async def test_clear_action_in_borrow_mode_is_refused() -> None:
+    """Clear-auth must also be refused outside own mode."""
+    mass = _make_mock_mass({"ym-a": {"domain": "yandex_music", "name": "Primary"}})
+    values: dict[str, Any] = {
+        CONF_YM_INSTANCE: "ym-a",
+        CONF_TOKEN: "leftover",
+        CONF_X_TOKEN: "leftover-x",
+    }
+
+    with pytest.raises(LoginFailed, match="own-mode action"):
+        await get_config_entries(mass, action=CONF_ACTION_CLEAR_AUTH, values=values)
+
+    # Borrow-mode token fields must be untouched on refusal.
+    assert values[CONF_TOKEN] == "leftover"
+    assert values[CONF_X_TOKEN] == "leftover-x"
+
+
 async def test_qr_action_without_session_id_raises() -> None:
     """Missing session_id is a programmer error from the MA frontend."""
     mass = _make_mock_mass({})

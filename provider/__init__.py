@@ -48,7 +48,7 @@ async def setup(
     return YandexYnisonProvider(mass, manifest, config, SUPPORTED_FEATURES)
 
 
-async def get_config_entries(
+async def get_config_entries(  # noqa: PLR0915 — flow naturally returns ~12 ConfigEntry objects
     mass: MusicAssistant,
     instance_id: str | None = None,  # noqa: ARG001 — required by MA callback signature
     action: str | None = None,
@@ -84,10 +84,17 @@ async def get_config_entries(
     # ------------------------------------------------------------------
     # Own-mode action handling: QR login / reset auth
     # ------------------------------------------------------------------
-    # Both actions only fire when the user is in own mode (the buttons are
-    # only surfaced there). Token writes go straight into `values` so MA
-    # persists them on save.
+    # The buttons are only surfaced in own mode, but the action callback is
+    # invoked with whatever `values` the frontend has cached — guard against
+    # a stale-state save that fires the action while the dropdown points at
+    # a (possibly missing) yandex_music instance.  Otherwise we'd overwrite
+    # token/x_token in a config that won't even use them.
     remember_session = bool(values.get(CONF_REMEMBER_SESSION, True))
+    if action in (CONF_ACTION_AUTH_QR, CONF_ACTION_CLEAR_AUTH) and selected != YM_INSTANCE_OWN:
+        raise LoginFailed(
+            f"Cannot run own-mode action '{action}' while the source is set to "
+            f"'{selected}'. Switch the dropdown to 'Use own credentials' first."
+        )
     if action == CONF_ACTION_AUTH_QR:
         session_id = values.get("session_id")
         if not session_id:
