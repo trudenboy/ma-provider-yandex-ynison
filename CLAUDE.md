@@ -69,14 +69,22 @@ PluginSource → MA Player (Chromecast / DLNA / AirPlay / etc.)
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `token` | SecureString | — | Yandex Music OAuth token (via QR or manual) |
-| `x_token` | SecureString | — | Long-lived session token for auto-refresh (hidden) |
+| `ym_instance` | String (dropdown) | auto | Source of OAuth credentials: a `yandex_music` instance id (borrow), or `__own__` (per-instance own credentials via QR or manual paste) |
+| `token` | SecureString | — | Yandex Music OAuth token (own mode; populated by QR or manual entry) |
+| `x_token` | SecureString | — | Long-lived session token for own-mode reactive 401 refresh (hidden) |
+| `account_login` | String | — | Display login from QR (own mode); shown in the status label (hidden) |
+| `remember_session` | Boolean | `true` | Own mode: store `x_token` after QR for auto-refresh |
 | `mass_player_id` | String | `__auto__` | Target MA player ID or auto-select |
 | `allow_player_switch` | Boolean | `true` | Allow selecting plugin source on any player |
 | `output_sample_rate` | String | `auto` | PCM sample rate: `auto` / `44100` / `48000` / `96000` |
 | `output_bit_depth` | String | `auto` | PCM bit depth: `auto` / `16` / `24` |
 | `publish_name` | String | `Music Assistant` | Device name in Yandex Music app |
 | `device_id` | String | auto-generated | 16-char hex, persisted per instance (hidden) |
+
+Three reachable auth states:
+- **Borrow** — `ym_instance` points at a `yandex_music` instance; tokens read live from there.
+- **Own + x_token** — `ym_instance == __own__`, `x_token` set; reactive 401 refresh works.
+- **Own + token only** — `ym_instance == __own__`, `x_token` empty (manual paste, or QR with Remember session off); expiry needs re-paste/re-QR.
 
 Auto-detection: `superb`/`lossless` → 24-bit/48kHz, else → 16-bit/44.1kHz.
 

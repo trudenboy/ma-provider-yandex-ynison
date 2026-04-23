@@ -97,17 +97,36 @@ nearing the end of the queue, then pushing the expanded list to Ynison via
 
 ### Authentication
 
+The plugin supports two top-level auth modes, picked via the **Yandex Music
+source** dropdown:
+
+* **Borrow** (default when a `yandex_music` MusicProvider exists) — read
+  OAuth credentials from a linked `yandex_music` instance. Token storage and
+  scheduled refresh stay with that provider; this plugin only does
+  in-memory refresh on 401.
+* **Own credentials** — populate this instance's own credentials. Two ways
+  to fill them:
+  * **Login with QR code** — opens a QR popup; scan with the Yandex app and
+    the music token + session token are stored automatically.
+  * **Manual paste** — enter a Yandex Music OAuth token by hand (escape
+    hatch for headless setups).
+
+Use *Own credentials* with QR to bind separate MA players to separate
+Yandex accounts (one plugin instance per player) without spinning up
+multiple `yandex_music` providers.
+
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| **Login with QR code** | Action | Opens a QR page — scan with Yandex app to authenticate |
-| **Remember session** | Boolean (default: `true`) | Stores a long-lived x_token for automatic music token refresh. When disabled, manual re-auth is required on expiry |
-| **Yandex Music Token** | Secure string | Populated by QR login or entered manually. Hidden after authentication |
-| **Reset authentication** | Action | Clears all stored tokens |
+| **Yandex Music source** | Dropdown | Borrow from a configured `yandex_music` instance, or use this instance's own credentials |
+| **Login with QR code** | Action | Own mode only. Opens a QR popup; scan with the Yandex app to populate the token automatically |
+| **Remember session** | Boolean (default: `true`) | Own mode only. When enabled, stores a long-lived `x_token` so the plugin can refresh the music token on 401. Disable to keep only the short-lived music token (re-QR on expiry) |
+| **Reset authentication** | Action | Own mode only. Clears the music token, session token, and stored login |
+| **Yandex Music Token** | Secure string | Own mode only. Auto-populated by QR; can also be filled manually |
 
-Tokens are `SecretStr` throughout; only unwrapped at three points: QR auth
-result, `_resolve_token`, and `YnisonClient._build_headers`.
-
-New instances auto-detect and reuse tokens from existing sibling instances.
+Tokens are `SecretStr` throughout the codebase; `get_secret()` is only
+called at two sites: `perform_qr_auth` (extracting plain strings from the
+Passport response for MA config storage) and `YnisonClient._build_headers`
+(building the `Authorization: OAuth …` header for the WebSocket handshake).
 
 ### Playback
 
