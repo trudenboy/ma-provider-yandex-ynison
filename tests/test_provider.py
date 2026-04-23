@@ -1293,7 +1293,7 @@ class TestRefreshYnisonToken:
         provider._ym_instance_id = None
         provider.config = MagicMock()
         provider.config.get_value = MagicMock(
-            side_effect=lambda key: ("own-x-token" if key == CONF_X_TOKEN else None)
+            side_effect=lambda key: "own-x-token" if key == CONF_X_TOKEN else None
         )
 
         with patch(
