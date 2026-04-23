@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.8.0] - 2026-04-23
+
+### Added
+- **Per-instance QR auth** (own mode): a new `Login with QR code` action button populates `CONF_TOKEN` and `CONF_X_TOKEN` from a Yandex Passport QR scan, so each plugin instance can be bound to its own Yandex account without sharing credentials with a `yandex_music` MusicProvider and without manual token paste. Multiple instances can target different accounts on different MA players.
+- **Reactive 401 refresh in own mode**: when a session token (`x_token`) is stored, `_refresh_ynison_token` and `_resolve_token` refresh the music token in-memory on auth failure, mirroring borrow-mode behavior. No config writes — the refresh stays in-process for the connection lifetime.
+- **`Remember session` toggle**: opt-in (default on) for storing the long-lived `x_token` after QR; off → only the short-lived music token is persisted, and expiry requires re-QR.
+- **`Reset authentication` action**: clears `CONF_TOKEN`, `CONF_X_TOKEN`, and `CONF_ACCOUNT_LOGIN` in one click.
+- **Account login status**: the config screen shows `Authenticated to Yandex Music as <login>` when the QR flow returns a `display_login`.
+
+### Changed
+- "Use own token" dropdown option renamed to "Use own credentials (QR or token)" to reflect the dual entry path.
+- Own-mode `CONF_TOKEN` is now optional when `CONF_X_TOKEN` is stored — the plugin can mint a fresh music token on demand.
+
 ## [1.7.4] - 2026-04-22
 
 ### Fixed
