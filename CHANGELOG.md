@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.8.2] - 2026-04-28
+
+### Fixed
+- **Stale `CONF_YM_INSTANCE` selection survives YM-instance removal**: when the linked `yandex_music` instance referenced by `CONF_YM_INSTANCE` was deleted, `get_config_entries` only clamped the rendered `default_value` to `YM_INSTANCE_OWN` while leaving `selected`/`values[CONF_YM_INSTANCE]` as the stale id — so the stored config remained invalid until the user pressed Save, and a startup before that would fail with `LoginFailed("Linked Yandex Music instance '...' is not loaded")`. Now the stale id is normalized to `YM_INSTANCE_OWN` up front (and written back into `values`), so a no-touch Save persists the correction and the rest of the function reads consistent state. Dead "Selected Yandex Music instance is not available" label branch removed (PR #3614 review).
+
 ## [1.8.1] - 2026-04-23
 
 ### Fixed
