@@ -7,7 +7,7 @@ import random
 import time
 from collections.abc import AsyncGenerator, Callable
 from contextlib import suppress
-from enum import Enum
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any, cast
 
 from music_assistant_models.enums import (
@@ -143,7 +143,7 @@ _COMMAND_IDEMPOTENCY_TTL = 1.0
 _PLAY_MEDIA_BACKOFF_SECONDS: tuple[float, ...] = (1.0, 2.0, 5.0)
 
 
-class HandoffPhase(str, Enum):
+class HandoffPhase(StrEnum):
     """Internal handoff state machine.
 
     Mirrors the lifecycle of a single track from the plugin's point of view,
