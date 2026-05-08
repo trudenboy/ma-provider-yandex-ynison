@@ -422,6 +422,12 @@ class YandexYnisonProvider(PluginProvider):
 
     async def unload(self, is_removed: bool = False) -> None:
         """Handle close/cleanup of the provider."""
+        # Strip our `output_format` stamp from the player on reload/remove —
+        # otherwise a config-driven reload while the source is active leaves
+        # a stale signal-chain entry on the player after the provider is
+        # gone. Always-on cleanup; safe even if the toggle was off (the
+        # helper itself is no-op-on-absent-key).
+        self._clear_player_output_format(self._active_player_id)
         if self._prefetch_task and not self._prefetch_task.done():
             self._prefetch_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -896,6 +902,12 @@ class YandexYnisonProvider(PluginProvider):
             else:
                 # Our device but paused — stop player, keep association
                 await self._pause_playback()
+                # Re-publish the fake queue with state="paused" so the
+                # frontend player card reflects the pause immediately.
+                # Resume re-fires it via _activate_playback's needs_reselect
+                # branch, so we don't need a symmetric path on play.
+                if self._active_player_id and self._ui_integration_active:
+                    self._register_plugin_queue(self._active_player_id)
         elif self._source_details.in_use_by or (self._is_handoff and self._active_player_id):
             # Active device switched away — fully release player.
             # In handoff mode `_source_details.in_use_by` is always None
@@ -1107,6 +1119,11 @@ class YandexYnisonProvider(PluginProvider):
                     "dsp": dsp,
                 },
             }
+        # Derive state from the authoritative Ynison status — when Ynison
+        # reports paused, the frontend must show paused on the fake queue
+        # too (otherwise the player card stays "playing" while audio is
+        # silent until the next track-change re-fire).
+        is_paused = bool(self._ynison and self._ynison.state.is_paused)
         fake_queue = {
             "queue_id": self.instance_id,
             "active": True,
@@ -1120,7 +1137,7 @@ class YandexYnisonProvider(PluginProvider):
             "index_in_buffer": None,
             "elapsed_time": metadata.elapsed_time if metadata else 0,
             "elapsed_time_last_updated": time.time(),
-            "state": "playing",
+            "state": "paused" if is_paused else "playing",
             "current_item": current_item,
             "next_item": None,
             "radio_source": [],
@@ -1190,19 +1207,18 @@ class YandexYnisonProvider(PluginProvider):
     def _signal_seek_to_frontend(self, elapsed_ms: int, player_id: str | None) -> None:
         """Force the frontend seek-bar to jump to a new position.
 
-        MA filters elapsed-time-only `QUEUE_TIME_UPDATED` events by default
-        (treats them as routine ticks). On a real Ynison-driven seek we
-        want the bar to snap immediately — `force_update=True` on the
-        player update plus an explicit `QUEUE_TIME_UPDATED` event with
-        our fake-queue id does the job.
+        On a real Ynison-driven seek we want the bar to snap immediately
+        rather than wait for the next regular `_sync_progress` tick. The
+        `QUEUE_TIME_UPDATED` event carrying our fake-queue id is what the
+        frontend listens to for elapsed updates, so emitting one with the
+        new position is sufficient — no need to mutate `Player` internals.
+        Public-API-only: previous revisions wrote `player._attr_elapsed_time`
+        to force the broadcast, but coupling to a name-mangled attribute
+        silently breaks across MA versions and the `suppress(Exception)`
+        guard would hide the regression.
         """
         if not self._ui_integration_active or not player_id:
             return
-        player = self.mass.players.get_player(player_id)
-        if player is not None:
-            with suppress(Exception):
-                player._attr_elapsed_time = elapsed_ms / 1000
-                player.update_state(force_update=True)
         self.mass.signal_event(
             EventType.QUEUE_TIME_UPDATED,
             object_id=self.instance_id,

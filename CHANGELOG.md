@@ -37,13 +37,42 @@ below). Hidden in handoff mode (where MA already owns a real queue).
   signal-chain panel knows our PCM output format (we bypass the
   streams controller, so MA never fills it in otherwise).
 - New `_signal_seek_to_frontend(elapsed_ms, player_id)`: on a
-  Ynison-driven seek, calls `player.update_state(force_update=True)`
-  and emits `QUEUE_TIME_UPDATED` with our fake queue id so the
-  frontend seek-bar snaps to the new position immediately instead
-  of waiting for the next progress tick.
+  Ynison-driven seek, emits `QUEUE_TIME_UPDATED` with our fake
+  queue id so the frontend seek-bar snaps to the new position
+  immediately instead of waiting for the next progress tick.
 
 Stream-mode only — handoff has a real `play_media` queue and
 already integrates with the MA UI through it.
+
+### Other changes (post-review)
+
+- `_register_plugin_queue` now derives the fake queue's `state`
+  from the live `YnisonState.is_paused` flag, and the pause
+  branch of `_handle_ynison_state` re-publishes the queue so the
+  frontend player card mirrors pause/resume immediately (fixes
+  Copilot review note: previously the queue was hard-coded to
+  `state=playing` until the next track-change re-fire).
+- `unload()` now strips our `output_format` stamp from the
+  player up front, so a config-driven reload while the source
+  is active no longer leaves stale signal-chain info on the
+  player (fixes Copilot review note about absent cleanup path).
+- `_signal_seek_to_frontend` no longer mutates the private
+  `Player._attr_elapsed_time` attribute. The `QUEUE_TIME_UPDATED`
+  event alone is sufficient to snap the frontend seek-bar, and
+  dropping the private write removes a silent-breakage path
+  across MA versions (fixes Copilot review note).
+- `_clear_active_player` now resets `_actual_input_format` to
+  `None` alongside the other session-scoped state, preventing
+  the next session's first `_register_plugin_queue` from
+  showing the previous track's CDN format on the signal-chain
+  panel until `_update_metadata_from_stream` re-fires.
+
+### Config UX
+
+- `Device name in Yandex Music` (`publish_name`) is no longer
+  in the *advanced* section. Field is exposed at the top of
+  the config form so users see it without expanding advanced.
+  Existing values are preserved on upgrade.
 
 ### Known limitation (without MA core changes)
 
