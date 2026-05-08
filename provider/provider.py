@@ -1746,6 +1746,24 @@ class YandexYnisonProvider(PluginProvider):
                 self._expected_track_id = new_track
                 self._handoff_completion_signaled_for = None
                 activated = True
+                # Honor Ynison's reported position when activating —
+                # the user may have transferred a mid-track playback
+                # from the Yandex app (track at 60s, switch device →
+                # MA must continue from 60s, not restart at 0).
+                # Same pause-seek-play sequence as _apply_idle_resume
+                # to avoid the audible 0-then-jump glitch.
+                start_ms = state.progress_ms
+                if start_ms >= 1000:
+                    self.logger.info(
+                        "Handoff: continuing track from Ynison-reported position (seek=%dms)",
+                        start_ms,
+                    )
+                    with suppress(Exception):
+                        await self.mass.players.cmd_pause(target_player_id)
+                    with suppress(Exception):
+                        await self.mass.player_queues.seek(target_player_id, start_ms // 1000)
+                    with suppress(Exception):
+                        await self.mass.players.cmd_play(target_player_id)
 
         if activated:
             self._ensure_handoff_heartbeat()
