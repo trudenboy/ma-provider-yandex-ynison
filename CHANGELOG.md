@@ -2,6 +2,34 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- **Adaptive PCM format hint**: `_update_normalized_format()` now accepts an optional `hint: AudioFormat`, and a new `_prefetch_format_for_track()` runs inline in `_activate_playback` *before* `select_source()` so `PluginSource.audio_format` matches the actual incoming track. Hi-Res (96 kHz / 24-bit) lossless propagates through `auto` mode without resampling. Bounded by `_PREFETCH_FORMAT_TIMEOUT = 2.5s` so a transient API issue cannot stall activation for the full retry budget.
+- **Experimental `playback_mode: handoff`**: opt-in advanced config key. In `handoff` the plugin does *not* advertise `AUDIO_SOURCE`; on Ynison track changes it calls `mass.player_queues.play_media(player_id, "<yandex_music_instance>://track/<id>", REPLACE)`, letting MA stream natively through the linked `yandex_music` MusicProvider — no inner ffmpeg, no PCM resampling. See `CLAUDE.md` → *Playback modes* for the full list of safety nets. `_features_for_mode` in `provider/__init__.py` lets `setup()` pick `SUPPORTED_FEATURES` dynamically based on the chosen mode.
+- **Handoff progress heartbeat**: new advanced config key `handoff_heartbeat_interval` (3 / 5 / 7 / 10 s, default 5). Independent asyncio task pushes `update_playing_status` to Ynison even when MA's `EventType.QUEUE_TIME_UPDATED` is sparse (DLNA / UPnP renderers), guarding against `YNISON_ERROR_REBALANCED` moving the active device to the phone.
+- **Handoff URI uses linked `instance_id`**: `_build_handoff_uri()` prefixes the URI with the linked yandex_music provider's `instance_id` when known (matters when borrow + own instances coexist — `mass.get_provider` would otherwise pick the first match by domain). Required adding `instance_id` to the `YandexMusicProviderLike` Protocol.
+- **Handoff grace period after `play_media(REPLACE)`**: `_handoff_grace_until` (5 s) suppresses spurious drift seeks while MA resolves the stream. Override: a queue already PLAYING with `corrected_elapsed_time > 1s` lets a real user seek pass through.
+- **Handoff state-change force-update**: tracking `_handoff_last_seen_state`, transitions PLAYING ↔ PAUSED ↔ IDLE in MA queue bypass the 2 s progress throttle in `_on_ma_player_event`. Pause from MA UI now reflects in the Yandex Music app within ~100 ms instead of up to 2 s.
+- **Handoff dedup and idle-resume**: before issuing `play_media`, the plugin compares `queue.current_item.uri` with the expected URI. Skip when already PLAYING; switch to `play()` when same URI but PAUSED. Avoids needless restart on Ynison reconnect or echo loops.
+- **Handoff replay reset**: `progress_ms < 1s` on the same track clears `_handoff_completion_signaled_for` so the next end-of-track will re-signal Ynison correctly.
+- **Tests**: `tests/test_provider_handoff.py` (new file, 26 tests covering `_features_for_mode`, `_handoff_activate` with all branches, `_handoff_pause`, heartbeat loop, force-progress on state change, dedup, grace, replay reset, instance-id URI, play_media-failure recovery). New cases in `tests/test_provider.py` for the format hint, pre-fetch behaviour, pre-fetch timeout, and resume-reselect pre-fetch path.
+
+### Changed
+- **Default lossless PCM rate 48 kHz to 44.1 kHz** in `PCM_LOSSLESS_PARAMS`. Yandex's primary lossless catalogue is 44.1 kHz FLAC; it no longer gets resampled. Triggered by user feedback on dastereo.ru thread post #530 ("everything was converted to 48 kHz... unlike the regular Yandex.Music provider").
+- **Progress / UI sync intervals 5 s to 2 s**: `_PROGRESS_SYNC_INTERVAL` and the player-update throttle in `_handle_ynison_state` both lowered to 2 s for snappier app/MA sync. Significant changes still `force_update` immediately. Echo-detection grace (5 s) kept to suppress false seek detection.
+- **Pre-fetch fires on resume-reselect onto a *different* track**, not only when `target_player_id` itself changes (Copilot review C1). A `needs_reselect=True` driven by `_stream_stop_event` for a new track id now correctly primes `PluginSource.audio_format`.
+- **`_handoff_activate` only commits `_handoff_current_track_id` after a successful `play_media`**: a failed REPLACE no longer leaves the state machine stuck in the same-track branch on the next Ynison update (Copilot review C3). Grace window also opens only on success.
+- **`_handoff_activate` "track changed X to Y" log uses the captured previous id**, not the freshly-mutated attribute (Copilot review C4).
+
+### Documentation
+- `CLAUDE.md`: new "Playback modes" subsection with `stream` vs `handoff` comparison and "Handoff invariants and safety nets" listing each defensive mechanism (heartbeat, grace, dedup, replay reset, state-change force-update). Config table now includes `playback_mode` and `handoff_heartbeat_interval`. Dedup wording aligned with the actual implementation — `PlaybackState` enum has only `IDLE` / `PAUSED` / `PLAYING` / `UNKNOWN`, no separate `BUFFERING` (Copilot review C6).
+- `CONF_PLAYBACK_MODE` description in `provider/__init__.py` carries explicit warnings: yandex_music dependency, queue ownership during handoff, and that `output_*` config keys do not apply in handoff mode.
+
+### Notes
+- Pre-existing mypy errors in `provider/provider.py` (`subclass Any` and `_bytes_to_ms` `Any` return) are unchanged from the `dev` baseline and not addressed in this iteration.
+- Variant of handoff with a passive `PluginSource` that retains `on_play/on_pause/on_seek` callbacks was evaluated and rejected: `_get_active_plugin_source` filters by `ProviderFeature.AUDIO_SOURCE`, so without it callbacks are never invoked. Bulk `play_media([uri1, uri2, ...])` for gapless handoff is deferred to a follow-up PR (needs reverse-sync of MA queue index to Ynison `current_playable_index` via `EventType.MEDIA_ITEM_PLAYED`).
+
 ## [1.8.2] - 2026-04-28
 
 ### Fixed

@@ -96,6 +96,13 @@ _API_MAX_BACKOFF = 30.0
 # Cache TTL for stream details (seconds)
 _STREAM_DETAILS_CACHE_TTL = 300  # 5 minutes
 
+# Pre-fetch budget for the format adaptation hint. _get_stream_details_with_retry
+# does up to 3 attempts with exponential backoff (2s + 4s = ~6s in the worst
+# case) — that latency is unacceptable inline before select_source(). If the
+# fetch can't satisfy the budget, fall back to the previously known format
+# rather than blocking playback activation.
+_PREFETCH_FORMAT_TIMEOUT = 2.5
+
 # Accepted non-auto values for output format overrides; mirrors the options
 # offered in CONF_OUTPUT_SAMPLE_RATE / CONF_OUTPUT_BIT_DEPTH config entries.
 # Used defensively to reject stale/tampered values without raising.
@@ -777,10 +784,14 @@ class YandexYnisonProvider(PluginProvider):
         if self._active_player_id != target_player_id or needs_reselect:
             # Pre-fetch real format of the upcoming track BEFORE select_source
             # so the outer ffmpeg starts with PluginSource.audio_format that
-            # matches what we will actually emit. Skipped on plain resume of
-            # the same player when no track change has happened.
+            # matches what we will actually emit. Skipped only when the same
+            # player resumes the same track (format definitely unchanged); a
+            # resume-reselect onto a *different* track must still prefetch.
             new_track = state.current_track_id
-            should_prefetch = new_track is not None and self._active_player_id != target_player_id
+            should_prefetch = new_track is not None and (
+                self._active_player_id != target_player_id
+                or new_track != self._current_streaming_track_id
+            )
             self._active_player_id = target_player_id
             if should_prefetch and new_track is not None:
                 await self._prefetch_format_for_track(new_track)
@@ -1247,11 +1258,27 @@ class YandexYnisonProvider(PluginProvider):
         This method is best-effort: any failure leaves the current format
         in place and only logs a warning, so playback never breaks because
         of a bad pre-fetch.
+
+        Bounded by ``_PREFETCH_FORMAT_TIMEOUT`` so a transient API hiccup
+        cannot stall ``select_source()`` for the full retry budget — a slow
+        pre-fetch is treated like a failed one (fall back to current format,
+        let the in-stream `_get_stream_details_with_retry` handle retries).
         """
         if not self._yandex_provider:
             return
         try:
-            stream_details = await self._get_stream_details_with_retry(track_id)
+            stream_details = await asyncio.wait_for(
+                self._get_stream_details_with_retry(track_id),
+                timeout=_PREFETCH_FORMAT_TIMEOUT,
+            )
+        except TimeoutError:
+            self.logger.info(
+                "Pre-fetch of stream details for %s exceeded %.1fs — "
+                "keeping current format; in-stream fetch will retry",
+                track_id,
+                _PREFETCH_FORMAT_TIMEOUT,
+            )
+            return
         except Exception:
             self.logger.warning(
                 "Pre-fetch of stream details failed for %s — keeping current format",
@@ -1317,7 +1344,9 @@ class YandexYnisonProvider(PluginProvider):
         )
         return f"{prov_id}://track/{track_id}"
 
-    async def _handoff_activate(self, state: YnisonState, target_player_id: str) -> None:
+    async def _handoff_activate(  # noqa: PLR0915 — three-way branch + dedup/resume cases
+        self, state: YnisonState, target_player_id: str
+    ) -> None:
         """Translate Ynison state into MA player_queue commands (handoff mode).
 
         Instead of streaming PCM ourselves, push the chosen track into MA's
@@ -1350,8 +1379,9 @@ class YandexYnisonProvider(PluginProvider):
 
         if new_track != self._handoff_current_track_id:
             queue = self.mass.player_queues.get(target_player_id)
-            self._handoff_current_track_id = new_track
-            self._handoff_completion_signaled_for = None
+            # Capture the previous id for logging/recovery — it's about to be
+            # mutated below, and a few branches need to know the from-id.
+            prev_track_id = self._handoff_current_track_id
             self._active_player_id = target_player_id
 
             # Dedup (P5): MA already plays the same URI → just update state and
@@ -1366,6 +1396,8 @@ class YandexYnisonProvider(PluginProvider):
                 self.logger.debug(
                     "Handoff: queue already playing %s — skipping play_media", expected_uri
                 )
+                self._handoff_current_track_id = new_track
+                self._handoff_completion_signaled_for = None
             elif (
                 queue is not None
                 and queue.current_item is not None
@@ -1379,10 +1411,12 @@ class YandexYnisonProvider(PluginProvider):
                     await self.mass.player_queues.play(target_player_id)
                 except Exception:
                     self.logger.exception("Handoff resume play() failed on %s", target_player_id)
+                self._handoff_current_track_id = new_track
+                self._handoff_completion_signaled_for = None
             else:
                 self.logger.info(
                     "Handoff: track changed %s -> %s, calling player_queues.play_media",
-                    self._handoff_current_track_id,
+                    prev_track_id,
                     new_track,
                 )
                 try:
@@ -1390,16 +1424,23 @@ class YandexYnisonProvider(PluginProvider):
                         target_player_id, expected_uri, option=QueueOption.REPLACE
                     )
                 except Exception:
+                    # Don't commit _handoff_current_track_id when play_media
+                    # fails — otherwise the next Ynison update for the same
+                    # track id would fall into the same-track branch and
+                    # never retry play_media, leaving MA stuck out of sync.
                     self.logger.exception(
                         "Handoff play_media failed for %s on %s",
                         expected_uri,
                         target_player_id,
                     )
-                # Grace period (P2): suppress drift seek detection while MA
-                # resolves the stream and starts playback. Override below if
-                # the queue is already PLAYING with elapsed > 1s, so a real
-                # user seek inside the window still works.
-                self._handoff_grace_until = time.monotonic() + 5.0
+                else:
+                    self._handoff_current_track_id = new_track
+                    self._handoff_completion_signaled_for = None
+                    # Grace period (P2): suppress drift seek detection while
+                    # MA resolves the stream and starts playback. Override in
+                    # the same-track branch below — a queue already PLAYING
+                    # with elapsed > 1s lets a real user seek pass through.
+                    self._handoff_grace_until = time.monotonic() + 5.0
             # Start heartbeat (P1) on first activation. Idempotent — a running
             # task is reused.
             self._ensure_handoff_heartbeat()

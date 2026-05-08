@@ -342,6 +342,48 @@ class TestYnisonStateHandling:
 
         assert provider._active_player_id == "player1"
 
+    async def test_prefetch_runs_on_resume_reselect_with_new_track(self) -> None:
+        """Resume-reselect onto a different track must still pre-fetch the format.
+
+        Copilot review C1: previously `should_prefetch` only fired when the
+        target_player_id changed, so a `needs_reselect=True` (stream stop
+        event) for a *different* track id would skip pre-fetch and leave
+        PluginSource.audio_format on the previous session's rate.
+        """
+        provider = _make_provider()
+        player = MagicMock()
+        player.player_id = "player1"
+        player.display_name = "Player 1"
+        provider.mass.players.all_players.return_value = [player]  # type: ignore[attr-defined]
+        provider.mass.players.get_player.return_value = player  # type: ignore[attr-defined]
+
+        # Simulate a previous session: same player still active, stream
+        # stopped (needs_reselect=True), and the previous track is "old".
+        provider._active_player_id = "player1"
+        provider._current_streaming_track_id = "old-track"
+        provider._stream_stop_event.set()
+
+        prefetch_calls: list[str] = []
+
+        async def _record_prefetch(track_id: str) -> None:
+            prefetch_calls.append(track_id)
+
+        _stub_attr(provider, "_prefetch_format_for_track", _record_prefetch)
+
+        state = YnisonState(
+            active_device_id=provider._device_id,
+            player_state={
+                "status": {"paused": False, "progress_ms": 0, "duration_ms": 200000},
+                "player_queue": {
+                    "current_playable_index": 0,
+                    "playable_list": [{"playable_id": "new-track"}],
+                },
+            },
+        )
+        await provider._handle_ynison_state(state)
+
+        assert prefetch_calls == ["new-track"]
+
     async def test_clears_on_device_switch(self) -> None:
         """Clears active player when device switches away."""
         provider = _make_provider()
@@ -1212,6 +1254,33 @@ class TestPCMNormalization:
         await provider._prefetch_format_for_track("track:any")
 
         assert provider._normalized_format is baseline
+
+    async def test_prefetch_format_times_out_keeps_current(self) -> None:
+        """A pre-fetch that exceeds _PREFETCH_FORMAT_TIMEOUT must not block start.
+
+        Copilot review C2: _get_stream_details_with_retry can sleep for
+        several backoff cycles; a transient API issue must not stall
+        _activate_playback / select_source.
+        """
+        provider = _make_provider()
+        mock_yandex = MagicMock()
+        mock_yandex.domain = "yandex_music"
+        mock_yandex.type = ProviderType.MUSIC
+        mock_yandex.config.get_value = MagicMock(return_value="superb")
+        provider._yandex_provider = mock_yandex
+        provider._update_normalized_format()  # establish baseline
+        baseline_sr = provider._normalized_format.sample_rate
+
+        async def _hang(_track_id: str) -> Any:
+            await asyncio.sleep(10.0)
+            return MagicMock()  # never reached
+
+        # Use a tiny timeout so the test runs fast.
+        with patch("provider.provider._PREFETCH_FORMAT_TIMEOUT", 0.05):
+            _stub_attr(provider, "_get_stream_details_with_retry", _hang)
+            await provider._prefetch_format_for_track("track:slow")
+
+        assert provider._normalized_format.sample_rate == baseline_sr
 
     async def test_audio_format_not_modified_by_stream(self) -> None:
         """PluginSource audio_format stays fixed (not updated from stream)."""

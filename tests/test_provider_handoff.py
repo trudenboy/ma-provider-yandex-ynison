@@ -283,7 +283,7 @@ class TestHandoffPause:
 
 @pytest.mark.asyncio
 class TestHandoffActivateExtended:
-    """Doortop coverage for grace, dedup, replay, instance-id URI."""
+    """Coverage for grace, dedup, replay, instance-id URI."""
 
     async def test_uri_uses_yandex_provider_instance_id(self) -> None:
         """When a yandex_music provider is linked, its instance_id is in the URI."""
@@ -383,6 +383,26 @@ class TestHandoffActivateExtended:
 
         await provider._handoff_activate(_make_state("track-1", progress_ms=500), "player-A")
         assert provider._handoff_completion_signaled_for is None
+
+    async def test_play_media_failure_does_not_commit_track_id(self) -> None:
+        """If play_media throws, _handoff_current_track_id stays unchanged.
+
+        Otherwise the next Ynison update for the same track id would fall
+        through the same-track branch and never retry play_media, leaving
+        MA stuck out of sync (Copilot review C3).
+        """
+        provider = _make_handoff_provider()
+        provider._yandex_provider = None
+        provider._handoff_current_track_id = "old-track"
+        provider.mass.player_queues.play_media = AsyncMock(side_effect=Exception("boom"))
+
+        await provider._handoff_activate(_make_state("new-track"), "player-A")
+
+        # Track id NOT advanced — next state-update will retry play_media.
+        assert provider._handoff_current_track_id == "old-track"
+        # Grace was NOT opened — we don't want to suppress drift seeks for a
+        # play_media that never actually started.
+        assert provider._handoff_grace_until == 0.0
 
 
 @pytest.mark.asyncio
