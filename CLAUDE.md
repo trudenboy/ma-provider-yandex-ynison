@@ -99,7 +99,7 @@ Auto-detection (no hint): `superb`/`lossless` → 24-bit/44.1kHz, else → 16-bi
 
 - **URI uses linked instance_id**, not bare `yandex_music://` — picks the correct yandex_music account when both borrow and own coexist (`_build_handoff_uri`).
 - **Heartbeat** (`_handoff_heartbeat_loop`): runs at `handoff_heartbeat_interval` (default 5s, configurable 3–10s). Pushes progress to Ynison even when MA's `QUEUE_TIME_UPDATED` is sparse (DLNA/UPnP), preventing Ynison from re-balancing the active device.
-- **Grace period** (`_handoff_grace_until`): 5s after `play_media(REPLACE)` we suppress drift-driven seeks. Override: a queue already PLAYING with `elapsed > 1s` lets a real user seek pass through.
+- **Grace period** (`_handoff_grace_until`, constant `_ECHO_GRACE_PERIOD = 3s`): after `play_media(REPLACE)` we suppress drift-driven seeks for the echo window. The same constant drives stream-mode `_seek_grace_until` after track change / seek / same-track resume. Override: a queue already PLAYING with `elapsed > 1s` lets a real user seek pass through.
 - **Dedup on reconnect**: before issuing `play_media`, compare `queue.current_item.uri` with the expected URI. Skip when already PLAYING; switch to `play()` when same URI but PAUSED. (`PlaybackState` enum exposes only `IDLE` / `PAUSED` / `PLAYING` / `UNKNOWN` — there is no separate `BUFFERING` state.)
 - **Replay reset** (`progress_ms < 1000`): clears `_handoff_completion_signaled_for` so the next end-of-track will re-signal Ynison.
 - **State-change force-update** (P10): MA queue transitions (PLAYING ↔ PAUSED ↔ IDLE) bypass the 2s progress throttle — pause/play from MA UI reflect in the Yandex Music app within ~100 ms.

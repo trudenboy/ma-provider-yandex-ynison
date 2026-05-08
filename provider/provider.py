@@ -103,6 +103,13 @@ _STREAM_DETAILS_CACHE_TTL = 300  # 5 minutes
 # rather than blocking playback activation.
 _PREFETCH_FORMAT_TIMEOUT = 2.5
 
+# Window during which we suppress seek-detection after a track change, seek,
+# or play_media(REPLACE) — Ynison echoes our update back, and the stale
+# progress in those echoes would otherwise look like a fresh user seek.
+# 3s comfortably covers the WS round-trip + MA stream startup; longer windows
+# delay legitimate user seeks issued shortly after a track change.
+_ECHO_GRACE_PERIOD = 3.0
+
 # Accepted non-auto values for output format overrides; mirrors the options
 # offered in CONF_OUTPUT_SAMPLE_RATE / CONF_OUTPUT_BIT_DEPTH config entries.
 # Used defensively to reject stale/tampered values without raising.
@@ -811,14 +818,14 @@ class YandexYnisonProvider(PluginProvider):
             # Grace period: ignore seek detection for a few seconds after
             # track change — Ynison echoes can report stale progress that
             # looks like a large drift.
-            self._seek_grace_until = time.monotonic() + 5.0
+            self._seek_grace_until = time.monotonic() + _ECHO_GRACE_PERIOD
         elif new_track and new_track == self._current_streaming_track_id:
             # Same-track resume after pause: explicitly seek to the Ynison position
             # so the new stream starts at the right offset.
             if needs_reselect:
                 self._seek_position_ms = state.progress_ms
                 self._track_changed_event.set()
-                self._seek_grace_until = time.monotonic() + 5.0
+                self._seek_grace_until = time.monotonic() + _ECHO_GRACE_PERIOD
                 significant_change = True
             else:
                 # Detect seek: compare Ynison progress against our stream position.
@@ -844,7 +851,7 @@ class YandexYnisonProvider(PluginProvider):
                             )
                             self._seek_position_ms = state.progress_ms
                             self._track_changed_event.set()
-                            self._seek_grace_until = now + 5.0
+                            self._seek_grace_until = now + _ECHO_GRACE_PERIOD
                             significant_change = True
 
         # Update metadata from state
@@ -1440,7 +1447,7 @@ class YandexYnisonProvider(PluginProvider):
                     # MA resolves the stream and starts playback. Override in
                     # the same-track branch below — a queue already PLAYING
                     # with elapsed > 1s lets a real user seek pass through.
-                    self._handoff_grace_until = time.monotonic() + 5.0
+                    self._handoff_grace_until = time.monotonic() + _ECHO_GRACE_PERIOD
             # Start heartbeat (P1) on first activation. Idempotent — a running
             # task is reused.
             self._ensure_handoff_heartbeat()
@@ -1967,5 +1974,5 @@ class YandexYnisonProvider(PluginProvider):
         # Also trigger local stream restart so seek takes effect
         # immediately without waiting for the Ynison echo.
         self._seek_position_ms = seek_ms
-        self._seek_grace_until = time.monotonic() + 5.0
+        self._seek_grace_until = time.monotonic() + _ECHO_GRACE_PERIOD
         self._track_changed_event.set()
