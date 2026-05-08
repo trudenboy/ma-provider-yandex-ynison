@@ -1780,6 +1780,21 @@ class YandexYnisonProvider(PluginProvider):
         # transitioning to PAUSED).
         prev_phase = self._expected_phase
         self._expected_phase = HandoffPhase.PAUSED
+        # Also ALSO close the drift_suppress window if it was open (a
+        # resume that the user is now cancelling) — otherwise the
+        # Yandex-app button shows "playing" until the window expires.
+        self._drift_suppress_until = 0.0
+        # Echo paused=True to Ynison right now (don't wait the up-to-5s
+        # heartbeat tick) so the Yandex-app pause button reflects state
+        # immediately. Best-effort — heartbeat will retry if this fails.
+        queue = self.mass.player_queues.get(target_player_id)
+        elapsed_ms = int(queue.corrected_elapsed_time * 1000) if queue else 0
+        with suppress(Exception):
+            await self._send_progress_to_ynison(
+                progress_ms=elapsed_ms,
+                duration_ms=self._best_duration_ms(),
+                paused=True,
+            )
         try:
             await self.mass.players.cmd_pause(target_player_id)
         except Exception:
@@ -1860,12 +1875,14 @@ class YandexYnisonProvider(PluginProvider):
                 # the user re-taps play, firing duplicate REPLACE that races
                 # the first. Override to paused=False during that window so
                 # the app stays consistent with our intent (we're starting).
-                # Resolve paused via activation window > expected_phase > queue.state.
-                in_activation_window = time.monotonic() < self._drift_suppress_until
-                if in_activation_window:
-                    is_paused = False
-                elif self._expected_phase == HandoffPhase.PAUSED:
+                # Resolve paused: expected_phase=PAUSED > activation window > queue.state.
+                # PAUSED takes precedence so a user pause inside the activation
+                # window doesn't leave the Ynison-app button "unresponsive" for
+                # up to 10s (heartbeat would otherwise keep echoing False).
+                if self._expected_phase == HandoffPhase.PAUSED:
                     is_paused = True
+                elif time.monotonic() < self._drift_suppress_until:
+                    is_paused = False
                 else:
                     is_paused = queue.state != PlaybackState.PLAYING
                 self.logger.debug(
