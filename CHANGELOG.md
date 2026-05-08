@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.1.2] - 2026-05-08
+
+### Fixed — upstream mypy follow-up
+
+- `tests/test_provider_handoff.py`: drop now-redundant per-line `# type: ignore[method-assign]` comments. The module-level mypy disable header added in 2.1.1 covers `method-assign` too, so the per-line ignores were flagged as `unused-ignore` by upstream's mypy.
+- `tests/test_config_entries.py`: restore the `# type: ignore[arg-type]` removed in 2.1.1. Upstream's mypy genuinely needs it — the `dict[str, object]` literal doesn't satisfy the strict `dict[str, bool | float | int | str | list[...] | None]` parameter type.
+
 ## [2.1.1] - 2026-05-08
 
 ### Fixed — upstream sync lint compliance
