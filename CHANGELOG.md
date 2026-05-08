@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [1.9.0] - 2026-05-08
 
 ### Added
 - **Adaptive PCM format hint**: `_update_normalized_format()` now accepts an optional `hint: AudioFormat`, and a new `_prefetch_format_for_track()` runs inline in `_activate_playback` *before* `select_source()` so `PluginSource.audio_format` matches the actual incoming track. Hi-Res (96 kHz / 24-bit) lossless propagates through `auto` mode without resampling. Bounded by `_PREFETCH_FORMAT_TIMEOUT = 2.5s` so a transient API issue cannot stall activation for the full retry budget.
