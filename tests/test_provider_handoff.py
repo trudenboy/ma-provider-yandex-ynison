@@ -275,6 +275,93 @@ class TestHandoffPause:
         # Must not raise
         await provider._handoff_pause("player-A")
 
+    async def test_paused_state_skips_pause_when_no_active_player(self) -> None:
+        """Without _active_player_id set, paused-state path must NOT pause anyone.
+
+        Copilot review N1: the previous code fell back to
+        _get_target_player_id(), which auto-selects an unrelated playing
+        player after startup/cleanup — that would silently pause the wrong
+        MA queue.
+        """
+        provider = _make_handoff_provider()
+        provider._active_player_id = None  # not yet activated
+
+        # Build a state that says "our device, paused".
+        state = MagicMock(spec=YnisonState)
+        state.current_track_id = "track-1"
+        state.active_device_id = "test-device-uuid"
+        state.is_paused = True
+        state.progress_ms = 0
+        state.last_update_is_echo = False
+        state.duration_ms = 0
+        state.player_state = {
+            "player_queue": {
+                "current_playable_index": 0,
+                "playable_list": [{"playable_id": "track-1"}],
+                "entity_type": "",
+                "entity_id": "",
+            },
+            "status": {},
+        }
+
+        await provider._handle_ynison_state(state)
+
+        provider.mass.player_queues.pause.assert_not_awaited()
+
+    async def test_paused_state_uses_active_player_id(self) -> None:
+        """When _active_player_id is set, pause is routed to that player."""
+        provider = _make_handoff_provider()
+        provider._active_player_id = "player-A"
+
+        state = MagicMock(spec=YnisonState)
+        state.current_track_id = "track-1"
+        state.active_device_id = "test-device-uuid"
+        state.is_paused = True
+        state.progress_ms = 0
+        state.last_update_is_echo = False
+        state.duration_ms = 0
+        state.player_state = {
+            "player_queue": {
+                "current_playable_index": 0,
+                "playable_list": [{"playable_id": "track-1"}],
+                "entity_type": "",
+                "entity_id": "",
+            },
+            "status": {},
+        }
+
+        await provider._handle_ynison_state(state)
+
+        provider.mass.player_queues.pause.assert_awaited_once_with("player-A")
+
+
+@pytest.mark.asyncio
+class TestClearActivePlayerHandoffBookkeeping:
+    """`_clear_active_player()` must reset every handoff watermark.
+
+    Copilot review N2: a stale `_handoff_last_progress_sync_mono` would
+    suppress the first progress / heartbeat update of the next session.
+    """
+
+    async def test_clear_resets_handoff_watermarks(self) -> None:
+        """All handoff state — including the throttle watermark — is cleared."""
+        provider = _make_handoff_provider()
+        provider._active_player_id = "player-A"
+        provider._handoff_current_track_id = "track-1"
+        provider._handoff_completion_signaled_for = "track-1"
+        provider._handoff_grace_until = 9999.0
+        provider._handoff_last_seen_state = PlaybackState.PLAYING
+        provider._handoff_last_progress_sync_mono = 9999.0
+
+        provider._clear_active_player()
+
+        assert provider._active_player_id is None
+        assert provider._handoff_current_track_id is None
+        assert provider._handoff_completion_signaled_for is None
+        assert provider._handoff_grace_until == 0.0
+        assert provider._handoff_last_seen_state is None
+        assert provider._handoff_last_progress_sync_mono == 0.0
+
 
 # ------------------------------------------------------------------
 # _on_ma_player_event
@@ -403,6 +490,44 @@ class TestHandoffActivateExtended:
         # Grace was NOT opened — we don't want to suppress drift seeks for a
         # play_media that never actually started.
         assert provider._handoff_grace_until == 0.0
+
+    async def test_play_media_failure_does_not_start_heartbeat(self) -> None:
+        """Heartbeat must not run after a failed play_media (Copilot review N3).
+
+        Otherwise it would keep streaming the previous/idle queue's progress
+        to Ynison and prevent rebalancing away from a non-working device.
+        """
+        provider = _make_handoff_provider()
+        provider._yandex_provider = None
+        provider.mass.player_queues.play_media = AsyncMock(side_effect=Exception("boom"))
+        ensure_calls: list[None] = []
+        provider._ensure_handoff_heartbeat = (  # type: ignore[method-assign]
+            lambda: ensure_calls.append(None)
+        )
+
+        await provider._handoff_activate(_make_state("new-track"), "player-A")
+
+        assert ensure_calls == []  # heartbeat never started
+
+    async def test_dedup_skip_starts_heartbeat(self) -> None:
+        """Dedup branch (queue already plays the URI) must still arm heartbeat.
+
+        The activation succeeded — Ynison expects regular progress reports.
+        """
+        provider = _make_handoff_provider()
+        provider._yandex_provider = None
+        queue = provider.mass.player_queues.get.return_value
+        queue.state = PlaybackState.PLAYING
+        queue.current_item = MagicMock()
+        queue.current_item.uri = "yandex_music://track/track-Z"
+        ensure_calls: list[None] = []
+        provider._ensure_handoff_heartbeat = (  # type: ignore[method-assign]
+            lambda: ensure_calls.append(None)
+        )
+
+        await provider._handoff_activate(_make_state("track-Z"), "player-A")
+
+        assert ensure_calls == [None]
 
 
 @pytest.mark.asyncio

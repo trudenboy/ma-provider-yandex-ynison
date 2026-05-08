@@ -22,6 +22,9 @@ All notable changes to this project will be documented in this file.
 - **Pre-fetch fires on resume-reselect onto a *different* track**, not only when `target_player_id` itself changes (Copilot review C1). A `needs_reselect=True` driven by `_stream_stop_event` for a new track id now correctly primes `PluginSource.audio_format`.
 - **`_handoff_activate` only commits `_handoff_current_track_id` after a successful `play_media`**: a failed REPLACE no longer leaves the state machine stuck in the same-track branch on the next Ynison update (Copilot review C3). Grace window also opens only on success.
 - **`_handoff_activate` "track changed X to Y" log uses the captured previous id**, not the freshly-mutated attribute (Copilot review C4).
+- **Handoff pause uses `_active_player_id` only**, never `_get_target_player_id()` (Copilot review N1). Falling back to auto-select after startup/cleanup could pause an unrelated MA queue.
+- **`_clear_active_player()` resets `_handoff_last_progress_sync_mono`** along with the rest of the handoff bookkeeping (Copilot review N2). Previously a stale watermark could throttle the first progress/heartbeat update of a fresh activation.
+- **`_handoff_activate` only starts the heartbeat after a successful dedup/resume/play_media commit** (Copilot review N3). Previously the heartbeat was scheduled even when `play_media` raised, causing it to push stale MA queue progress to Ynison and delay rebalancing away from a non-working device.
 
 ### Documentation
 - `CLAUDE.md`: new "Playback modes" subsection with `stream` vs `handoff` comparison and "Handoff invariants and safety nets" listing each defensive mechanism (heartbeat, grace, dedup, replay reset, state-change force-update). Config table now includes `playback_mode` and `handoff_heartbeat_interval`. Dedup wording aligned with the actual implementation — `PlaybackState` enum has only `IDLE` / `PAUSED` / `PLAYING` / `UNKNOWN`, no separate `BUFFERING` (Copilot review C6).
@@ -261,5 +264,3 @@ All notable changes to this project will be documented in this file.
 - Reconnection with exponential backoff
 - Cover art display from Ynison state
 - Docker Compose dev environment for local testing
-
-## [Unreleased]
