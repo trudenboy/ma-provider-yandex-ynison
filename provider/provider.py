@@ -1744,7 +1744,15 @@ class YandexYnisonProvider(PluginProvider):
         # this drift block only.
         if not state.last_update_is_echo:
             drift_ms = abs(state.progress_ms - our_pos_ms)
-            if drift_ms > 3000:
+            # Suppress "seek to 0" when MA already has meaningful progress
+            # (>5s) — RADIO queue rebalances often emit a fresh state with
+            # progress=0 for the same track, and obeying that as a real seek
+            # yanks the player back to the start mid-track. A genuine user
+            # seek to the very beginning is rare and would resolve on the
+            # next state update; the cost of ignoring it is far smaller
+            # than the cost of restart-from-zero on every queue rebalance.
+            looks_like_queue_rebuild = state.progress_ms < 1000 and our_pos_ms > 5000
+            if drift_ms > 3000 and not looks_like_queue_rebuild:
                 self.logger.info(
                     "Handoff: seek detected on %s (Ynison=%dms, MA=%dms)",
                     new_track,
@@ -1755,6 +1763,14 @@ class YandexYnisonProvider(PluginProvider):
                     await self.mass.player_queues.seek(target_player_id, state.progress_ms // 1000)
                 except Exception:
                     self.logger.exception("Handoff seek failed on %s", target_player_id)
+            elif drift_ms > 3000:
+                self.logger.debug(
+                    "Handoff: drift to 0 ignored on %s (Ynison=%dms, MA=%dms) "
+                    "— treated as queue-rebuild echo, not a user seek",
+                    new_track,
+                    state.progress_ms,
+                    our_pos_ms,
+                )
 
         # If MA's queue paused while Ynison says playing — resume directly
         # via cmd_play (no queue.play_media REPLACE) to keep playback fast
