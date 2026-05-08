@@ -1532,15 +1532,21 @@ class YandexYnisonProvider(PluginProvider):
 
         queue = self.mass.player_queues.get(target_player_id)
 
-        # IDLE-resume on same URI: a single-track REPLACE queue lands in
-        # IDLE on pause (no upcoming items). When Ynison says "playing
-        # this track" again, neither drift-seek nor PAUSED-resume revives
-        # the queue. Re-issue play_media to spin the stream back up.
+        # Resume-via-REPLACE: a single-track REPLACE queue lands in IDLE
+        # *or* PAUSED on pause depending on the underlying player.
+        # cmd_play on PAUSED works when the HTTP stream is still live
+        # (local FIFO/Snapcast etc.), but local web/Chromecast players
+        # close the connection after a few seconds of pause and cmd_play
+        # then has nothing to resume from — audio stays silent. Always
+        # re-issue play_media on same-URI resume to spin the stream
+        # back up reliably. The cmd_pause/seek/cmd_play dance inside
+        # `_apply_idle_resume` avoids the audible 0-then-jump glitch.
         if (
             queue is not None
-            and queue.state == PlaybackState.IDLE
+            and queue.state in (PlaybackState.IDLE, PlaybackState.PAUSED)
             and queue.current_item is not None
             and getattr(queue.current_item, "uri", None) == expected_uri
+            and not state.is_paused
         ):
             await self._apply_idle_resume(state, target_player_id, expected_uri)
             return
