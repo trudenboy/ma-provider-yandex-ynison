@@ -19,6 +19,7 @@ from .constants import (
     CONF_MASS_PLAYER_ID,
     CONF_OUTPUT_BIT_DEPTH,
     CONF_OUTPUT_SAMPLE_RATE,
+    CONF_PLAYBACK_MODE,
     CONF_PUBLISH_NAME,
     CONF_REMEMBER_SESSION,
     CONF_TOKEN,
@@ -26,6 +27,8 @@ from .constants import (
     CONF_YM_INSTANCE,
     DEFAULT_DISPLAY_NAME,
     OUTPUT_AUTO,
+    PLAYBACK_MODE_HANDOFF,
+    PLAYBACK_MODE_STREAM,
     PLAYER_ID_AUTO,
     YM_INSTANCE_OWN,
 )
@@ -41,11 +44,26 @@ if TYPE_CHECKING:
 SUPPORTED_FEATURES = {ProviderFeature.AUDIO_SOURCE}
 
 
+def _features_for_mode(mode: str) -> set[ProviderFeature]:
+    """Return the supported features set for the given playback mode.
+
+    Stream mode (default) advertises AUDIO_SOURCE so the plugin appears as a
+    selectable audio source on players. Handoff mode hands playback off to
+    MA's player_queue + yandex_music MusicProvider, so the plugin must NOT
+    own the audio source — features set is empty.
+    """
+    if mode == PLAYBACK_MODE_HANDOFF:
+        return set()
+    return {ProviderFeature.AUDIO_SOURCE}
+
+
 async def setup(
     mass: MusicAssistant, manifest: ProviderManifest, config: ProviderConfig
 ) -> ProviderInstanceType:
     """Initialize provider(instance) with given configuration."""
-    return YandexYnisonProvider(mass, manifest, config, SUPPORTED_FEATURES)
+    mode = cast("str | None", config.get_value(CONF_PLAYBACK_MODE)) or PLAYBACK_MODE_STREAM
+    features = _features_for_mode(mode)
+    return YandexYnisonProvider(mass, manifest, config, features)
 
 
 async def get_config_entries(  # noqa: PLR0915 — flow naturally returns ~12 ConfigEntry objects
@@ -299,6 +317,31 @@ async def get_config_entries(  # noqa: PLR0915 — flow naturally returns ~12 Co
             label="Device name in Yandex Music",
             description="How this device appears in the Yandex Music app.",
             default_value=DEFAULT_DISPLAY_NAME,
+            advanced=True,
+        ),
+        ConfigEntry(
+            key=CONF_PLAYBACK_MODE,
+            type=ConfigEntryType.STRING,
+            label="Playback mode (experimental)",
+            description=(
+                "How audio reaches the player when a track is selected from the "
+                "Yandex Music app.\n\n"
+                "Stream (default): the plugin acts as an audio source — it streams "
+                "PCM into Music Assistant, which then forwards to the player. "
+                "Stable, but adds an extra ffmpeg in the pipeline.\n\n"
+                "Handoff (experimental): the plugin pushes the chosen track into "
+                "Music Assistant's player queue and lets MA stream it natively "
+                "through the linked Yandex Music provider — no extra ffmpeg, no "
+                "PCM resampling. The trade-off is looser sync between the Yandex "
+                "Music app and MA: progress, queue order and pause/resume may "
+                "feel slightly out of step. Spotify Connect intentionally avoids "
+                "this mode for the same reason."
+            ),
+            default_value=PLAYBACK_MODE_STREAM,
+            options=[
+                ConfigValueOption("Stream (recommended)", PLAYBACK_MODE_STREAM),
+                ConfigValueOption("Handoff (experimental)", PLAYBACK_MODE_HANDOFF),
+            ],
             advanced=True,
         ),
         ConfigEntry(

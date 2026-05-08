@@ -25,6 +25,14 @@ CONF_ALLOW_PLAYER_SWITCH: Final[str] = "allow_player_switch"
 CONF_DEVICE_ID: Final[str] = "device_id"
 CONF_OUTPUT_SAMPLE_RATE: Final[str] = "output_sample_rate"
 CONF_OUTPUT_BIT_DEPTH: Final[str] = "output_bit_depth"
+CONF_PLAYBACK_MODE: Final[str] = "playback_mode"
+
+# Playback mode values
+# - stream: default — plugin owns the audio source and streams PCM via PluginSource
+# - handoff: experimental — plugin pushes tracks into MA's player_queue,
+#   MA streams natively through yandex_music without our inner ffmpeg
+PLAYBACK_MODE_STREAM: Final[str] = "stream"
+PLAYBACK_MODE_HANDOFF: Final[str] = "handoff"
 
 # Action keys (own-mode QR auth flow)
 CONF_ACTION_AUTH_QR: Final[str] = "auth_qr"

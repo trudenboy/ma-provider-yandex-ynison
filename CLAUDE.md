@@ -76,8 +76,9 @@ PluginSource → MA Player (Chromecast / DLNA / AirPlay / etc.)
 | `remember_session` | Boolean | `true` | Own mode: store `x_token` after QR for auto-refresh |
 | `mass_player_id` | String | `__auto__` | Target MA player ID or auto-select |
 | `allow_player_switch` | Boolean | `true` | Allow selecting plugin source on any player |
-| `output_sample_rate` | String | `auto` | PCM sample rate: `auto` / `44100` / `48000` / `96000` |
-| `output_bit_depth` | String | `auto` | PCM bit depth: `auto` / `16` / `24` |
+| `output_sample_rate` | String | `auto` | PCM sample rate: `auto` / `44100` / `48000` / `96000`. Auto adapts to first track via `_prefetch_format_for_track` (lossless 44.1 / 96 kHz preserved). |
+| `output_bit_depth` | String | `auto` | PCM bit depth: `auto` / `16` / `24`. Auto adapts to first track. |
+| `playback_mode` | String | `stream` | `stream` (default, plugin owns audio source) or `handoff` (experimental, MA player_queue plays via yandex_music). Affects `SUPPORTED_FEATURES` at setup. |
 | `publish_name` | String | `Music Assistant` | Device name in Yandex Music app |
 | `device_id` | String | auto-generated | 16-char hex, persisted per instance (hidden) |
 
@@ -86,7 +87,12 @@ Three reachable auth states:
 - **Own + x_token** — `ym_instance == __own__`, `x_token` set; reactive 401 refresh works.
 - **Own + token only** — `ym_instance == __own__`, `x_token` empty (manual paste, or QR with Remember session off); expiry needs re-paste/re-QR.
 
-Auto-detection: `superb`/`lossless` → 24-bit/48kHz, else → 16-bit/44.1kHz.
+Auto-detection (no hint): `superb`/`lossless` → 24-bit/44.1kHz, else → 16-bit/44.1kHz. With hint from real `stream_details.audio_format` (pre-fetched on `_activate_playback` before `select_source`), auto mode lifts to actual rate (e.g. 96 kHz for Hi-Res). Explicit `output_sample_rate` / `output_bit_depth` always win over the hint.
+
+### Playback modes
+
+- **stream** (default): plugin advertises `AUDIO_SOURCE`, owns a `PluginSource` and emits PCM via `get_audio_stream()` → MA's outer ffmpeg → player. Two ffmpeg passes (inner per-track + outer per-session).
+- **handoff** (experimental): plugin does NOT advertise `AUDIO_SOURCE`. On Ynison track change it calls `mass.player_queues.play_media(player_id, "yandex_music://track/<id>", REPLACE)`. MA streams natively through the linked `yandex_music` MusicProvider → no inner ffmpeg, no PCM resampling. Pause/seek/track-end mirror back to Ynison via subscription on `EventType.QUEUE_TIME_UPDATED` / `PLAYER_UPDATED`. Trade-off: looser sync between the Yandex Music app and MA — Spotify Connect avoids this for the same reason (see commented `CONF_HANDOFF_MODE` in `spotify_connect/__init__.py`).
 
 ## Track processing flow
 
