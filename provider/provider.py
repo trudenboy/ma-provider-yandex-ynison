@@ -1451,7 +1451,7 @@ class YandexYnisonProvider(PluginProvider):
 
         Suppresses duplicate command invocations during rapid Ynison echoes —
         e.g. two identical pause notifications inside 1s should issue
-        `mass.player_queues.pause` only once. The cache is keyed by the
+        `mass.players.cmd_pause` only once. The cache is keyed by the
         `(action, key)` tuple and entries older than `_COMMAND_IDEMPOTENCY_TTL`
         are evicted lazily.
         """
@@ -1765,6 +1765,13 @@ class YandexYnisonProvider(PluginProvider):
         # Open windows BEFORE the await — see `_apply_track_change` for
         # the rationale. MA's PLAYER_UPDATED events during play_media
         # must see them set so heartbeat doesn't leak paused=True.
+        # Saved for rollback on exception so a failed resume doesn't
+        # leave the provider stuck in an ACTIVATING/"not paused" reporting
+        # window and silently suppress the next attempt for the duration
+        # of `_REISSUE_DEBOUNCE_PERIOD`.
+        prev_drift = self._drift_suppress_until
+        prev_debounce = self._re_issue_debounce_until
+        prev_phase = self._expected_phase
         now = time.monotonic()
         self._drift_suppress_until = now + _DRIFT_SUPPRESS_PERIOD
         self._re_issue_debounce_until = now + _REISSUE_DEBOUNCE_PERIOD
@@ -1785,6 +1792,11 @@ class YandexYnisonProvider(PluginProvider):
                 with suppress(Exception):
                     await self.mass.players.cmd_play(target_player_id)
         except Exception:
+            # Roll back the optimistic window/phase state so subsequent
+            # calls don't mistakenly think we're mid-activation.
+            self._drift_suppress_until = prev_drift
+            self._re_issue_debounce_until = prev_debounce
+            self._expected_phase = prev_phase
             self.logger.exception("Handoff IDLE-resume play_media failed on %s", target_player_id)
 
     async def _apply_same_track_sync(
@@ -2051,12 +2063,15 @@ class YandexYnisonProvider(PluginProvider):
             if self._expected_phase in (HandoffPhase.ACTIVATING, HandoffPhase.PAUSED):
                 self._expected_phase = HandoffPhase.PLAYING
 
-        # See heartbeat: resolve paused via activation window > expected_phase > queue.state.
-        in_activation_window = time.monotonic() < self._drift_suppress_until
-        if in_activation_window:
-            is_paused = False
-        elif self._expected_phase == HandoffPhase.PAUSED:
+        # Resolve paused: same priority order as heartbeat —
+        # expected_phase=PAUSED > activation_window > queue.state.
+        # PAUSED takes precedence so a user pause inside the activation
+        # window is reported correctly to Ynison instead of leaking the
+        # transient is_paused=False from the activation grace.
+        if self._expected_phase == HandoffPhase.PAUSED:
             is_paused = True
+        elif time.monotonic() < self._drift_suppress_until:
+            is_paused = False
         else:
             is_paused = queue.state != PlaybackState.PLAYING
         self.mass.create_task(

@@ -184,15 +184,6 @@ class YnisonClient:
         # Latest state from server
         self.state = YnisonState()
 
-        # Lamport-style version watermarks for echo detection (v2.0).
-        # Each outbound message stamps `time.time_ns()` into queue.version
-        # and/or status.version; we cache that value here so we can recognise
-        # the same value (or older) coming back as our own echo. Compared
-        # alongside `version.device_id` — both ours AND not newer than our
-        # last send → echo. AND-logic prevents a peer queue change combined
-        # with our own status echo from being silently swallowed.
-        self._pending_outbound_queue_version: int = 0
-        self._pending_outbound_status_version: int = 0
         # Reconnect settle window — first inbound state after reconnect can
         # be our own stale broadcast (server retains state across reconnects
         # and re-sends it). Provider-level handlers consult this watermark
@@ -308,16 +299,6 @@ class YnisonClient:
             duration_ms,
             paused,
         )
-        # Stamp our outbound version watermark *before* the network call.
-        # `update_playing_status` doesn't carry a version-block on the wire —
-        # the Ynison server stamps `status.version` with our device_id and a
-        # server-side timestamp. Use `time.time_ns()` as a lower bound: any
-        # echo back will carry version >= our snapshot. Combined with
-        # `version.device_id == own_id` this gives us robust echo detection
-        # without false positives from temporal heuristics.
-        self._pending_outbound_status_version = max(
-            self._pending_outbound_status_version, time.time_ns()
-        )
         msg = {
             "update_playing_status": {
                 "playing_status": {
@@ -389,12 +370,6 @@ class YnisonClient:
             len(queue.get("playable_list", [])),
             queue.get("entity_type", ""),
         )
-        # Stamp pending outbound queue/status version watermarks so that
-        # subsequent inbound echoes can be recognised by counter, not by
-        # temporal window. Caller (`provider.py`) authored fresh
-        # `version` blocks via `make_version_block` already; we just
-        # hoist the values here for echo detection.
-        self._capture_outbound_versions(player_state)
         msg = {
             "update_player_state": {
                 "player_state": player_state,
@@ -410,9 +385,6 @@ class YnisonClient:
     ) -> None:
         """Send full state update (cold start, reconnect after offline)."""
         state = player_state or self._build_initial_state()
-        # Capture the version watermarks that the freshly built (or supplied)
-        # player_state carries — same rationale as `update_player_state`.
-        self._capture_outbound_versions(state)
         msg = {
             "update_full_state": {
                 "player_state": state,
@@ -423,12 +395,6 @@ class YnisonClient:
         }
         self._logger.debug("Sending full state: %s", json.dumps(msg)[:500])
         await self._send(msg)
-
-    # Width of the "very far in the past" guard band for inbound versions.
-    # NTP can step the wall clock backwards on the order of seconds; in
-    # that window any author-ours inbound is still our echo even if its
-    # version is below the watermark by more than the band.
-    _CLOCK_SKEW_BAND_NS: int = 5_000_000_000  # 5 seconds
 
     def _classify_state_as_echo(self, incoming_ps: dict[str, Any]) -> bool:
         """Return True iff `incoming_ps` is our own broadcast round-tripping.
@@ -453,20 +419,6 @@ class YnisonClient:
         queue_is_ours = queue_block.get("device_id") == own_id
         status_is_ours = status_block.get("device_id") == own_id
         return queue_is_ours and status_is_ours
-
-    def _capture_outbound_versions(self, player_state: dict[str, Any]) -> None:
-        """No-op kept for backwards compatibility with existing call sites.
-
-        Earlier v2.0 code stamped Lamport-style watermarks here; the
-        underlying comparisons never actually filtered anything (the
-        echo check fell through to author=ours regardless of version),
-        and Ynison's `version.version` is documented as `random(int64)`
-        re-stamped by the server. Author check is sufficient — see
-        `_classify_state_as_echo`. Method retained as a hook in case we
-        later add ring-buffer based equality checks.
-        """
-        # Intentionally empty; see docstring.
-        return
 
     # ------------------------------------------------------------------
     # Connection internals
@@ -729,23 +681,11 @@ class YnisonClient:
             existing_ps = self.state.player_state
             for key, value in incoming_ps.items():
                 existing_ps[key] = value
-            # Echo detection via Lamport-style version watermark + author
-            # check (v2.0). For each version-block we mark it as ours iff:
-            #   1. version.device_id matches our device_id, AND
-            #   2. version.version <= our pending outbound watermark (i.e.
-            #      it's at or below the latest value we've stamped on a
-            #      message we sent — server can only echo back what we put
-            #      in, plus its own monotonic stamp; older inbound versions
-            #      from us are by definition our own broadcasts).
-            #
-            # The full state is treated as echo only when BOTH blocks pass
-            # the test (AND-logic). A peer queue change paired with our own
-            # status echo therefore reaches handlers — that's the v1.9.1 fix.
-            #
-            # Clock-skew protection: an inbound version dramatically older
-            # than our watermark (e.g. NTP step backwards >5 s) is still
-            # treated as echo when author=ours; this avoids classifying a
-            # negative time-step as a peer event.
+            # Echo detection: a state is our echo iff BOTH the queue and
+            # status version-blocks are authored by our `device_id`. See
+            # `_classify_state_as_echo` for why version values are not
+            # part of the check (Ynison documents `version.version` as
+            # `random(int64)` and the server re-stamps it).
             self.state.last_update_is_echo = self._classify_state_as_echo(incoming_ps)
         else:
             self.state.last_update_is_echo = False
