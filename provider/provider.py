@@ -915,6 +915,12 @@ class YandexYnisonProvider(PluginProvider):
             self.mass.create_task(
                 self.mass.players.select_source(target_player_id, self.instance_id)
             )
+            # Stream-mode UI integration: stamp output_format on the player
+            # for the signal-chain panel, and publish a frontend-only
+            # queue under our instance_id so the seek-bar / quality
+            # indicator render. See `_register_plugin_queue` docstring.
+            self._set_player_output_format(target_player_id)
+            self._register_plugin_queue(target_player_id)
 
         # Signal track change if track_id changed
         significant_change = False
@@ -963,6 +969,12 @@ class YandexYnisonProvider(PluginProvider):
                             self._track_changed_event.set()
                             self._seek_grace_until = now + _ECHO_GRACE_PERIOD
                             significant_change = True
+                            # Snap the frontend seek-bar to the user-seeked
+                            # position immediately. Without `force_update`
+                            # MA filters elapsed-time-only updates and the
+                            # bar would only catch up on the next regular
+                            # tick (~1-2s after the seek lands).
+                            self._signal_seek_to_frontend(state.progress_ms, target_player_id)
                         elif verdict == "queue_rebuild":
                             self.logger.debug(
                                 "Stream: drift to 0 ignored on %s (Ynison=%dms, "
@@ -975,6 +987,13 @@ class YandexYnisonProvider(PluginProvider):
         # Update metadata from state
         self._update_metadata(state)
 
+        # Refresh the frontend fake queue when the track changes — Vue
+        # picks up the new `current_item.streamdetails` only on a fresh
+        # QUEUE_UPDATED. Throttled to track-change events (`significant_change`)
+        # so we don't spam the WS on every progress tick.
+        if significant_change and self._active_player_id and not self._is_handoff:
+            self._register_plugin_queue(self._active_player_id)
+
         # Always trigger player update on significant changes;
         # throttle regular updates to avoid UI churn (every 2 seconds).
         # Use force_update on seek/track change so the server broadcasts a full
@@ -986,6 +1005,154 @@ class YandexYnisonProvider(PluginProvider):
                 target_player_id, force_update=significant_change
             )
             self._last_player_update_time = now_mono
+
+    def _register_plugin_queue(self, player_id: str) -> None:
+        """Publish a frontend-only queue under our `instance_id`.
+
+        MA's frontend resolves the active player's seek bar / signal-chain /
+        quality-indicator via a `PlayerQueue` looked up by
+        `player.active_source` (which equals our `instance_id` while we
+        own the player). If no queue exists with that id, the frontend
+        renders nothing — the player card looks "empty" even while we're
+        streaming. Registering a real queue in `player_queues._queues`
+        is wrong because the backend would then route every play / pause /
+        play_media to a queue that has no items and no stream.
+
+        Trick (borrowed from `spotify_connect` PR #3857): fire
+        `QUEUE_ADDED` with `queue_id == instance_id` and a fake queue
+        dict, but do NOT touch `player_queues._queues`. The frontend
+        stores the dict in its in-memory queue map (enough to render),
+        and the backend remains unaware so command routing keeps going
+        through `PluginSource` callbacks (`_on_play`, `_on_pause`, etc.).
+
+        Stream-mode only — handoff has a real `play_media` queue and
+        doesn't need the impostor.
+        """
+        if self._is_handoff:
+            return
+        player = self.mass.players.get_player(player_id)
+        metadata = self._source_details.metadata
+        # Build DSP details for downstream signal-chain display.
+        dsp = None
+        with suppress(Exception):
+            dsp = self.mass.streams.audio.get_stream_dsp_details(player_id)
+        # Use our actual normalized output format — same one PluginSource
+        # advertises and ffmpeg pipes — so the quality indicator matches
+        # what the player is really playing (Hi-Res 96/24 etc.).
+        fmt = self._normalized_format
+        audio_format_dict = {
+            "content_type": fmt.content_type.value,
+            "sample_rate": fmt.sample_rate,
+            "bit_depth": fmt.bit_depth,
+            "channels": fmt.channels,
+        }
+        current_item = None
+        if metadata:
+            duration = int(metadata.duration) if metadata.duration else 0
+            current_item = {
+                "queue_id": self.instance_id,
+                "queue_item_id": "yandex_ynison_current",
+                "duration": duration,
+                "name": metadata.title or "",
+                "streamdetails": {
+                    "audio_format": audio_format_dict,
+                    "dsp": dsp,
+                },
+            }
+        fake_queue = {
+            "queue_id": self.instance_id,
+            "active": True,
+            "display_name": player.display_name if player else player_id,
+            "available": True,
+            "items": 1 if current_item else 0,
+            "shuffle_enabled": False,
+            "repeat_mode": "off",
+            "dont_stop_the_music_enabled": False,
+            "current_index": 0,
+            "index_in_buffer": None,
+            "elapsed_time": metadata.elapsed_time if metadata else 0,
+            "elapsed_time_last_updated": time.time(),
+            "state": "playing",
+            "current_item": current_item,
+            "next_item": None,
+            "radio_source": [],
+            "flow_mode": False,
+            "resume_pos": 0,
+            "extra_attributes": {},
+        }
+        self.mass.signal_event(
+            EventType.QUEUE_ADDED,
+            object_id=self.instance_id,
+            data=fake_queue,
+        )
+        if current_item:
+            # Re-emit as QUEUE_UPDATED so Vue's reactivity refreshes the
+            # `current_item.streamdetails` block on subsequent calls
+            # (track-change). QUEUE_ADDED only triggers on first sight.
+            self.mass.signal_event(
+                EventType.QUEUE_UPDATED,
+                object_id=self.instance_id,
+                data=fake_queue,
+            )
+
+    def _set_player_output_format(self, player_id: str) -> None:
+        """Stamp our PCM output on `player.extra_data["output_format"]`.
+
+        The frontend's signal-chain panel reads this key, normally set by
+        the streams controller during regular MA queue playback. We
+        bypass that controller (audio comes from `PluginSource.get_audio_stream`),
+        so MA never gets a chance to fill it in. Without this, the panel
+        either shows nothing useful or stale info from a previous source.
+        """
+        if self._is_handoff:
+            return
+        player = self.mass.players.get_player(player_id)
+        if player is None:
+            return
+        # Use a fresh AudioFormat copy — `extra_data` may end up shared
+        # with downstream code that mutates `codec_type`, just like
+        # `PluginSource.audio_format` itself.
+        fmt = self._normalized_format
+        player.extra_data["output_format"] = {
+            "content_type": fmt.content_type.value,
+            "codec_type": fmt.content_type.value,
+            "sample_rate": fmt.sample_rate,
+            "bit_depth": fmt.bit_depth,
+            "channels": fmt.channels,
+        }
+        self.mass.players.trigger_player_update(player_id)
+
+    def _clear_player_output_format(self, player_id: str | None) -> None:
+        """Remove our `output_format` stamp on deselect — frontend reverts to MA queue format."""
+        if not player_id or self._is_handoff:
+            return
+        player = self.mass.players.get_player(player_id)
+        if player is None:
+            return
+        player.extra_data.pop("output_format", None)
+        self.mass.players.trigger_player_update(player_id)
+
+    def _signal_seek_to_frontend(self, elapsed_ms: int, player_id: str | None) -> None:
+        """Force the frontend seek-bar to jump to a new position.
+
+        MA filters elapsed-time-only `QUEUE_TIME_UPDATED` events by default
+        (treats them as routine ticks). On a real Ynison-driven seek we
+        want the bar to snap immediately — `force_update=True` on the
+        player update plus an explicit `QUEUE_TIME_UPDATED` event with
+        our fake-queue id does the job.
+        """
+        if self._is_handoff or not player_id:
+            return
+        player = self.mass.players.get_player(player_id)
+        if player is not None:
+            with suppress(Exception):
+                player._attr_elapsed_time = elapsed_ms / 1000
+                player.update_state(force_update=True)
+        self.mass.signal_event(
+            EventType.QUEUE_TIME_UPDATED,
+            object_id=self.instance_id,
+            data=elapsed_ms // 1000,
+        )
 
     def _update_metadata(self, state: YnisonState) -> None:
         """Update PluginSource metadata from Ynison state."""
@@ -1209,6 +1376,9 @@ class YandexYnisonProvider(PluginProvider):
         """Clear the active player and reset plugin state."""
         prev_player_id = self._active_player_id
         was_in_use = self._source_details.in_use_by == prev_player_id
+        # Strip our `output_format` stamp before nulling the player ref —
+        # frontend reverts to MA queue's format / no signal-chain.
+        self._clear_player_output_format(prev_player_id)
         self._active_player_id = None
         self._source_details.in_use_by = None
         self._stream_stop_event.set()
