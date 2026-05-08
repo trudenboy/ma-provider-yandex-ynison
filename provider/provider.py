@@ -2058,7 +2058,8 @@ class YandexYnisonProvider(PluginProvider):
         # immediately, bypassing the throttle. State changes are rare events
         # (play/pause/idle), so this never floods the WS.
         current_state = queue.state
-        state_changed = current_state != self._handoff_last_seen_state
+        prev_state = self._handoff_last_seen_state
+        state_changed = current_state != prev_state
         self._handoff_last_seen_state = current_state
 
         # Throttle progress-only updates — at most one every _PROGRESS_SYNC_INTERVAL.
@@ -2103,59 +2104,37 @@ class YandexYnisonProvider(PluginProvider):
             )
         )
 
-        # Detect end-of-track: queue went IDLE while we still expected a track
-        # to be playing. Tell Ynison so it can advance current_playable_index
-        # via _signal_track_completion (which already handles RADIO refill).
+        # Detect end-of-track. Single-track REPLACE queues only transition
+        # PLAYING → IDLE for two reasons:
+        # 1. The track played out naturally (stream end → queue runner has
+        #    nothing else, drops to IDLE, clears current_item).
+        # 2. The user paused — but we route pauses through _handoff_pause /
+        #    cmd_pause which moves queue to PAUSED first; PAUSED → IDLE
+        #    after that is the watchdog stop, NOT a natural end. We
+        #    detect this by checking `_expected_phase`: a user pause
+        #    sets it to PAUSED, while a natural end leaves it at PLAYING.
         #
-        # Important: a single-track queue (which our REPLACE always creates)
-        # can transition to IDLE for reasons OTHER than natural end-of-track —
-        # most notably when MA pauses the track. Because the queue has no
-        # upcoming items, the queue runner reports IDLE shortly after pause.
-        # Without an end-of-track guard, we'd misread that as completion and
-        # trigger Ynison to advance, which then cascades through the RADIO
-        # tail.
-        #
-        # Two acceptable signals:
-        # 1. queue.current_item still set + corrected_elapsed_time near
-        #    duration — the canonical natural-end check.
-        # 2. queue.current_item gone (MA's "End of queue reached" cleared
-        #    items) AND we observed real playback (`_handoff_last_playing
-        #    _elapsed_ms` past `duration - 5s`). Catches the case where MA
-        #    clears the single-track queue right after the stream ends and
-        #    `_is_at_natural_end_of_track` falls back to False because
-        #    current_item is gone — without this, plugin sits silent
-        #    waiting for Ynison to advance, which Ynison won't do because
-        #    we never told it the track ended.
+        # Direct PLAYING → IDLE transition with `_expected_phase == PLAYING`
+        # is therefore an unambiguous natural-end signal — no need to compare
+        # elapsed-vs-duration (which broke when a seek-near-end caused the
+        # stream to finish before our snapshot accumulated past the
+        # threshold). The transition itself is the signal.
         if (
-            queue.state == PlaybackState.IDLE
+            state_changed
+            and prev_state == PlaybackState.PLAYING
+            and current_state == PlaybackState.IDLE
+            and self._expected_phase == HandoffPhase.PLAYING
             and self._expected_track_id
             and self._handoff_completion_signaled_for != self._expected_track_id
         ):
-            should_signal = self._is_at_natural_end_of_track(queue)
-            if not should_signal:
-                # current_item gone — fall back to last-known elapsed snapshot.
-                last_known_elapsed = self._handoff_last_playing_elapsed_ms
-                track_duration = self._best_duration_ms()
-                if (
-                    queue.current_item is None
-                    and track_duration > 0
-                    and last_known_elapsed >= max(0, track_duration - 5000)
-                ):
-                    should_signal = True
-                    self.logger.info(
-                        "Handoff: MA queue empty on %s after %dms played "
-                        "(duration=%dms) — treating as natural end",
-                        self._expected_track_id,
-                        last_known_elapsed,
-                        track_duration,
-                    )
-            if should_signal:
-                self._handoff_completion_signaled_for = self._expected_track_id
-                self.logger.info(
-                    "Handoff: MA queue IDLE on %s — signalling completion to Ynison",
-                    self._expected_track_id,
-                )
-                self.mass.create_task(self._signal_track_completion())
+            self._handoff_completion_signaled_for = self._expected_track_id
+            self._expected_phase = HandoffPhase.ENDING
+            self.logger.info(
+                "Handoff: queue PLAYING -> IDLE on %s — signalling natural-end "
+                "completion to Ynison",
+                self._expected_track_id,
+            )
+            self.mass.create_task(self._signal_track_completion())
 
     @staticmethod
     def _is_at_natural_end_of_track(queue: Any) -> bool:

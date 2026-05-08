@@ -709,22 +709,23 @@ class TestOnMaPlayerEvent:
         assert provider.mass.create_task.call_count == first_call_count
 
     def test_idle_queue_signals_completion_once(self) -> None:
-        """Queue going IDLE near track end signals completion once per track id."""
+        """PLAYING→IDLE transition with expected=PLAYING signals completion once."""
         provider = self._setup()
         provider._expected_track_id = "track-1"
-        # Queue went IDLE near the end of the track (elapsed >= duration - 5s)
+        provider._expected_phase = HandoffPhase.PLAYING
+        provider._handoff_last_seen_state = PlaybackState.PLAYING
+        # Queue just transitioned to IDLE — natural end signal.
         queue = provider.mass.player_queues.get.return_value
         queue.state = PlaybackState.IDLE
-        queue.current_item = MagicMock()
-        queue.current_item.duration = 200  # seconds
-        queue.corrected_elapsed_time = 199.0  # 1s before end
+        queue.current_item = None  # MA cleared queue on end-of-queue
 
         event = MagicMock()
         event.object_id = "player-A"
         provider._on_ma_player_event(event)
         assert provider._handoff_completion_signaled_for == "track-1"
 
-        # Second event with same track and bypassed throttle must NOT re-signal
+        # Second event from the new IDLE-stable state must NOT re-signal —
+        # the transition fired once and `_handoff_last_seen_state` is now IDLE.
         provider._handoff_last_progress_sync_mono = 0.0
         before = provider.mass.create_task.call_count
         provider._on_ma_player_event(event)
@@ -786,21 +787,26 @@ class TestOnMaPlayerEvent:
 
         assert provider._handoff_completion_signaled_for is None
 
-    def test_idle_short_track_is_treated_as_near_end(self) -> None:
-        """Tracks shorter than the 5s margin always treat IDLE as end-of-track."""
+    def test_idle_short_track_signals_via_phase_transition(self) -> None:
+        """Short tracks: PLAYING→IDLE transition still signals completion.
+
+        The post-v2.1 trigger is the state transition (PLAYING → IDLE
+        with expected_phase == PLAYING), not the elapsed/duration ratio,
+        so this case folds into the same path as a full-length track.
+        """
         provider = self._setup()
         provider._expected_track_id = "track-1"
+        provider._expected_phase = HandoffPhase.PLAYING
+        provider._handoff_last_seen_state = PlaybackState.PLAYING
         queue = provider.mass.player_queues.get.return_value
         queue.state = PlaybackState.IDLE
         queue.current_item = MagicMock()
         queue.current_item.duration = 3  # 3-second track
-        queue.corrected_elapsed_time = 0.0  # margin makes threshold 0
 
         event = MagicMock()
         event.object_id = "player-A"
         provider._on_ma_player_event(event)
 
-        # 3s track: threshold = max(0, 3-5) = 0 → any elapsed counts as end.
         assert provider._handoff_completion_signaled_for == "track-1"
 
 
