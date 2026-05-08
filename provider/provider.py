@@ -1266,6 +1266,18 @@ class YandexYnisonProvider(PluginProvider):
             meta.elapsed_time_last_updated = time.time()
         if player_id:
             self.mass.players.trigger_player_update(player_id)
+            # Keep the frontend fake queue's elapsed in sync. Without
+            # this the queue's elapsed_time only updates on track-change
+            # (when we re-fire QUEUE_ADDED) and the seek bar drifts off
+            # real playback over the course of a track. QUEUE_TIME_UPDATED
+            # carrying the elapsed-seconds payload is the same shape the
+            # frontend expects for real queues.
+            if not self._is_handoff:
+                self.mass.signal_event(
+                    EventType.QUEUE_TIME_UPDATED,
+                    object_id=self.instance_id,
+                    data=elapsed_ms // 1000,
+                )
         # Update Ynison so the Yandex app shows correct position
         await self._send_progress_to_ynison(
             progress_ms=elapsed_ms,
