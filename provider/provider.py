@@ -1624,13 +1624,20 @@ class YandexYnisonProvider(PluginProvider):
             and queue.current_item is not None
             and getattr(queue.current_item, "uri", None) == expected_uri
             and not state.is_paused
-            # Guard: if WE just committed PAUSED via `_handoff_pause`,
-            # don't let a stale Ynison `paused=False` echo route to
-            # IDLE-resume and re-issue REPLACE on a deliberately-paused
-            # player. The `_re_issue_debounce_until` window from the
-            # previous activation may have expired by then; this is the
-            # robust check.
-            and self._expected_phase != HandoffPhase.PAUSED
+            # Guard: skip IDLE-resume in two phases:
+            # - PAUSED: WE just committed `_handoff_pause`; a stale
+            #   Ynison `paused=False` echo would otherwise REPLACE on
+            #   a deliberately-paused player.
+            # - ENDING: we just signalled track completion to Ynison
+            #   (heartbeat or `_on_ma_player_event` natural-end path);
+            #   queue is IDLE on the OLD track URI but Ynison is in
+            #   the middle of broadcasting the new track id. Re-issuing
+            #   REPLACE on the old URI here would race the upcoming
+            #   `_apply_track_change` and the seek would be to
+            #   duration-of-old-track, restarting the old track at its
+            #   end and immediately re-firing natural-end / restarting
+            #   the cycle.
+            and self._expected_phase not in (HandoffPhase.PAUSED, HandoffPhase.ENDING)
         ):
             await self._apply_idle_resume(state, target_player_id, expected_uri)
             return
