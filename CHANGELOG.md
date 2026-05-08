@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 ## [2.2.0] - 2026-05-08
 
-### Added — first-class MA UI integration for stream mode
+### Added — first-class MA UI integration for stream mode (opt-in, off by default)
 
 Borrowed approach from spotify_connect PR #3857. Stream-mode plugin
 sources previously rendered as an "empty" player card in the MA UI:
@@ -13,9 +13,14 @@ resolves all of that via a `PlayerQueue` looked up by
 `player.active_source` — and when a `PluginSource` is active,
 `active_source` equals `instance_id`, but no queue exists with that id.
 
-This release publishes a frontend-only fake queue under our
-`instance_id` so the UI can render the player card in full while
-keeping backend command routing unchanged.
+This release adds an **opt-in** advanced toggle — `Show full player
+card in MA UI` (`enable_ui_integration`, default **off**) — that
+publishes a frontend-only fake queue under our `instance_id` so the
+UI can render the player card in full while keeping backend command
+routing unchanged. Disabled by default because the integration relies
+on private frontend behaviours that may break across MA versions and
+can interfere with "Play Now" on local content (see Known limitation
+below). Hidden in handoff mode (where MA already owns a real queue).
 
 - New `_register_plugin_queue(player_id)`: fires `QUEUE_ADDED` +
   `QUEUE_UPDATED` events with `queue_id == instance_id` and a fake

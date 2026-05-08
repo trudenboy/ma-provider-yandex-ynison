@@ -36,6 +36,7 @@ from .auth import refresh_music_token
 from .constants import (
     CONF_ALLOW_PLAYER_SWITCH,
     CONF_DEVICE_ID,
+    CONF_ENABLE_UI_INTEGRATION,
     CONF_HANDOFF_HEARTBEAT_INTERVAL,
     CONF_MASS_PLAYER_ID,
     CONF_OUTPUT_BIT_DEPTH,
@@ -205,7 +206,18 @@ class YandexYnisonProvider(PluginProvider):
         """True when this instance is configured for handoff playback mode."""
         return self._playback_mode == PLAYBACK_MODE_HANDOFF
 
-    def __init__(
+    @property
+    def _ui_integration_active(self) -> bool:
+        """True when stream-mode UI integration helpers should run.
+
+        Gated by the explicit `CONF_ENABLE_UI_INTEGRATION` toggle (off by
+        default) and force-disabled in handoff mode (where MA already owns
+        a real queue, so the fake-queue trick is both unnecessary and
+        wrong).
+        """
+        return self._ui_integration_enabled and not self._is_handoff
+
+    def __init__(  # noqa: PLR0915 — straight-line config wiring + bookkeeping
         self,
         mass: MusicAssistant,
         manifest: ProviderManifest,
@@ -237,6 +249,14 @@ class YandexYnisonProvider(PluginProvider):
         )
         self._handoff_heartbeat_interval: float = _parse_handoff_heartbeat(
             self.config.get_value(CONF_HANDOFF_HEARTBEAT_INTERVAL)
+        )
+        # Stream-mode UI integration (fake-queue + signal-chain stamp).
+        # Off by default — relies on private frontend behaviours and can
+        # interfere with 'Play Now' on local content while this source is
+        # active. Hidden in handoff mode (the toggle has no effect there).
+        ui_value = self.config.get_value(CONF_ENABLE_UI_INTEGRATION)
+        self._ui_integration_enabled: bool = (
+            cast("bool", ui_value) if ui_value is not None else False
         )
 
         # Token source — None = own (manually entered CONF_TOKEN);
@@ -996,7 +1016,7 @@ class YandexYnisonProvider(PluginProvider):
         # picks up the new `current_item.streamdetails` only on a fresh
         # QUEUE_UPDATED. Throttled to track-change events (`significant_change`)
         # so we don't spam the WS on every progress tick.
-        if significant_change and self._active_player_id and not self._is_handoff:
+        if significant_change and self._active_player_id and self._ui_integration_active:
             self._register_plugin_queue(self._active_player_id)
 
         # Always trigger player update on significant changes;
@@ -1031,9 +1051,10 @@ class YandexYnisonProvider(PluginProvider):
         through `PluginSource` callbacks (`_on_play`, `_on_pause`, etc.).
 
         Stream-mode only — handoff has a real `play_media` queue and
-        doesn't need the impostor.
+        doesn't need the impostor. Also gated by
+        `CONF_ENABLE_UI_INTEGRATION` (off by default).
         """
-        if self._is_handoff:
+        if not self._ui_integration_active:
             return
         player = self.mass.players.get_player(player_id)
         metadata = self._source_details.metadata
@@ -1131,7 +1152,7 @@ class YandexYnisonProvider(PluginProvider):
         so MA never gets a chance to fill it in. Without this, the panel
         either shows nothing useful or stale info from a previous source.
         """
-        if self._is_handoff:
+        if not self._ui_integration_active:
             return
         player = self.mass.players.get_player(player_id)
         if player is None:
@@ -1150,8 +1171,15 @@ class YandexYnisonProvider(PluginProvider):
         self.mass.players.trigger_player_update(player_id)
 
     def _clear_player_output_format(self, player_id: str | None) -> None:
-        """Remove our `output_format` stamp on deselect — frontend reverts to MA queue format."""
-        if not player_id or self._is_handoff:
+        """Remove our `output_format` stamp on deselect — frontend reverts to MA queue format.
+
+        Cleanup path is NOT gated on `_ui_integration_active`: if the user
+        had the toggle ON, the stamp got written, then they save with it
+        OFF, on next reload the cleanup must still run to remove the
+        stale key. `pop` is a no-op when the key is absent, so always-on
+        cleanup is safe regardless of whether we ever wrote the stamp.
+        """
+        if not player_id:
             return
         player = self.mass.players.get_player(player_id)
         if player is None:
@@ -1168,7 +1196,7 @@ class YandexYnisonProvider(PluginProvider):
         player update plus an explicit `QUEUE_TIME_UPDATED` event with
         our fake-queue id does the job.
         """
-        if self._is_handoff or not player_id:
+        if not self._ui_integration_active or not player_id:
             return
         player = self.mass.players.get_player(player_id)
         if player is not None:
@@ -1237,7 +1265,7 @@ class YandexYnisonProvider(PluginProvider):
         if (
             self._actual_input_format != prev_input_format
             and self._active_player_id
-            and not self._is_handoff
+            and self._ui_integration_active
         ):
             self._register_plugin_queue(self._active_player_id)
         if stream_details.duration:
@@ -1313,7 +1341,7 @@ class YandexYnisonProvider(PluginProvider):
             # real playback over the course of a track. QUEUE_TIME_UPDATED
             # carrying the elapsed-seconds payload is the same shape the
             # frontend expects for real queues.
-            if not self._is_handoff:
+            if self._ui_integration_active:
                 self.mass.signal_event(
                     EventType.QUEUE_TIME_UPDATED,
                     object_id=self.instance_id,
