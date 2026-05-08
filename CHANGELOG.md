@@ -2,6 +2,119 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.0.0] - 2026-05-08
+
+### Architectural refactor — handoff state-sync foundations
+
+This release replaces the temporal echo-detection heuristic and the implicit
+single-flag handoff state with strictly causal mechanisms inspired by Spotify
+Connect Dealer / librespot, Cast SDK `idleReason`, and MPRIS `SetPosition`
+context binding. The goal is *deterministic* two-way sync between the Yandex
+Music app and Music Assistant — no more "echo blocked my pause", no more
+"reconnect cascaded a stale pause to the active phone", no more "rapid
+toggle restarted the track at 0".
+
+### Added — Lamport-style version-counter echo (`provider/ynison_client.py`)
+
+- `YnisonClient` now stamps each outbound state with a monotonic version
+  derived from `time.time_ns()` and tracks two watermarks
+  (`_pending_outbound_queue_version`, `_pending_outbound_status_version`).
+  An incoming state is classified as our echo only when **both** the queue
+  and status version blocks are authored by us **and** their inbound
+  versions are `<=` our latest pending watermark. Replaces the previous
+  device-id-only AND check, which still false-flagged peer state changes
+  whenever the heartbeat had recently bumped the queue version.
+- `_classify_state_as_echo` and `_block_is_our_echo` helpers; new
+  `_capture_outbound_versions` records the watermark on every send path
+  (`update_player_state`, `send_full_state`, `update_playing_status`).
+
+### Added — Reconnect settle window + fresh state (`provider/ynison_client.py`)
+
+- `_post_reconnect_settle_until` (2 s) opens after each `_connect_state`.
+  `_handle_ynison_state` early-returns inside this window so the first
+  Ynison broadcast after reconnect (which may carry pre-reconnect state
+  from another peer) does not trigger spurious play/pause/seek commands
+  in MA.
+- `_connect_state` now sends a **fresh** initial state on reconnect via
+  `send_full_state()` (no argument), instead of replaying
+  `self.state.player_state` — the previous behaviour rebroadcast a
+  paused-from-30s-ago snapshot to peers and made the phone go silent.
+- New `in_post_reconnect_settle` property exposed for the provider check.
+
+### Added — Explicit handoff phase (`provider/provider.py`)
+
+- New `HandoffPhase` enum (`IDLE`, `ACTIVATING`, `PLAYING`, `PAUSED`,
+  `ENDING`) and `_expected_phase` field. The plugin now records *what it
+  thinks the player should be doing*, separately from MA queue's actual
+  state. This disambiguates `(queue.state == IDLE, expected == ENDING)`
+  (signal completion) from `(queue.state == IDLE, expected == PAUSED)`
+  (watchdog quirk, do not advance) — the underlying cause of the original
+  cascade.
+- `_handoff_activate` sets `ACTIVATING` after a successful `play_media`;
+  `_on_ma_player_event` transitions `ACTIVATING/PAUSED` → `PLAYING` on
+  the first PLAYING tick; `_handoff_pause` sets `PAUSED`.
+
+### Added — Idempotency cache + cancel-on-track-change
+
+- `_idempotent(action, key)` helper with a 1 s TTL window. Duplicate
+  pause / play_media commands inside the window are no-ops, preventing
+  Ynison-echo storms from issuing the same MA command 2-3 times back to
+  back. Used in `_handoff_pause` (key=player_id) and `_handoff_activate`
+  new-track branch (key=track_id).
+- `_cancel_pending_play_media()` cancels a still-running `play_media`
+  task before issuing a new one. Rapid `next` taps in the Yandex app
+  used to fire several back-to-back, and a half-finished load racing
+  the new one confused MA's queue runner.
+- New field `_play_media_task: asyncio.Task | None` and a 3-tier backoff
+  constant `_PLAY_MEDIA_BACKOFF_SECONDS = (1.0, 2.0, 5.0)` for future use.
+
+### Changed — split former `_handoff_grace_until` into two semantics
+
+- `_drift_suppress_until` — set after a `play_media(REPLACE)` or `seek`,
+  blocks spurious drift-seek detection until MA's stream actually starts.
+  Previously conflated with the re-issue debounce, leading to double
+  play_media calls on rapid pause/play.
+- `_re_issue_debounce_until` — set after issuing `play_media`, blocks
+  another REPLACE for `_REISSUE_DEBOUNCE_PERIOD = 3.0` seconds. Solves
+  the IDLE-resume re-issue loop where each `paused=False` echo would
+  fire another REPLACE before MA had transitioned to PLAYING.
+- New constants `_DRIFT_SUPPRESS_PERIOD = 5.0`, `_REISSUE_DEBOUNCE_PERIOD
+  = 3.0`, `_COMMAND_IDEMPOTENCY_TTL = 1.0`.
+
+### Renamed
+
+- `_handoff_current_track_id` → `_expected_track_id` (clearer ownership
+  semantics — *we* expect this; MA queue is the cache).
+
+### Tests
+
+- `tests/test_provider_handoff.py`: new classes
+  `TestHandoffIdempotency`, `TestHandoffCancelTask`,
+  `TestHandoffFsmTransitions` (9 cases). Covers pause idempotency
+  within/after TTL, play_media dedup, cancellation of pending
+  play_media, ACTIVATING→PLAYING transition on first MA PLAYING tick,
+  PAUSED phase set after pause, phase preserved on pause failure.
+- `tests/test_ynison_client.py`: `test_reconnect_sends_fresh_state_no_stale_replay`
+  (regression for stale rebroadcast), `test_cold_start_does_not_arm_settle_window`,
+  echo classification tests under the new Lamport scheme.
+
+### Known status
+
+- Full FSM-driven dispatch (decision matrix, `_apply_track_change` /
+  `_apply_pause` / `_apply_play` / `_apply_seek` / `_apply_completion`
+  with parametrized routing) is **deferred** to a follow-up release —
+  v2.0 introduces the bookkeeping fields (`_expected_phase`,
+  `_expected_track_id`, idempotency cache, separated grace fields) and
+  the Lamport echo / settle-window primitives that make the dispatch
+  safely possible. Existing handlers continue to inline their decisions
+  with the new fields, which already eliminates the four critical race
+  conditions (echo / reconnect cascade / rapid-toggle restart /
+  duplicate play_media).
+- The `_PLAY_MEDIA_BACKOFF_SECONDS` constant is wired but the retry
+  loop itself is intentionally not yet activated — exception-driven
+  re-issue should be observed once before being automated. Manual
+  recovery by waiting for the next Ynison state still works.
+
 ## [1.9.1] - 2026-05-08
 
 ### Fixed

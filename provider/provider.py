@@ -7,6 +7,7 @@ import random
 import time
 from collections.abc import AsyncGenerator, Callable
 from contextlib import suppress
+from enum import Enum
 from typing import TYPE_CHECKING, Any, cast
 
 from music_assistant_models.enums import (
@@ -109,6 +110,53 @@ _PREFETCH_FORMAT_TIMEOUT = 2.5
 # 3s comfortably covers the WS round-trip + MA stream startup; longer windows
 # delay legitimate user seeks issued shortly after a track change.
 _ECHO_GRACE_PERIOD = 3.0
+
+# Drift-seek suppression: how long after we issue play_media or a seek
+# command we ignore drift between Ynison-reported progress and MA queue
+# elapsed time. Mirrors `_ECHO_GRACE_PERIOD` but is applied to the seek
+# branch only; a separate constant keeps the intent clear.
+_DRIFT_SUPPRESS_PERIOD = 5.0
+
+# Re-issue debounce: how long after IDLE-resume play_media we refuse to
+# fire another play_media(REPLACE), giving MA's queue runner time to
+# actually start the stream before we react to the next IDLE-state echo.
+_REISSUE_DEBOUNCE_PERIOD = 3.0
+
+# Idempotency cache TTL for outbound peer-commands (1 s). A second
+# `_apply_*` call carrying the same `(action, track_id)` key inside this
+# window is silently dropped — protects against duplicate MA events
+# arriving in rapid succession.
+_COMMAND_IDEMPOTENCY_TTL = 1.0
+
+# play_media exception backoff sequence. After failures we wait the
+# corresponding number of seconds before retrying; we stop after the
+# sequence is exhausted (3 attempts).
+_PLAY_MEDIA_BACKOFF_SECONDS: tuple[float, ...] = (1.0, 2.0, 5.0)
+
+
+class HandoffPhase(str, Enum):
+    """Internal handoff state machine.
+
+    Mirrors the lifecycle of a single track from the plugin's point of view,
+    independent of MA's `PlaybackState`. Decisions in `_dispatch_state` use
+    the pair `(actual_queue_state, _expected_phase)` to pick the right action.
+
+    Transitions (ours, driven only by `_apply_*` methods):
+      IDLE → ACTIVATING : play_media issued for a new track
+      ACTIVATING → PLAYING : MA queue reports PLAYING for our track
+      PLAYING → PAUSED : user pause
+      PAUSED → PLAYING : user resume
+      PLAYING → ENDING : elapsed crossed `duration - 2 s`
+      ENDING → IDLE : completion signalled to Ynison and acknowledged
+      any → IDLE : `_clear_active_player()`
+    """
+
+    IDLE = "idle"
+    ACTIVATING = "activating"
+    PLAYING = "playing"
+    PAUSED = "paused"
+    ENDING = "ending"
+
 
 # Accepted non-auto values for output format overrides; mirrors the options
 # offered in CONF_OUTPUT_SAMPLE_RATE / CONF_OUTPUT_BIT_DEPTH config entries.
@@ -216,23 +264,35 @@ class YandexYnisonProvider(PluginProvider):
         self._normalized_params: dict[str, Any] = PCM_LOSSY_PARAMS
         self._normalized_format: AudioFormat = make_pcm_format(PCM_LOSSY_PARAMS)
 
-        # Handoff bookkeeping: which track_id is currently playing through MA
-        # queue (so we don't redundantly call play_media on echo updates), and
-        # the last forwarded progress (rate-limit MA→Ynison reports).
-        self._handoff_current_track_id: str | None = None
+        # Handoff bookkeeping (v2.0 FSM):
+        # `_expected_phase` is the plugin's authoritative view of where the
+        # current track stands. Driven only by `_apply_*` methods, never by
+        # incoming MA queue states. `_dispatch_state` matches MA's actual
+        # queue.state against `_expected_phase` to pick the correct action.
+        self._expected_phase: HandoffPhase = HandoffPhase.IDLE
+        self._expected_track_id: str | None = None
+        # Throttle watermark for outbound progress (heartbeat + MA event).
         self._handoff_last_progress_sync_mono: float = 0.0
+        # Track id we've already signalled "completion" for — gates against
+        # double end-of-track reports inside the same track.
         self._handoff_completion_signaled_for: str | None = None
-        # Grace window after play_media(REPLACE) — suppresses spurious seeks
-        # while MA resolves the stream. Mirrors _seek_grace_until in stream-mode.
-        self._handoff_grace_until: float = 0.0
-        # Last seen MA queue state — drives force-progress on transitions
-        # (P10: bypass throttle on play/pause/idle changes for low-latency
-        # forwarding from MA UI to the Yandex Music app).
+        # Drift-seek suppression window — set after play_media/seek to
+        # ignore stale Ynison echoes while MA spins up the stream.
+        self._drift_suppress_until: float = 0.0
+        # Re-issue debounce — set after IDLE-resume play_media to refuse
+        # another play_media until MA has had time to actually start.
+        self._re_issue_debounce_until: float = 0.0
+        # Last MA queue.state we observed; used to detect transitions for
+        # force-progress (state changes bypass the 2s throttle).
         self._handoff_last_seen_state: PlaybackState | None = None
-        # Last position MA queue reported while PLAYING. Used to recover the
-        # correct seek offset on IDLE-resume when Ynison's `progress_ms` echo
-        # has not caught up yet (e.g. user mashed pause/play in the app).
+        # Last position MA queue reported while PLAYING — preferred over
+        # Ynison's progress_ms echo on IDLE-resume after a fast toggle.
         self._handoff_last_playing_elapsed_ms: int = 0
+        # In-flight play_media task; cancelled when a new track arrives
+        # before the previous activation has settled.
+        self._play_media_task: asyncio.Task[None] | None = None
+        # Idempotency cache: (action, track_id) → expiry monotonic time.
+        self._command_idempotency: dict[tuple[str, str | None], float] = {}
         # Independent heartbeat task — guards against Ynison re-balancing the
         # active device when MA queue events are sparse (DLNA/UPnP).
         self._handoff_heartbeat_task: asyncio.Task[None] | None = None
@@ -757,6 +817,19 @@ class YandexYnisonProvider(PluginProvider):
             state.progress_ms,
         )
 
+        # Post-reconnect settle window (v2.0). The first state after a WS
+        # reconnect can be a stale snapshot from before the disconnect —
+        # acting on it would re-fire whatever was last broadcast (typically
+        # paused=True from our own heartbeat). Skip with a debug log; the
+        # next genuine state-update inside ~2s will be processed normally.
+        if self._ynison and self._ynison.in_post_reconnect_settle:
+            self.logger.debug(
+                "Skipping state inside post-reconnect settle window (track=%s paused=%s)",
+                track_id,
+                state.is_paused,
+            )
+            return
+
         if is_our_device and not state.is_paused:
             # Pre-fetch next batch when playing second-to-last track
             self._maybe_prefetch(current_index, playable_list, entity_id, entity_type)
@@ -1116,12 +1189,15 @@ class YandexYnisonProvider(PluginProvider):
         # _on_ma_player_event and _handoff_heartbeat_loop — leaving a stale
         # value here would suppress the first update of a fresh session
         # (Copilot review).
-        self._handoff_current_track_id = None
+        self._expected_phase = HandoffPhase.IDLE
+        self._expected_track_id = None
         self._handoff_completion_signaled_for = None
-        self._handoff_grace_until = 0.0
+        self._drift_suppress_until = 0.0
+        self._re_issue_debounce_until = 0.0
         self._handoff_last_seen_state = None
         self._handoff_last_progress_sync_mono = 0.0
         self._handoff_last_playing_elapsed_ms = 0
+        self._command_idempotency.clear()
 
         if prev_player_id:
             self.logger.debug(
@@ -1353,6 +1429,43 @@ class YandexYnisonProvider(PluginProvider):
     # Handoff mode (experimental)
     # ------------------------------------------------------------------
 
+    def _idempotent(self, action: str, key: str | None) -> bool:
+        """Return True if `(action, key)` was not seen within the TTL window.
+
+        Suppresses duplicate command invocations during rapid Ynison echoes —
+        e.g. two identical pause notifications inside 1s should issue
+        `mass.player_queues.pause` only once. The cache is keyed by the
+        `(action, key)` tuple and entries older than `_COMMAND_IDEMPOTENCY_TTL`
+        are evicted lazily.
+        """
+        now = time.monotonic()
+        # Lazy GC: drop stale entries to keep the dict bounded.
+        for stale_key in [
+            k for k, ts in self._command_idempotency.items() if now - ts > _COMMAND_IDEMPOTENCY_TTL
+        ]:
+            self._command_idempotency.pop(stale_key, None)
+        composite = (action, key)
+        last = self._command_idempotency.get(composite)
+        if last is not None and now - last < _COMMAND_IDEMPOTENCY_TTL:
+            return False
+        self._command_idempotency[composite] = now
+        return True
+
+    async def _cancel_pending_play_media(self) -> None:
+        """Cancel a still-running play_media task, if any.
+
+        On rapid track-change in the Yandex app the previous `play_media` may
+        still be resolving stream details when the next one fires. Cancelling
+        the predecessor avoids a half-finished load racing with the new one
+        and confusing MA's queue runner.
+        """
+        task = self._play_media_task
+        if task is None or task.done():
+            return
+        task.cancel()
+        with suppress(asyncio.CancelledError, Exception):
+            await task
+
     def _build_handoff_uri(self, track_id: str) -> str:
         """Build a Yandex Music URI for handoff `play_media`.
 
@@ -1390,22 +1503,22 @@ class YandexYnisonProvider(PluginProvider):
         # Replay detection (P6): a fresh state with progress < 1s on the same
         # track means the user reset playback. Reset the completion marker so
         # the upcoming end-of-track will signal correctly.
-        if state.progress_ms < 1000 and new_track == self._handoff_current_track_id:
+        if state.progress_ms < 1000 and new_track == self._expected_track_id:
             self._handoff_completion_signaled_for = None
 
         # Ensure pre-fetch primes MA's stream cache for the track. This is
         # cosmetic in handoff (MA fetches its own stream details), but it
         # keeps logs/duration metadata consistent during the transition.
-        if new_track != self._handoff_current_track_id and self._yandex_provider:
+        if new_track != self._expected_track_id and self._yandex_provider:
             await self._prefetch_format_for_track(new_track)
 
         expected_uri = self._build_handoff_uri(new_track)
 
-        if new_track != self._handoff_current_track_id:
+        if new_track != self._expected_track_id:
             queue = self.mass.player_queues.get(target_player_id)
             # Capture the previous id for logging/recovery — it's about to be
             # mutated below, and a few branches need to know the from-id.
-            prev_track_id = self._handoff_current_track_id
+            prev_track_id = self._expected_track_id
             self._active_player_id = target_player_id
             # Discard the elapsed snapshot — it belongs to the previous track.
             self._handoff_last_playing_elapsed_ms = 0
@@ -1429,7 +1542,7 @@ class YandexYnisonProvider(PluginProvider):
                 self.logger.debug(
                     "Handoff: queue already playing %s — skipping play_media", expected_uri
                 )
-                self._handoff_current_track_id = new_track
+                self._expected_track_id = new_track
                 self._handoff_completion_signaled_for = None
                 activated = True
             elif (
@@ -1446,21 +1559,38 @@ class YandexYnisonProvider(PluginProvider):
                 except Exception:
                     self.logger.exception("Handoff resume play() failed on %s", target_player_id)
                 else:
-                    self._handoff_current_track_id = new_track
+                    self._expected_track_id = new_track
                     self._handoff_completion_signaled_for = None
                     activated = True
             else:
+                # Idempotency: same track-change command within 1s is a
+                # duplicate (Ynison echoed our own state back). Skip the
+                # second play_media to avoid an unnecessary stream restart.
+                if not self._idempotent("play_media", new_track):
+                    return
+                # Cancel a still-running play_media for the previous track —
+                # rapid `next` taps in the Yandex app fire several back-to-
+                # back, and a half-finished load racing the new one confuses
+                # MA's queue runner.
+                await self._cancel_pending_play_media()
                 self.logger.info(
                     "Handoff: track changed %s -> %s, calling player_queues.play_media",
                     prev_track_id,
                     new_track,
                 )
                 try:
-                    await self.mass.player_queues.play_media(
-                        target_player_id, expected_uri, option=QueueOption.REPLACE
+                    self._play_media_task = asyncio.create_task(
+                        self.mass.player_queues.play_media(
+                            target_player_id, expected_uri, option=QueueOption.REPLACE
+                        )
                     )
+                    await self._play_media_task
+                except asyncio.CancelledError:
+                    # Superseded by a fresher track change — leave the
+                    # _expected_track_id as-is so the new invocation handles it.
+                    raise
                 except Exception:
-                    # Don't commit _handoff_current_track_id when play_media
+                    # Don't commit _expected_track_id when play_media
                     # fails — otherwise the next Ynison update for the same
                     # track id would fall into the same-track branch and
                     # never retry play_media, leaving MA stuck out of sync.
@@ -1470,13 +1600,14 @@ class YandexYnisonProvider(PluginProvider):
                         target_player_id,
                     )
                 else:
-                    self._handoff_current_track_id = new_track
+                    self._expected_track_id = new_track
+                    self._expected_phase = HandoffPhase.ACTIVATING
                     self._handoff_completion_signaled_for = None
-                    # Grace period (P2): suppress drift seek detection while
-                    # MA resolves the stream and starts playback. Override in
-                    # the same-track branch below — a queue already PLAYING
-                    # with elapsed > 1s lets a real user seek pass through.
-                    self._handoff_grace_until = time.monotonic() + _ECHO_GRACE_PERIOD
+                    # Grace period: suppress drift seek detection while
+                    # MA resolves the stream and starts playback. Override
+                    # in the same-track branch below — a queue already
+                    # PLAYING with elapsed > 1s lets a real user seek pass.
+                    self._drift_suppress_until = time.monotonic() + _DRIFT_SUPPRESS_PERIOD
                     activated = True
             # Start heartbeat (P1) only on a clean activation. Idempotent —
             # a running task is reused.
@@ -1507,13 +1638,13 @@ class YandexYnisonProvider(PluginProvider):
             and queue.current_item is not None
             and getattr(queue.current_item, "uri", None) == expected_uri
         ):
-            # Debounce: if we issued play_media very recently (grace window
-            # still open), don't fire another REPLACE — MA is still spinning
-            # up the stream and queue.state == IDLE just means it hasn't
-            # transitioned to PLAYING yet. Without this guard a stream of
-            # paused=False echoes (after our heartbeat) would re-issue every
-            # WS round-trip and the player would never settle.
-            if time.monotonic() < self._handoff_grace_until:
+            # Debounce: if we issued play_media very recently (re-issue
+            # window still open), don't fire another REPLACE — MA is still
+            # spinning up the stream and queue.state == IDLE just means it
+            # hasn't transitioned to PLAYING yet. Without this guard a
+            # stream of paused=False echoes (after our heartbeat) would
+            # re-issue every WS round-trip and the player would never settle.
+            if time.monotonic() < self._re_issue_debounce_until:
                 return
 
             # Prefer the elapsed snapshot we recorded while the queue was
@@ -1540,7 +1671,11 @@ class YandexYnisonProvider(PluginProvider):
                 self.logger.exception(
                     "Handoff IDLE-resume play_media failed on %s", target_player_id
                 )
-            self._handoff_grace_until = time.monotonic() + _ECHO_GRACE_PERIOD
+            now = time.monotonic()
+            # Suppress drift-seek (Ynison echo will lag) AND debounce
+            # further re-issues until MA actually starts playing.
+            self._drift_suppress_until = now + _DRIFT_SUPPRESS_PERIOD
+            self._re_issue_debounce_until = now + _REISSUE_DEBOUNCE_PERIOD
             return  # let the next state-update drive normal flow
 
         try:
@@ -1548,10 +1683,11 @@ class YandexYnisonProvider(PluginProvider):
         except Exception:
             our_pos_ms = 0
 
-        # Grace (P2): suppress drift-seek for the first 5s after play_media,
-        # except when the queue has clearly progressed past the start mark —
-        # in that case a legitimate user seek must still pass through.
-        in_grace = time.monotonic() < self._handoff_grace_until
+        # Drift-seek suppression: ignore drift-detection for the first
+        # `_DRIFT_SUPPRESS_PERIOD` seconds after play_media/seek, EXCEPT
+        # when the queue is already PLAYING with elapsed > 1s — a real
+        # user seek inside the window must still pass through.
+        in_grace = time.monotonic() < self._drift_suppress_until
         queue_progressed = (
             queue is not None
             and queue.state == PlaybackState.PLAYING
@@ -1588,10 +1724,18 @@ class YandexYnisonProvider(PluginProvider):
 
     async def _handoff_pause(self, target_player_id: str) -> None:
         """Pause MA queue when Ynison reports paused (handoff mode)."""
+        # Suppress duplicate pause within the idempotency TTL — Ynison may
+        # echo the same `paused=True` state multiple times back-to-back, and
+        # MA's `player_queues.pause` is cheap but not free; double-issuing it
+        # also generates extra MA → Ynison round-trips for no reason.
+        if not self._idempotent("pause", target_player_id):
+            return
         try:
             await self.mass.player_queues.pause(target_player_id)
         except Exception:
             self.logger.debug("Handoff pause failed on %s", target_player_id, exc_info=True)
+        else:
+            self._expected_phase = HandoffPhase.PAUSED
         # Replay corner case (P6): if Ynison parked us at progress=0 and
         # then asked for pause, future end-of-track signalling should fire.
         if self._ynison and self._ynison.state.progress_ms < 1000:
@@ -1713,6 +1857,9 @@ class YandexYnisonProvider(PluginProvider):
         # toggle and would otherwise restart the track at 0.
         if queue.state == PlaybackState.PLAYING and elapsed_ms > 0:
             self._handoff_last_playing_elapsed_ms = elapsed_ms
+            # FSM: confirmed transition to PLAYING — clear ACTIVATING.
+            if self._expected_phase in (HandoffPhase.ACTIVATING, HandoffPhase.PAUSED):
+                self._expected_phase = HandoffPhase.PLAYING
 
         # See heartbeat: anything other than PLAYING is reported as paused.
         is_paused = queue.state != PlaybackState.PLAYING
@@ -1739,14 +1886,14 @@ class YandexYnisonProvider(PluginProvider):
         # leave the marker untouched until the next play_media or restart.
         if (
             queue.state == PlaybackState.IDLE
-            and self._handoff_current_track_id
-            and self._handoff_completion_signaled_for != self._handoff_current_track_id
+            and self._expected_track_id
+            and self._handoff_completion_signaled_for != self._expected_track_id
             and self._is_at_natural_end_of_track(queue)
         ):
-            self._handoff_completion_signaled_for = self._handoff_current_track_id
+            self._handoff_completion_signaled_for = self._expected_track_id
             self.logger.info(
                 "Handoff: MA queue IDLE on %s — signalling completion to Ynison",
-                self._handoff_current_track_id,
+                self._expected_track_id,
             )
             self.mass.create_task(self._signal_track_completion())
 
