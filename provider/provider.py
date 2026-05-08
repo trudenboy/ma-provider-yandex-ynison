@@ -1700,9 +1700,19 @@ class YandexYnisonProvider(PluginProvider):
                     target_player_id, expected_uri, option=QueueOption.REPLACE
                 )
                 if resume_ms >= 1000:
-                    # Hand the requested position right after REPLACE so MA
-                    # doesn't waste audio decoding from 0.
+                    # play_media(REPLACE) starts decoding at position 0. If
+                    # we just call seek next, MA decodes ~1-2s of "from 0"
+                    # before the seek lands, and the user hears the track
+                    # restart-then-jump. Pause first, seek, then play —
+                    # the brief silence is far less jarring than the
+                    # restart-from-zero glitch. Best-effort wrappers so a
+                    # transient failure on any leg still falls through to
+                    # the heartbeat / drift-seek recovery paths.
+                    with suppress(Exception):
+                        await self.mass.players.cmd_pause(target_player_id)
                     await self.mass.player_queues.seek(target_player_id, resume_ms // 1000)
+                    with suppress(Exception):
+                        await self.mass.players.cmd_play(target_player_id)
             except Exception:
                 self.logger.exception(
                     "Handoff IDLE-resume play_media failed on %s", target_player_id
