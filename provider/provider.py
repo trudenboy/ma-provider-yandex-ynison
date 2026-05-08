@@ -113,9 +113,13 @@ _ECHO_GRACE_PERIOD = 3.0
 
 # Drift-seek suppression: how long after we issue play_media or a seek
 # command we ignore drift between Ynison-reported progress and MA queue
-# elapsed time. Mirrors `_ECHO_GRACE_PERIOD` but is applied to the seek
-# branch only; a separate constant keeps the intent clear.
-_DRIFT_SUPPRESS_PERIOD = 5.0
+# elapsed time. Doubles as the "activation window" used by heartbeat /
+# _on_ma_player_event to force `paused=False` while MA is still spinning
+# the stream up (otherwise the IDLE-during-startup gap would propagate
+# `paused=True` to Ynison and the app would flip to "paused" prematurely).
+# 10s comfortably covers play_media await + post-await Chromecast/DLNA/
+# web startup latency end-to-end.
+_DRIFT_SUPPRESS_PERIOD = 10.0
 
 # Re-issue debounce: how long after a play_media (initial or IDLE-resume)
 # we refuse to fire another play_media(REPLACE). 8s comfortably covers
@@ -1586,6 +1590,23 @@ class YandexYnisonProvider(PluginProvider):
                     prev_track_id,
                     new_track,
                 )
+                # Open the activation window BEFORE the await — MA fires
+                # PLAYER_UPDATED events while play_media is still resolving,
+                # and our `_on_ma_player_event` handler must see
+                # `_drift_suppress_until` already set so it forces
+                # paused=False instead of leaking a stale paused=True from
+                # the brief queue-IDLE moment between cmd_stop and the new
+                # stream actually starting. Same for `_re_issue_debounce_until`
+                # — covers the entire window where a paused=False echo could
+                # otherwise re-fire IDLE-resume against an in-flight stream.
+                # Saved so we can roll back on failure.
+                prev_drift = self._drift_suppress_until
+                prev_debounce = self._re_issue_debounce_until
+                prev_phase = self._expected_phase
+                now = time.monotonic()
+                self._drift_suppress_until = now + _DRIFT_SUPPRESS_PERIOD
+                self._re_issue_debounce_until = now + _REISSUE_DEBOUNCE_PERIOD
+                self._expected_phase = HandoffPhase.ACTIVATING
                 try:
                     self._play_media_task = asyncio.create_task(
                         self.mass.player_queues.play_media(
@@ -1602,6 +1623,11 @@ class YandexYnisonProvider(PluginProvider):
                     # fails — otherwise the next Ynison update for the same
                     # track id would fall into the same-track branch and
                     # never retry play_media, leaving MA stuck out of sync.
+                    # Roll back the optimistic window/phase state so they
+                    # don't lie to subsequent calls.
+                    self._drift_suppress_until = prev_drift
+                    self._re_issue_debounce_until = prev_debounce
+                    self._expected_phase = prev_phase
                     self.logger.exception(
                         "Handoff play_media failed for %s on %s",
                         expected_uri,
@@ -1609,13 +1635,7 @@ class YandexYnisonProvider(PluginProvider):
                     )
                 else:
                     self._expected_track_id = new_track
-                    self._expected_phase = HandoffPhase.ACTIVATING
                     self._handoff_completion_signaled_for = None
-                    # Grace period: suppress drift seek detection while
-                    # MA resolves the stream and starts playback. Override
-                    # in the same-track branch below — a queue already
-                    # PLAYING with elapsed > 1s lets a real user seek pass.
-                    self._drift_suppress_until = time.monotonic() + _DRIFT_SUPPRESS_PERIOD
                     activated = True
             # Start heartbeat (P1) only on a clean activation. Idempotent —
             # a running task is reused.
@@ -1667,6 +1687,14 @@ class YandexYnisonProvider(PluginProvider):
                 resume_ms,
                 "ma_snapshot" if self._handoff_last_playing_elapsed_ms else "ynison",
             )
+            # Open windows BEFORE the await so MA's PLAYER_UPDATED events
+            # fired during play_media see them set — otherwise heartbeat /
+            # _on_ma_player_event would leak `paused=True` into the brief
+            # IDLE window between cmd_stop and the new stream PLAYING.
+            now = time.monotonic()
+            self._drift_suppress_until = now + _DRIFT_SUPPRESS_PERIOD
+            self._re_issue_debounce_until = now + _REISSUE_DEBOUNCE_PERIOD
+            self._expected_phase = HandoffPhase.ACTIVATING
             try:
                 await self.mass.player_queues.play_media(
                     target_player_id, expected_uri, option=QueueOption.REPLACE
@@ -1679,11 +1707,6 @@ class YandexYnisonProvider(PluginProvider):
                 self.logger.exception(
                     "Handoff IDLE-resume play_media failed on %s", target_player_id
                 )
-            now = time.monotonic()
-            # Suppress drift-seek (Ynison echo will lag) AND debounce
-            # further re-issues until MA actually starts playing.
-            self._drift_suppress_until = now + _DRIFT_SUPPRESS_PERIOD
-            self._re_issue_debounce_until = now + _REISSUE_DEBOUNCE_PERIOD
             return  # let the next state-update drive normal flow
 
         try:
@@ -1749,12 +1772,21 @@ class YandexYnisonProvider(PluginProvider):
         # echo the same `paused=True` state multiple times back-to-back.
         if not self._idempotent("pause", target_player_id):
             return
+        # Set expected_phase BEFORE the await — MA fires PLAYER_UPDATED
+        # events while cmd_pause is still resolving, and our event handler
+        # must already see expected_phase=PAUSED so it reports paused=True
+        # to Ynison instead of leaking the stale "still PLAYING" state
+        # (transient ~2s gap between cmd_pause start and queue.state
+        # transitioning to PAUSED).
+        prev_phase = self._expected_phase
+        self._expected_phase = HandoffPhase.PAUSED
         try:
             await self.mass.players.cmd_pause(target_player_id)
         except Exception:
             self.logger.debug("Handoff pause failed on %s", target_player_id, exc_info=True)
-        else:
-            self._expected_phase = HandoffPhase.PAUSED
+            # Roll back the optimistic phase change so future `is_paused`
+            # evaluations don't lie.
+            self._expected_phase = prev_phase
         # Replay corner case (P6): if Ynison parked us at progress=0 and
         # then asked for pause, future end-of-track signalling should fire.
         if self._ynison and self._ynison.state.progress_ms < 1000:
@@ -1828,8 +1860,14 @@ class YandexYnisonProvider(PluginProvider):
                 # the user re-taps play, firing duplicate REPLACE that races
                 # the first. Override to paused=False during that window so
                 # the app stays consistent with our intent (we're starting).
+                # Resolve paused via activation window > expected_phase > queue.state.
                 in_activation_window = time.monotonic() < self._drift_suppress_until
-                is_paused = queue.state != PlaybackState.PLAYING and not in_activation_window
+                if in_activation_window:
+                    is_paused = False
+                elif self._expected_phase == HandoffPhase.PAUSED:
+                    is_paused = True
+                else:
+                    is_paused = queue.state != PlaybackState.PLAYING
                 self.logger.debug(
                     "Handoff heartbeat: tick player=%s elapsed=%dms paused=%s",
                     target_player_id,
@@ -1889,12 +1927,14 @@ class YandexYnisonProvider(PluginProvider):
             if self._expected_phase in (HandoffPhase.ACTIVATING, HandoffPhase.PAUSED):
                 self._expected_phase = HandoffPhase.PLAYING
 
-        # See heartbeat: anything other than PLAYING is reported as paused —
-        # except inside the activation/resume window, where IDLE is just
-        # "stream still loading" and reporting paused=True would make the
-        # Yandex app show pause while we're trying to start.
+        # See heartbeat: resolve paused via activation window > expected_phase > queue.state.
         in_activation_window = time.monotonic() < self._drift_suppress_until
-        is_paused = queue.state != PlaybackState.PLAYING and not in_activation_window
+        if in_activation_window:
+            is_paused = False
+        elif self._expected_phase == HandoffPhase.PAUSED:
+            is_paused = True
+        else:
+            is_paused = queue.state != PlaybackState.PLAYING
         self.mass.create_task(
             self._send_progress_to_ynison(
                 progress_ms=elapsed_ms,
