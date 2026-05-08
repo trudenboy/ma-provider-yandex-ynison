@@ -1624,6 +1624,13 @@ class YandexYnisonProvider(PluginProvider):
             and queue.current_item is not None
             and getattr(queue.current_item, "uri", None) == expected_uri
             and not state.is_paused
+            # Guard: if WE just committed PAUSED via `_handoff_pause`,
+            # don't let a stale Ynison `paused=False` echo route to
+            # IDLE-resume and re-issue REPLACE on a deliberately-paused
+            # player. The `_re_issue_debounce_until` window from the
+            # previous activation may have expired by then; this is the
+            # robust check.
+            and self._expected_phase != HandoffPhase.PAUSED
         ):
             await self._apply_idle_resume(state, target_player_id, expected_uri)
             return
@@ -1730,7 +1737,15 @@ class YandexYnisonProvider(PluginProvider):
                 await self._play_media_task
             except asyncio.CancelledError:
                 # Superseded by a fresher track change — leave the
-                # _expected_track_id as-is for the new invocation.
+                # _expected_track_id as-is for the new invocation, but
+                # roll back the phase/windows so a series of cascaded
+                # cancellations doesn't leave `_expected_phase = ACTIVATING`
+                # and friends pointing at an in-flight task that no
+                # longer exists. The successor invocation will set them
+                # again right before its own await.
+                self._drift_suppress_until = prev_drift
+                self._re_issue_debounce_until = prev_debounce
+                self._expected_phase = prev_phase
                 raise
             except Exception:
                 # play_media failed — don't commit _expected_track_id
@@ -1816,6 +1831,13 @@ class YandexYnisonProvider(PluginProvider):
         self._drift_suppress_until = now + _DRIFT_SUPPRESS_PERIOD
         self._re_issue_debounce_until = now + _REISSUE_DEBOUNCE_PERIOD
         self._expected_phase = HandoffPhase.ACTIVATING
+        # Cancel any still-running play_media task before issuing the new
+        # REPLACE — the cancel-on-track-change invariant from CLAUDE.md
+        # applies here too. The 8s `_re_issue_debounce_until` guard makes
+        # this rare in practice, but a slow `play_media` (>8s) followed
+        # by an IDLE-resume could otherwise race two REPLACEs against
+        # the same MA queue.
+        await self._cancel_pending_play_media()
         try:
             await self.mass.player_queues.play_media(
                 target_player_id, expected_uri, option=QueueOption.REPLACE
@@ -2058,9 +2080,10 @@ class YandexYnisonProvider(PluginProvider):
                 # in-flight stream.
                 if self._expected_phase == HandoffPhase.PAUSED:
                     is_paused = True
-                elif self._expected_phase == HandoffPhase.ACTIVATING:
-                    is_paused = False
-                elif time.monotonic() < self._drift_suppress_until:
+                elif (
+                    self._expected_phase == HandoffPhase.ACTIVATING
+                    or time.monotonic() < self._drift_suppress_until
+                ):
                     is_paused = False
                 else:
                     is_paused = queue.state != PlaybackState.PLAYING
@@ -2160,9 +2183,10 @@ class YandexYnisonProvider(PluginProvider):
         # See heartbeat resolver for the rationale.
         if self._expected_phase == HandoffPhase.PAUSED:
             is_paused = True
-        elif self._expected_phase == HandoffPhase.ACTIVATING:
-            is_paused = False
-        elif time.monotonic() < self._drift_suppress_until:
+        elif (
+            self._expected_phase == HandoffPhase.ACTIVATING
+            or time.monotonic() < self._drift_suppress_until
+        ):
             is_paused = False
         else:
             is_paused = queue.state != PlaybackState.PLAYING
@@ -2188,10 +2212,19 @@ class YandexYnisonProvider(PluginProvider):
         # mid-track (which set PAUSED via `_handoff_pause`). The marker
         # `_handoff_completion_signaled_for` is shared with the primary
         # path so they don't double-fire.
+        # Strictly IDLE — accepting PAUSED here would create a race with
+        # MA-UI-initiated pauses. When the user pauses via MA's web UI
+        # (not the Yandex app), MA's PLAYER_UPDATED fires synchronously
+        # before Ynison's `paused=True` round-trips back through the WS;
+        # `_handoff_pause` hasn't yet committed `_expected_phase = PAUSED`,
+        # so the phase guard above is still True. If the pause lands
+        # near track end, this would falsely trigger completion. PAUSED
+        # → IDLE follow-up will catch the natural end via the second
+        # transition once MA's queue runner clears.
         if (
             state_changed
             and prev_state == PlaybackState.PLAYING
-            and current_state in (PlaybackState.PAUSED, PlaybackState.IDLE)
+            and current_state == PlaybackState.IDLE
             and self._expected_phase == HandoffPhase.PLAYING
             and self._expected_track_id
             and self._handoff_completion_signaled_for != self._expected_track_id
@@ -2200,10 +2233,8 @@ class YandexYnisonProvider(PluginProvider):
             self._handoff_completion_signaled_for = self._expected_track_id
             self._expected_phase = HandoffPhase.ENDING
             self.logger.info(
-                "Handoff: queue PLAYING -> %s on %s near duration — "
-                "signalling natural-end completion to Ynison "
-                "(MEDIA_ITEM_PLAYED fallback)",
-                current_state.value if hasattr(current_state, "value") else current_state,
+                "Handoff: queue PLAYING -> IDLE on %s near duration — "
+                "signalling natural-end completion to Ynison",
                 self._expected_track_id,
             )
             self.mass.create_task(self._signal_track_completion())

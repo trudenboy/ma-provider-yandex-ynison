@@ -115,9 +115,10 @@ Two-way sync uses an explicit phase model. The plugin tracks `_expected_phase: H
 | `PLAYING` | `ACTIVATING` | Transition expected → `PLAYING` (set in `_on_ma_player_event` on first PLAYING tick). |
 | `PLAYING` | `PLAYING` | Steady state; only drift-seek logic runs. |
 | `PAUSED` | `PLAYING` | User paused via MA UI; `_on_ma_player_event` mirrors `paused=True` to Ynison. |
-| `IDLE` | `ENDING` | Natural end-of-track (`elapsed >= duration - 5s`); `_signal_track_completion` to Ynison. |
-| `IDLE` | `PAUSED` | 30s pause watchdog; resume re-issues `play_media + seek` with `_handoff_last_playing_elapsed_ms`. |
-| `IDLE` | `ACTIVATING` | Stream still resolving; `_drift_suppress_until` blocks seeks. |
+| `PAUSED` | `PAUSED` | Steady paused state; on Ynison `paused=False`, `_apply_idle_resume` re-issues `play_media + seek` (queue went to PAUSED on pause for some players; HTTP stream may have closed by then so REPLACE is required to spin it back up). |
+| `IDLE` | `ENDING` | Natural end-of-track (`elapsed >= duration - 5s`); `_signal_track_completion` to Ynison. The PLAYING→IDLE transition itself triggers the signal in `_on_ma_player_event` (and the heartbeat polls every 5s as a fallback when MA's event bus drops the transition). |
+| `IDLE` | `PAUSED` | Watchdog stop after pause (single-track REPLACE queues drop fast); on Ynison `paused=False`, `_apply_idle_resume` re-issues `play_media + seek`. Resume position is `max(_handoff_last_playing_elapsed_ms, state.progress_ms)` via `_pick_resume_position` — local snapshot can be stale after multiple REPLACE cycles, Ynison-progress reflects the user's app position; both compete and the higher one wins. |
+| `IDLE` | `ACTIVATING` | Stream still resolving; `_drift_suppress_until` blocks seeks, heartbeat forces `paused=False` (don't leak transient IDLE during loadup). |
 
 **Echo classification** uses author check on **both** `queue.version.device_id` AND `status.version.device_id`. An incoming state is our echo only when both blocks are authored by our `device_id`. Version-number comparison is intentionally not used — Ynison's protobuf documents `version.version` as `random(int64)` and the server re-stamps it after every outbound `update_playing_status`, so any inbound watermark comparison is meaningless. The earlier v2.0 Lamport-style watermark scaffolding was dead code (the check fell through to author-only regardless) and has been removed; authorship on both blocks is the only reliable echo signal. The AND-logic is critical: a peer queue change paired with our own status echo would otherwise be silently swallowed (RC-1 in v1.9.1 live testing).
 
