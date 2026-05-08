@@ -2,6 +2,35 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.9.1] - 2026-05-08
+
+### Fixed
+- **Handoff: spurious advance after pause on single-track queue.** When the user pressed pause (either in the Yandex Music app or in the MA UI), MA's queue runner reported `IDLE` shortly afterwards because the REPLACE-pushed queue had no upcoming items. The plugin's `_on_ma_player_event` interpreted that IDLE as natural end-of-track and signalled completion to Ynison, which advanced through the RADIO tail and started a cascade of `play_media` calls. Now `_on_ma_player_event` only signals completion when `corrected_elapsed_time >= duration - 5s` (new helper `_is_at_natural_end_of_track`); shorter elapsed values are treated as pause/stop and leave the marker untouched. Conservative on unknown duration / missing `current_item` (does not signal). Live-reproduced and confirmed: pause from Ynison-app and from MA UI both no longer trigger the cascade.
+- **Handoff: heartbeat kept ticking after another device took over.** The `_clear_active_player` branch in `_handle_ynison_state` was gated on `_source_details.in_use_by`, which is always None in handoff (no `AUDIO_SOURCE`). Result: when Ynison re-balanced the active device to the phone, `_active_player_id` stayed set and the heartbeat continued pushing stale MA queue progress to Ynison every 5s. Branch now also fires on `_is_handoff and _active_player_id`.
+- **Handoff: heartbeat reported `paused=False` while MA queue was IDLE/PAUSED.** `is_paused` was computed as `queue.state == PAUSED` — anything else (including IDLE after watchdog) was reported as "playing" to Ynison, which made the Yandex Music app show "playing" with no audio. Changed to `is_paused = queue.state != PLAYING`, so IDLE/PAUSED/UNKNOWN all surface as paused.
+- **Handoff: pause→play in the app could restart the track at 0.** When the queue went IDLE between toggle clicks, IDLE-resume issued `play_media(REPLACE) + seek(state.progress_ms)` — but Ynison's `progress_ms` echo lagged the toggle, so the seek argument was 0. Now we snapshot `corrected_elapsed_time` while `queue.state == PLAYING` (`_handoff_last_playing_elapsed_ms`) and prefer that over Ynison's stale progress.
+- **Handoff: rapid pause/play could trigger many `play_media(REPLACE)` calls per second.** The IDLE-resume branch was unguarded. Added a debounce gate: while `_handoff_grace_until > now`, additional re-issue calls are dropped — MA gets the time it needs to spin up the stream.
+- **Handoff: echo OR-logic silenced legitimate peer actions.** `_parse_state` flagged a state as echo when *either* `player_queue.version` *or* `status.version` was authored by us. A peer (phone) toggling pause produced a state where `status.version=peer` but `player_queue.version` was still ours from the last heartbeat → wrongly classified as echo, and `_handoff_activate` skipped the response. Switched to AND-logic: state is echo only when **both** version-blocks are ours.
+
+### Tests
+- New `tests/test_provider_handoff.py::TestOnMaPlayerEvent` cases:
+  - `test_idle_queue_at_pause_does_not_signal_completion` (regression for the cascade bug);
+  - `test_idle_queue_with_unknown_duration_does_not_signal` (conservative behaviour);
+  - `test_idle_queue_without_current_item_does_not_signal`;
+  - `test_idle_short_track_is_treated_as_near_end` (sub-5s tracks always signal on IDLE).
+- Updated `test_idle_queue_signals_completion_once` to set `current_item.duration` and `corrected_elapsed_time` so it reaches the near-end branch.
+- New `tests/test_ynison_client.py::TestParseState` cases for AND-echo:
+  - `test_echo_flag_true_only_when_both_authors_ours` (positive case);
+  - `test_echo_flag_false_when_only_queue_is_ours` (regression for the OR bug);
+  - `test_echo_flag_false_when_only_status_is_ours` (mirror case).
+- Renamed/restructured the older OR-flavoured echo tests.
+
+### Known limitations (carried into v2.0 refactor)
+- **Quick pause→play toggles can still occasionally restart the track.** The MA single-track queue does not expose a true "pause without watchdog stop"; under fast toggles the queue may transition through IDLE faster than our 3s debounce, causing a re-issue with whatever offset was last snapshotted. The full architectural fix lives in v2.0 (FSM-driven dispatch, idempotent commands, cancel-on-track-change).
+- **30-second pause watchdog**: `mass.player_queues.pause()` in MA core stops the queue (`IDLE`) 30s after pause to release the renderer. After that point we can't simply `play()` the queue — we re-issue `play_media(REPLACE)` with the saved offset. There is a short audible gap while MA spins up the stream again. v2.0 keeps the same approach but inside an explicit FSM so the decision is auditable.
+- **Seek can fail with `MediaNotFoundError`** for individual tracks when MA's `player_queues.seek()` triggers a stream re-resolve and `yandex_music` returns "not available" (track moderated, geo-restricted, or token expired). The plugin logs `Handoff seek failed on <player>` and leaves Ynison/MA in their current positions. Workaround: wait until the next track or re-pick the source in the Yandex app. Mitigation belongs in `yandex_music`, not in this plugin.
+- **`Late binary: skipping N chunk(s)`** warnings can still appear when MA's outer ffmpeg upsamples a 16-bit AAC track inside a session frozen on `s24le` (first lossless track). Fundamentally tied to the session-frozen `PluginSource.audio_format` model — use `playback_mode: handoff` or restart the queue if the warnings get loud.
+
 ## [1.9.0] - 2026-05-08
 
 ### Added
