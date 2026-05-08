@@ -2143,28 +2143,44 @@ class YandexYnisonProvider(PluginProvider):
             )
             self.mass.create_task(self._signal_track_completion())
 
-    @staticmethod
-    def _is_at_natural_end_of_track(queue: Any) -> bool:
+    def _is_at_natural_end_of_track(self, queue: Any) -> bool:
         """Return True iff the queue's elapsed time is close to track duration.
 
         Used to distinguish a queue that went IDLE because the track played
         out (advance needed) from one that went IDLE due to pause/stop on a
-        single-track queue (no advance needed). Conservative: when duration
-        is unknown we return False — better to leave the user paused than to
-        cascade through the RADIO tail.
+        single-track queue (no advance needed). Conservative: when both
+        primary and fallback signals are unavailable we return False —
+        better to leave the user paused than to cascade through the RADIO
+        tail.
+
+        Two checks, in order:
+        1. queue.current_item still set + corrected_elapsed_time near
+           current_item.duration. Canonical case while MA's queue state
+           machine has the item loaded.
+        2. queue cleared (current_item=None): use the last-known PLAYING
+           snapshot (`_handoff_last_playing_elapsed_ms`) against Ynison's
+           reported duration (`_best_duration_ms`). Catches the case
+           where MA's "End of queue reached" cleared current_item before
+           our event handler ran — without it, the natural-end signal
+           never fires and Ynison sits silent waiting for a next-track
+           command we never send.
         """
         current_item = getattr(queue, "current_item", None)
-        if current_item is None:
-            return False
-        duration = getattr(current_item, "duration", None) or 0
-        if duration <= 0:
-            return False
-        elapsed = getattr(queue, "corrected_elapsed_time", 0.0) or 0.0
-        # 5s margin covers fade-out / silence at end-of-track plus reporting
-        # jitter from the player. Track shorter than 5s is treated as "always
-        # near end" — that's fine since pause-then-cascade on sub-5s tracks
-        # is essentially indistinguishable from end-of-track anyway.
-        return elapsed >= max(0.0, duration - 5.0)
+        if current_item is not None:
+            duration = getattr(current_item, "duration", None) or 0
+            if duration > 0:
+                elapsed = getattr(queue, "corrected_elapsed_time", 0.0) or 0.0
+                # 5s margin covers fade-out / silence at end-of-track plus
+                # reporting jitter from the player. Track shorter than 5s
+                # is treated as "always near end" — pause-then-cascade on
+                # sub-5s tracks is indistinguishable from end-of-track.
+                return elapsed >= max(0.0, duration - 5.0)
+        # Fallback: queue cleared before we got the chance to inspect it.
+        duration_ms = self._best_duration_ms()
+        if duration_ms > 0:
+            snapshot_ms = self._handoff_last_playing_elapsed_ms
+            return snapshot_ms >= max(0, duration_ms - 5000)
+        return False
 
     # ------------------------------------------------------------------
     # Playback control callbacks
