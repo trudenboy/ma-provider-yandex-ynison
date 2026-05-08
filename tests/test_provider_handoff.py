@@ -709,15 +709,17 @@ class TestOnMaPlayerEvent:
         assert provider.mass.create_task.call_count == first_call_count
 
     def test_idle_queue_signals_completion_once(self) -> None:
-        """PLAYING→IDLE transition with expected=PLAYING signals completion once."""
+        """PLAYING→IDLE transition near track end signals completion once."""
         provider = self._setup()
         provider._expected_track_id = "track-1"
         provider._expected_phase = HandoffPhase.PLAYING
         provider._handoff_last_seen_state = PlaybackState.PLAYING
-        # Queue just transitioned to IDLE — natural end signal.
+        # Queue just transitioned to IDLE near track end — natural end signal.
         queue = provider.mass.player_queues.get.return_value
         queue.state = PlaybackState.IDLE
-        queue.current_item = None  # MA cleared queue on end-of-queue
+        queue.current_item = MagicMock()
+        queue.current_item.duration = 200
+        queue.corrected_elapsed_time = 199.0  # near end → natural-end
 
         event = MagicMock()
         event.object_id = "player-A"

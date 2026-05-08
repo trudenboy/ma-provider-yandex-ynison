@@ -2110,34 +2110,35 @@ class YandexYnisonProvider(PluginProvider):
             )
         )
 
-        # Detect end-of-track. Single-track REPLACE queues only transition
-        # PLAYING → IDLE for two reasons:
-        # 1. The track played out naturally (stream end → queue runner has
-        #    nothing else, drops to IDLE, clears current_item).
-        # 2. The user paused — but we route pauses through _handoff_pause /
-        #    cmd_pause which moves queue to PAUSED first; PAUSED → IDLE
-        #    after that is the watchdog stop, NOT a natural end. We
-        #    detect this by checking `_expected_phase`: a user pause
-        #    sets it to PAUSED, while a natural end leaves it at PLAYING.
+        # Detect end-of-track. The canonical natural-end signal in handoff
+        # is a queue transition out of PLAYING when:
+        # - we didn't initiate the pause (`_expected_phase == PLAYING`,
+        #   not PAUSED — `_handoff_pause` flips that BEFORE awaiting),
+        # - AND queue.elapsed is close to the track's duration (so a
+        #   user pause mid-track via MA UI doesn't trigger completion).
         #
-        # Direct PLAYING → IDLE transition with `_expected_phase == PLAYING`
-        # is therefore an unambiguous natural-end signal — no need to compare
-        # elapsed-vs-duration (which broke when a seek-near-end caused the
-        # stream to finish before our snapshot accumulated past the
-        # threshold). The transition itself is the signal.
+        # MA can route the natural end through PLAYING → PAUSED first
+        # (sendspin web player paused itself when stream ran out) and
+        # then PAUSED → IDLE when the queue clears 2-6s later. Either
+        # transition counts; we accept current ∈ {PAUSED, IDLE} so we
+        # don't miss the signal at the first hop. Once signalled, we
+        # mark `_handoff_completion_signaled_for` so the second hop
+        # doesn't double-fire.
         if (
             state_changed
             and prev_state == PlaybackState.PLAYING
-            and current_state == PlaybackState.IDLE
+            and current_state in (PlaybackState.PAUSED, PlaybackState.IDLE)
             and self._expected_phase == HandoffPhase.PLAYING
             and self._expected_track_id
             and self._handoff_completion_signaled_for != self._expected_track_id
+            and self._is_at_natural_end_of_track(queue)
         ):
             self._handoff_completion_signaled_for = self._expected_track_id
             self._expected_phase = HandoffPhase.ENDING
             self.logger.info(
-                "Handoff: queue PLAYING -> IDLE on %s — signalling natural-end "
-                "completion to Ynison",
+                "Handoff: queue PLAYING -> %s on %s near duration — signalling "
+                "natural-end completion to Ynison",
+                current_state.value if hasattr(current_state, "value") else current_state,
                 self._expected_track_id,
             )
             self.mass.create_task(self._signal_track_completion())
