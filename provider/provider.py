@@ -759,9 +759,12 @@ class YandexYnisonProvider(PluginProvider):
             await self._activate_playback(state)
         elif is_our_device and state.is_paused:
             if self._is_handoff:
-                target_player_id = self._get_target_player_id()
-                if target_player_id:
-                    await self._handoff_pause(target_player_id)
+                # Pause only the player we already activated. Falling back to
+                # _get_target_player_id() here would auto-select an unrelated
+                # playing player after startup/cleanup and pause the wrong
+                # MA queue (Copilot review).
+                if self._active_player_id:
+                    await self._handoff_pause(self._active_player_id)
             else:
                 # Our device but paused — stop player, keep association
                 await self._pause_playback()
@@ -1101,10 +1104,15 @@ class YandexYnisonProvider(PluginProvider):
         # Stop the handoff heartbeat — there is no active player to report on.
         self._cancel_handoff_heartbeat()
         # Reset handoff bookkeeping so the next activation starts clean.
+        # The progress watermark is the throttle key for both
+        # _on_ma_player_event and _handoff_heartbeat_loop — leaving a stale
+        # value here would suppress the first update of a fresh session
+        # (Copilot review).
         self._handoff_current_track_id = None
         self._handoff_completion_signaled_for = None
         self._handoff_grace_until = 0.0
         self._handoff_last_seen_state = None
+        self._handoff_last_progress_sync_mono = 0.0
 
         if prev_player_id:
             self.logger.debug(
@@ -1391,6 +1399,13 @@ class YandexYnisonProvider(PluginProvider):
             prev_track_id = self._handoff_current_track_id
             self._active_player_id = target_player_id
 
+            # Track whether we successfully owned the new track in MA, so the
+            # heartbeat (P1) only kicks in when we have something coherent to
+            # report. Otherwise a heartbeat after a failed play_media would
+            # keep streaming the previous/idle queue's progress to Ynison and
+            # delay rebalancing away from a non-working device.
+            activated = False
+
             # Dedup (P5): MA already plays the same URI → just update state and
             # return. Saves the cost of a fresh play_media REPLACE which would
             # otherwise restart the stream.
@@ -1405,6 +1420,7 @@ class YandexYnisonProvider(PluginProvider):
                 )
                 self._handoff_current_track_id = new_track
                 self._handoff_completion_signaled_for = None
+                activated = True
             elif (
                 queue is not None
                 and queue.current_item is not None
@@ -1418,8 +1434,10 @@ class YandexYnisonProvider(PluginProvider):
                     await self.mass.player_queues.play(target_player_id)
                 except Exception:
                     self.logger.exception("Handoff resume play() failed on %s", target_player_id)
-                self._handoff_current_track_id = new_track
-                self._handoff_completion_signaled_for = None
+                else:
+                    self._handoff_current_track_id = new_track
+                    self._handoff_completion_signaled_for = None
+                    activated = True
             else:
                 self.logger.info(
                     "Handoff: track changed %s -> %s, calling player_queues.play_media",
@@ -1448,9 +1466,11 @@ class YandexYnisonProvider(PluginProvider):
                     # the same-track branch below — a queue already PLAYING
                     # with elapsed > 1s lets a real user seek pass through.
                     self._handoff_grace_until = time.monotonic() + _ECHO_GRACE_PERIOD
-            # Start heartbeat (P1) on first activation. Idempotent — a running
-            # task is reused.
-            self._ensure_handoff_heartbeat()
+                    activated = True
+            # Start heartbeat (P1) only on a clean activation. Idempotent —
+            # a running task is reused.
+            if activated:
+                self._ensure_handoff_heartbeat()
             return
 
         # Same-track path: drift, pause/resume sync.
