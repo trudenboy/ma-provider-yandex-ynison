@@ -268,6 +268,11 @@ class YandexYnisonProvider(PluginProvider):
         self._seek_grace_until: float = 0.0
         self._last_player_update_time: float = 0.0
         self._actual_duration_ms: int = 0
+        # Captured Yandex source format (FLAC 44.1/16 / 44.1/24 / 48/24
+        # depending on track) — used by `_register_plugin_queue` so the
+        # frontend signal-chain panel can show the full conversion path:
+        # Source → our PCM normalization → MA streams pipeline → player.
+        self._actual_input_format: AudioFormat | None = None
         self._prefetched_list: list[dict[str, Any]] | None = None
         self._prefetch_task: asyncio.Task[Any] | None = None
         self._normalized_params: dict[str, Any] = PCM_LOSSY_PARAMS
@@ -1036,16 +1041,38 @@ class YandexYnisonProvider(PluginProvider):
         dsp = None
         with suppress(Exception):
             dsp = self.mass.streams.audio.get_stream_dsp_details(player_id)
-        # Use our actual normalized output format — same one PluginSource
-        # advertises and ffmpeg pipes — so the quality indicator matches
-        # what the player is really playing (Hi-Res 96/24 etc.).
-        fmt = self._normalized_format
-        audio_format_dict = {
-            "content_type": fmt.content_type.value,
-            "sample_rate": fmt.sample_rate,
-            "bit_depth": fmt.bit_depth,
-            "channels": fmt.channels,
-        }
+        # Build the full signal chain. The frontend renders a chain of
+        # AudioFormat boxes:
+        #   stream_details.audio_format  → input from the source
+        #   stream_details.dsp           → per-stage transformations
+        #   player.extra_data["output_format"] → what the player gets
+        # We populate all three:
+        # - `audio_format`: the actual Yandex CDN stream format (FLAC
+        #   44.1/16, 44.1/24, 48/24, etc. — varies per track), captured
+        #   in `_update_metadata_from_stream`. Falls back to our
+        #   normalized PCM if the source is not yet known (cold start).
+        # - `dsp`: the player's downstream chain from MA's streams
+        #   controller (resampling / replaygain / per-player filters).
+        # - `output_format` (set in `_set_player_output_format`): our
+        #   inner-ffmpeg PCM that we emit through PluginSource.
+        src_fmt = self._actual_input_format
+        if src_fmt is not None:
+            source_format_dict: dict[str, Any] = {
+                "content_type": src_fmt.content_type.value,
+                "sample_rate": src_fmt.sample_rate,
+                "bit_depth": src_fmt.bit_depth,
+                "channels": src_fmt.channels,
+            }
+        else:
+            # Pre-stream: report our normalized PCM as both source
+            # and output (best we have until the first stream starts).
+            fmt = self._normalized_format
+            source_format_dict = {
+                "content_type": fmt.content_type.value,
+                "sample_rate": fmt.sample_rate,
+                "bit_depth": fmt.bit_depth,
+                "channels": fmt.channels,
+            }
         current_item = None
         if metadata:
             duration = int(metadata.duration) if metadata.duration else 0
@@ -1055,7 +1082,7 @@ class YandexYnisonProvider(PluginProvider):
                 "duration": duration,
                 "name": metadata.title or "",
                 "streamdetails": {
-                    "audio_format": audio_format_dict,
+                    "audio_format": source_format_dict,
                     "dsp": dsp,
                 },
             }
@@ -1199,6 +1226,20 @@ class YandexYnisonProvider(PluginProvider):
                 title=f"Yandex Music Connect | {self._display_name}",
             )
         meta = self._source_details.metadata
+        # Capture the source format (Yandex CDN stream) so the signal-chain
+        # panel can render the full conversion path Source → PCM → player.
+        prev_input_format = self._actual_input_format
+        self._actual_input_format = stream_details.audio_format
+        # Refresh the frontend fake queue when the source format changes —
+        # it carries `streamdetails.audio_format`, and a track-change
+        # registration earlier ran before stream details were known
+        # (fell back to our PCM). Re-fire so the panel shows real source.
+        if (
+            self._actual_input_format != prev_input_format
+            and self._active_player_id
+            and not self._is_handoff
+        ):
+            self._register_plugin_queue(self._active_player_id)
         if stream_details.duration:
             meta.duration = stream_details.duration
             self._actual_duration_ms = stream_details.duration * 1000
