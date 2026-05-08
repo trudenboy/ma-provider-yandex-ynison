@@ -393,6 +393,14 @@ class YandexYnisonProvider(PluginProvider):
             with suppress(asyncio.CancelledError):
                 await self._prefetch_task
 
+        # Cancel any in-flight handoff play_media task — otherwise it
+        # keeps running against a partially-torn-down `mass` context
+        # (e.g. config-driven reload or account switch).
+        if self._play_media_task and not self._play_media_task.done():
+            self._play_media_task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await self._play_media_task
+
         # Cancel handoff heartbeat task if still alive.
         heartbeat_task = self._handoff_heartbeat_task
         self._handoff_heartbeat_task = None
@@ -1780,24 +1788,29 @@ class YandexYnisonProvider(PluginProvider):
             await self.mass.player_queues.play_media(
                 target_player_id, expected_uri, option=QueueOption.REPLACE
             )
-            if resume_ms >= 1000:
-                # play_media(REPLACE) starts decoding at 0. Naive seek
-                # alone leaks ~1-2s of "from 0" audio before landing.
-                # Pause-seek-play sequence trades that for brief silence.
-                # Best-effort wrappers — a transient leg failure falls
-                # back to heartbeat / drift-seek recovery paths.
-                with suppress(Exception):
-                    await self.mass.players.cmd_pause(target_player_id)
-                await self.mass.player_queues.seek(target_player_id, resume_ms // 1000)
-                with suppress(Exception):
-                    await self.mass.players.cmd_play(target_player_id)
         except Exception:
-            # Roll back the optimistic window/phase state so subsequent
-            # calls don't mistakenly think we're mid-activation.
+            # play_media itself failed — the stream never started, so
+            # roll back the optimistic window/phase state. Otherwise
+            # the windows would suppress a legitimate retry from the
+            # next Ynison tick.
             self._drift_suppress_until = prev_drift
             self._re_issue_debounce_until = prev_debounce
             self._expected_phase = prev_phase
             self.logger.exception("Handoff IDLE-resume play_media failed on %s", target_player_id)
+            return
+        if resume_ms >= 1000:
+            # play_media(REPLACE) succeeded and starts decoding at 0.
+            # The pause/seek/play sequence trades the audible 0-then-jump
+            # for brief silence. Each leg is best-effort: a transient
+            # failure on cmd_pause / seek / cmd_play does NOT undo the
+            # rolling stream — the windows must stay armed so the next
+            # Ynison tick doesn't fire a duplicate REPLACE racing it.
+            with suppress(Exception):
+                await self.mass.players.cmd_pause(target_player_id)
+            with suppress(Exception):
+                await self.mass.player_queues.seek(target_player_id, resume_ms // 1000)
+            with suppress(Exception):
+                await self.mass.players.cmd_play(target_player_id)
 
     async def _apply_same_track_sync(
         self,
@@ -1892,7 +1905,7 @@ class YandexYnisonProvider(PluginProvider):
         # transitioning to PAUSED).
         prev_phase = self._expected_phase
         self._expected_phase = HandoffPhase.PAUSED
-        # Also ALSO close the drift_suppress window if it was open (a
+        # Also close the drift_suppress window if it was open (a
         # resume that the user is now cancelling) — otherwise the
         # Yandex-app button shows "playing" until the window expires.
         self._drift_suppress_until = 0.0
@@ -2092,21 +2105,49 @@ class YandexYnisonProvider(PluginProvider):
         # upcoming items, the queue runner reports IDLE shortly after pause.
         # Without an end-of-track guard, we'd misread that as completion and
         # trigger Ynison to advance, which then cascades through the RADIO
-        # tail. Gate the signal on `corrected_elapsed_time >= duration - X`
-        # so only a genuine end-of-track triggers it; manual pauses and stops
-        # leave the marker untouched until the next play_media or restart.
+        # tail.
+        #
+        # Two acceptable signals:
+        # 1. queue.current_item still set + corrected_elapsed_time near
+        #    duration — the canonical natural-end check.
+        # 2. queue.current_item gone (MA's "End of queue reached" cleared
+        #    items) AND we observed real playback (`_handoff_last_playing
+        #    _elapsed_ms` past `duration - 5s`). Catches the case where MA
+        #    clears the single-track queue right after the stream ends and
+        #    `_is_at_natural_end_of_track` falls back to False because
+        #    current_item is gone — without this, plugin sits silent
+        #    waiting for Ynison to advance, which Ynison won't do because
+        #    we never told it the track ended.
         if (
             queue.state == PlaybackState.IDLE
             and self._expected_track_id
             and self._handoff_completion_signaled_for != self._expected_track_id
-            and self._is_at_natural_end_of_track(queue)
         ):
-            self._handoff_completion_signaled_for = self._expected_track_id
-            self.logger.info(
-                "Handoff: MA queue IDLE on %s — signalling completion to Ynison",
-                self._expected_track_id,
-            )
-            self.mass.create_task(self._signal_track_completion())
+            should_signal = self._is_at_natural_end_of_track(queue)
+            if not should_signal:
+                # current_item gone — fall back to last-known elapsed snapshot.
+                last_known_elapsed = self._handoff_last_playing_elapsed_ms
+                track_duration = self._best_duration_ms()
+                if (
+                    queue.current_item is None
+                    and track_duration > 0
+                    and last_known_elapsed >= max(0, track_duration - 5000)
+                ):
+                    should_signal = True
+                    self.logger.info(
+                        "Handoff: MA queue empty on %s after %dms played "
+                        "(duration=%dms) — treating as natural end",
+                        self._expected_track_id,
+                        last_known_elapsed,
+                        track_duration,
+                    )
+            if should_signal:
+                self._handoff_completion_signaled_for = self._expected_track_id
+                self.logger.info(
+                    "Handoff: MA queue IDLE on %s — signalling completion to Ynison",
+                    self._expected_track_id,
+                )
+                self.mass.create_task(self._signal_track_completion())
 
     @staticmethod
     def _is_at_natural_end_of_track(queue: Any) -> bool:

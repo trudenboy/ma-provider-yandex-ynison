@@ -119,7 +119,7 @@ Two-way sync uses an explicit phase model. The plugin tracks `_expected_phase: H
 | `IDLE` | `PAUSED` | 30s pause watchdog; resume re-issues `play_media + seek` with `_handoff_last_playing_elapsed_ms`. |
 | `IDLE` | `ACTIVATING` | Stream still resolving; `_drift_suppress_until` blocks seeks. |
 
-**Echo classification** uses Lamport-style version watermarks (`_pending_outbound_queue_version`, `_pending_outbound_status_version`) plus author check on **both** version blocks. An incoming state is our echo only when both are authored by us *and* their inbound versions are `<=` our pending watermarks. Replaces the previous OR-then-AND device-id-only heuristics that misclassified peer state changes.
+**Echo classification** uses author check on **both** `queue.version.device_id` AND `status.version.device_id`. An incoming state is our echo only when both blocks are authored by our `device_id`. Version-number comparison is intentionally not used — Ynison's protobuf documents `version.version` as `random(int64)` and the server re-stamps it after every outbound `update_playing_status`, so any inbound watermark comparison is meaningless. The earlier v2.0 Lamport-style watermark scaffolding was dead code (the check fell through to author-only regardless) and has been removed; authorship on both blocks is the only reliable echo signal. The AND-logic is critical: a peer queue change paired with our own status echo would otherwise be silently swallowed (RC-1 in v1.9.1 live testing).
 
 **Reconnect settle window** (`_post_reconnect_settle_until`, 2s): the first Ynison broadcast after reconnect is dropped to avoid acting on pre-reconnect peer state. `_connect_state` sends a fresh initial state, never the cached `self.state.player_state`.
 
