@@ -225,6 +225,9 @@ class TestHandoffActivate:
         queue = provider.mass.player_queues.get.return_value
         queue.state = PlaybackState.PLAYING
         queue.corrected_elapsed_time = 10.0  # MA at 10s
+        # current_item must be set — drift-seek skips otherwise to avoid
+        # post-completion phantom seeks.
+        queue.current_item = MagicMock()
 
         # Ynison reports 60s — 50s drift, well over the 3s threshold
         state = _make_state("track-1", progress_ms=60_000)
@@ -482,6 +485,7 @@ class TestHandoffActivateExtended:
         queue = provider.mass.player_queues.get.return_value
         queue.state = PlaybackState.PLAYING
         queue.corrected_elapsed_time = 5.0  # > 1s elapsed → override
+        queue.current_item = MagicMock()  # drift-seek requires current_item
 
         await provider._handoff_activate(_make_state("track-1", progress_ms=60_000), "player-A")
         provider.mass.player_queues.seek.assert_awaited_once_with("player-A", 60)
