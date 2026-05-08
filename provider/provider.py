@@ -1497,16 +1497,10 @@ class YandexYnisonProvider(PluginProvider):
 
         Returns one of:
         - ``"ignore"`` — drift below threshold; no seek needed.
-        - ``"queue_rebuild"`` — Ynison's progress is a stale broadcast,
-          not a real user seek. Two patterns:
-          * Backward-zero: Ynison reports near-zero while we're past 5s
-            (RADIO queue rebalance).
-          * Forward-stale: we're still in track startup (<10s) and
-            Ynison reports a position deep in the track (>30s ahead).
-            Ynison's server retains progress across reconnects and
-            briefly broadcasts the previous-session position before
-            our heartbeat reseeds it; honoring that as a seek skips
-            the user past most of the track.
+        - ``"queue_rebuild"`` — Ynison reports near-zero while we're
+          past 5s; treat as a RADIO queue-rebuild echo, not a real
+          user seek (otherwise we'd yank playback back to start
+          mid-track on every queue replenishment).
         - ``"seek"`` — genuine drift; honor it.
 
         Used by both handoff (`_apply_same_track_sync`) and stream
@@ -1517,8 +1511,6 @@ class YandexYnisonProvider(PluginProvider):
         if drift <= threshold_ms:
             return "ignore"
         if ynison_ms < 1000 and our_ms > 5000:
-            return "queue_rebuild"
-        if our_ms < 10_000 and ynison_ms - our_ms > 30_000:
             return "queue_rebuild"
         return "seek"
 

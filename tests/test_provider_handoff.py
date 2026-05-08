@@ -951,18 +951,6 @@ class TestSharedHelpers:
         # pos NOT past 5s → not classified as queue rebuild → 'seek'.
         assert YandexYnisonProvider._classify_drift(0, 4_000) == "seek"
 
-    def test_classify_drift_forward_stale_during_startup(self) -> None:
-        """Ynison forward-stale at startup (server-retained old pos) → rebuild."""
-        # MA at 4s (track just started), Ynison reports 145s (stale from
-        # previous session before reconnect). Drift 141s > threshold,
-        # forward direction, our pos < 10s → queue_rebuild.
-        assert YandexYnisonProvider._classify_drift(145_000, 4_000) == "queue_rebuild"
-
-    def test_classify_drift_user_seek_after_playing(self) -> None:
-        """User seeks forward to 60s after 30s of playback — honor it."""
-        # Our pos = 30s (well past startup), Ynison = 60s → real seek.
-        assert YandexYnisonProvider._classify_drift(60_000, 30_000) == "seek"
-
     def test_pick_resume_position_local_wins_when_higher(self) -> None:
         """Local snapshot > Ynison → use local."""
         ms, source = YandexYnisonProvider._pick_resume_position(
