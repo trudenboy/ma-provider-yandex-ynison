@@ -1,180 +1,104 @@
-# CLAUDE.md — Yandex Ynison Plugin
+<!-- ma-provider-tools: rendered from wrappers/CLAUDE.md.j2 -->
+# CLAUDE.md
 
-## Project overview
+This file aligns development of the **Yandex Music Connect (Ynison)** provider with the
+upstream [`music-assistant/server`](https://github.com/music-assistant/server)
+standards. It is rendered from `wrappers/CLAUDE.md.j2` in
+[`trudenboy/ma-provider-tools`](https://github.com/trudenboy/ma-provider-tools)
+and is kept in sync across every provider repo — **do not edit it here**.
 
-Music Assistant plugin that makes MA players appear as devices in the Yandex
-Music app via the Ynison protocol (Yandex's equivalent of Spotify Connect).
+Provider-specific architecture, key flows, and gotchas live in
+[`CLAUDE.local.md`](./CLAUDE.local.md). Claude Code automatically picks up both
+files when working in this repository.
 
-- **Type**: `PluginProvider` with `ProviderFeature.AUDIO_SOURCE`
-- **Manifest type**: `plugin` (`multi_instance: true`, `depends_on: yandex_music`)
-- **Domain**: `yandex_ynison`
-- **Stage**: `beta` (v2.2.1)
-- **Architecture reference**: `spotify_connect` provider in MA server
+## Development Commands
 
-## Architecture
+- `./scripts/setup.sh` — initial setup (venv via `uv`, dependencies, pre-commit hooks). Re-run after pulling latest code.
+- `uv run pytest` — run all tests
+- `uv run pytest provider/tests/<file>.py` — run a specific test file
+- `uv run ruff check provider/` — lint
+- `uv run ruff format provider/` — auto-format
+- `uv run mypy provider/` — type check
+- `pre-commit run --all-files` — full pre-commit gate
 
-```
-Yandex Music app (phone/web/desktop)
-  │
-  ▼
-Ynison WebSocket  ◄──►  YnisonClient (ynison_client.py)
-  │                         │  two-step: Redirector → State Service
-  │                         │  JSON over WebSocket (gRPC-like framing)
-  ▼
-YandexYnisonProvider (provider.py)
-  │
-  ├─ receives track_id from Ynison PlayerState
-  ├─ resolves StreamDetails via linked yandex_music provider
-  ├─ fetches audio from Yandex CDN (raw or encrypted FLAC/MP3/AAC)
-  ├─ per-track ffmpeg → fixed PCM (s16le or s24le)
-  │
-  ▼
-PluginSource → MA Player (Chromecast / DLNA / AirPlay / etc.)
-  │
-  └─ on play/pause/seek/next/prev → update_playing_status → Ynison
-```
+Always run `pre-commit run --all-files` after a code change to ensure the new
+code adheres to the project standards.
 
-### Key architectural invariants
+## Code Style
 
-- **Passive player**: MA never manipulates `current_playable_index` on
-  auto-advance. Yandex controls the queue; MA signals completion and waits.
-  Exception: RADIO queues where the active device replenishes via REST API.
-- **Session-frozen format**: `get_audio_stream()` freezes `_normalized_params`
-  at session start. Mid-session format changes (e.g. provider reload) only
-  apply on the next session.
-- **Fresh AudioFormat copies**: `AudioFormat` is mutable; MA's ffmpeg mutates
-  `input_format.codec_type` in-place. Every reference (PluginSource,
-  ffmpeg output_format) uses a fresh `make_pcm_format()` copy.
-- **Progress clamped**: Ynison rejects `progress > duration` (error 400030001,
-  disconnects WS). Always `min(progress_ms, duration_ms)` before sending.
-- **Echo detection**: After sending `update_playing_status`, Ynison echoes it
-  back. The plugin tracks last-sent values (±2s / 5s window) to prevent
-  false seek detection.
+### Comments
 
-## Key modules
+Only use comments to explain complex, multi-line blocks of code. Do not comment
+obvious operations.
 
-| File | Purpose |
-|------|---------|
-| `provider/__init__.py` | Setup function, config entries, `SUPPORTED_FEATURES` |
-| `provider/provider.py` | `YandexYnisonProvider(PluginProvider)` — main plugin class |
-| `provider/ynison_client.py` | `YnisonClient` — WebSocket client for Ynison protocol |
-| `provider/streaming.py` | PCM normalization profiles, ffmpeg pacing args |
-| `provider/protocols.py` | `YandexMusicProviderLike` — structural Protocol for yandex_music |
-| `provider/yandex_auth.py` | QR auth + token refresh via `ya-passport-auth` library |
-| `provider/config_helpers.py` | Sibling instance token discovery |
-| `provider/constants.py` | URLs, config keys, defaults, timeouts |
-| `provider/manifest.json` | Plugin metadata |
+### Docstring Format
 
-## Configuration keys
+Use Sphinx-style docstrings with `:param:` syntax. For simple functions, a
+single-line docstring is fine.
 
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `ym_instance` | String (dropdown) | auto | Source of OAuth credentials: a `yandex_music` instance id (borrow), or `__own__` (per-instance own credentials via QR or manual paste) |
-| `token` | SecureString | — | Yandex Music OAuth token (own mode; populated by QR or manual entry) |
-| `x_token` | SecureString | — | Long-lived session token for own-mode reactive 401 refresh (hidden) |
-| `account_login` | String | — | Display login from QR (own mode); shown in the status label (hidden) |
-| `remember_session` | Boolean | `true` | Own mode: store `x_token` after QR for auto-refresh |
-| `mass_player_id` | String | `__auto__` | Target MA player ID or auto-select |
-| `allow_player_switch` | Boolean | `true` | Allow selecting plugin source on any player |
-| `output_sample_rate` | String | `auto` | PCM sample rate: `auto` / `44100` / `48000` / `96000`. Auto adapts to first track via `_prefetch_format_for_track` (lossless 44.1 / 96 kHz preserved). |
-| `output_bit_depth` | String | `auto` | PCM bit depth: `auto` / `16` / `24`. Auto adapts to first track. |
-| `playback_mode` | String | `stream` | `stream` (default, plugin owns audio source) or `handoff` (experimental, MA player_queue plays via yandex_music). Affects `SUPPORTED_FEATURES` at setup. |
-| `handoff_heartbeat_interval` | String (`3`/`5`/`7`/`10`) | `5` | Handoff-only: how often to push `update_playing_status` to Ynison even without MA queue events. Guards against `YNISON_ERROR_REBALANCED`. Ignored in stream mode. |
-| `publish_name` | String | `Music Assistant` | Device name in Yandex Music app |
-| `device_id` | String | auto-generated | 16-char hex, persisted per instance (hidden) |
+Don't explain inner workings of the code in the docstrings (you can use inline
+comments for that if/when needed). The docstring should provide clarity to the
+**caller** of the function/method, not explain how it works
+technically/internally.
 
-Three reachable auth states:
-- **Borrow** — `ym_instance` points at a `yandex_music` instance; tokens read live from there.
-- **Own + x_token** — `ym_instance == __own__`, `x_token` set; reactive 401 refresh works.
-- **Own + token only** — `ym_instance == __own__`, `x_token` empty (manual paste, or QR with Remember session off); expiry needs re-paste/re-QR.
+```python
+def my_function(param1: str, param2: int, param3: bool = False) -> str:
+    """
+    Brief one-line description of the function.
 
-Auto-detection (no hint): `superb`/`lossless` → 24-bit/44.1kHz, else → 16-bit/44.1kHz. With hint from real `stream_details.audio_format` (pre-fetched on `_activate_playback` before `select_source`), auto mode lifts to actual rate (e.g. 96 kHz for Hi-Res). Explicit `output_sample_rate` / `output_bit_depth` always win over the hint.
-
-### Playback modes
-
-- **stream** (default): plugin advertises `AUDIO_SOURCE`, owns a `PluginSource` and emits PCM via `get_audio_stream()` → MA's outer ffmpeg → player. Two ffmpeg passes (inner per-track + outer per-session).
-- **handoff** (experimental): plugin does NOT advertise `AUDIO_SOURCE`. On Ynison track change it calls `mass.player_queues.play_media(player_id, "<yandex_music_instance>://track/<id>", REPLACE)`. MA streams natively through the linked `yandex_music` MusicProvider → no inner ffmpeg, no PCM resampling. Pause/seek/track-end mirror back to Ynison via subscription on `EventType.QUEUE_TIME_UPDATED` / `PLAYER_UPDATED`. Trade-off: looser sync between the Yandex Music app and MA — Spotify Connect avoids this for the same reason (see commented `CONF_HANDOFF_MODE` in `spotify_connect/__init__.py`).
-
-#### Handoff invariants and safety nets
-
-- **URI uses linked instance_id**, not bare `yandex_music://` — picks the correct yandex_music account when both borrow and own coexist (`_build_handoff_uri`).
-- **Heartbeat** (`_handoff_heartbeat_loop`): runs at `handoff_heartbeat_interval` (default 5s, configurable 3–10s). Pushes progress to Ynison even when MA's `QUEUE_TIME_UPDATED` is sparse (DLNA/UPnP), preventing Ynison from re-balancing the active device.
-- **Grace periods** (since v2.1): split into two distinct windows. `_drift_suppress_until` (`_DRIFT_SUPPRESS_PERIOD = 10s`) suppresses drift-driven seeks while MA spins up the stream after `play_media(REPLACE)` or a `seek`; `_re_issue_debounce_until` (`_REISSUE_DEBOUNCE_PERIOD = 8s`) blocks another REPLACE while the previous one is still resolving (prevents the IDLE-resume re-issue loop where each `paused=False` echo would re-fire). Override: a queue already PLAYING with `elapsed > 1s` lets a real user seek pass through. Stream mode still uses the older `_seek_grace_until` / `_ECHO_GRACE_PERIOD = 3s` for track change / seek / same-track resume.
-- **Dedup on reconnect**: before issuing `play_media`, compare `queue.current_item.uri` with the expected URI. Skip when already PLAYING; switch to `cmd_play` when same URI but PAUSED. (`PlaybackState` enum exposes only `IDLE` / `PAUSED` / `PLAYING` / `UNKNOWN` — there is no separate `BUFFERING` state.)
-- **Replay reset** (`progress_ms < 1000`): clears `_handoff_completion_signaled_for` so the next end-of-track will re-signal Ynison.
-- **State-change force-update** (P10): MA queue transitions (PLAYING ↔ PAUSED ↔ IDLE) bypass the 2s progress throttle — pause/play from MA UI reflect in the Yandex Music app within ~100 ms.
-- **Owner conflict**: handoff mode treats the MA queue as owned by Ynison. Starting playback from the Yandex Music app calls `play_media(REPLACE)`, which silently overwrites any queue the user built in MA UI.
-- **Audio quality** in handoff is governed by the `yandex_music` provider's `quality` setting, not by this plugin's `output_sample_rate` / `output_bit_depth` (those apply only to stream mode).
-
-#### Handoff FSM (since v2.0)
-
-Two-way sync uses an explicit phase model. The plugin tracks `_expected_phase: HandoffPhase` (values `IDLE`, `ACTIVATING`, `PLAYING`, `PAUSED`, `ENDING`) alongside `_expected_track_id`. `(MA queue.state, _expected_phase)` is the disambiguation pair:
-
-| MA queue.state | _expected_phase | Action |
-|----------------|-----------------|--------|
-| `PLAYING` | `ACTIVATING` | Transition expected → `PLAYING` (set in `_on_ma_player_event` on first PLAYING tick). |
-| `PLAYING` | `PLAYING` | Steady state; only drift-seek logic runs. |
-| `PAUSED` | `PLAYING` | User paused via MA UI; `_on_ma_player_event` mirrors `paused=True` to Ynison. |
-| `PAUSED` | `PAUSED` | Steady paused state; on Ynison `paused=False`, `_apply_idle_resume` re-issues `play_media + seek` (queue went to PAUSED on pause for some players; HTTP stream may have closed by then so REPLACE is required to spin it back up). |
-| `IDLE` | `ENDING` | Natural end-of-track (`elapsed >= duration - 5s`); `_signal_track_completion` to Ynison. The PLAYING→IDLE transition itself triggers the signal in `_on_ma_player_event` (and the heartbeat polls every 5s as a fallback when MA's event bus drops the transition). |
-| `IDLE` | `PAUSED` | Watchdog stop after pause (single-track REPLACE queues drop fast); on Ynison `paused=False`, `_apply_idle_resume` re-issues `play_media + seek`. Resume position is `max(_handoff_last_playing_elapsed_ms, state.progress_ms)` via `_pick_resume_position` — local snapshot can be stale after multiple REPLACE cycles, Ynison-progress reflects the user's app position; both compete and the higher one wins. |
-| `IDLE` | `ACTIVATING` | Stream still resolving; `_drift_suppress_until` blocks seeks, heartbeat forces `paused=False` (don't leak transient IDLE during loadup). |
-
-**Echo classification** uses author check on **both** `queue.version.device_id` AND `status.version.device_id`. An incoming state is our echo only when both blocks are authored by our `device_id`. Version-number comparison is intentionally not used — Ynison's protobuf documents `version.version` as `random(int64)` and the server re-stamps it after every outbound `update_playing_status`, so any inbound watermark comparison is meaningless. The earlier v2.0 Lamport-style watermark scaffolding was dead code (the check fell through to author-only regardless) and has been removed; authorship on both blocks is the only reliable echo signal. The AND-logic is critical: a peer queue change paired with our own status echo would otherwise be silently swallowed (RC-1 in v1.9.1 live testing).
-
-**Reconnect settle window** (`_post_reconnect_settle_until`, 2s): the first Ynison broadcast after reconnect is dropped to avoid acting on pre-reconnect peer state. `_connect_state` sends a fresh initial state, never the cached `self.state.player_state`.
-
-**Idempotency** (`_idempotent`, TTL `_COMMAND_IDEMPOTENCY_TTL = 1s`): duplicate `(action, key)` pairs (e.g. two pauses for the same player_id within 1s) collapse to a single command. Prevents Ynison-echo storms from issuing the same MA call multiple times.
-
-**Cancel-on-track-change** (`_cancel_pending_play_media`): a still-running `play_media` task is cancelled before issuing a new one. Rapid `next` taps used to fire several back-to-back; cancellation avoids a half-finished load racing the new one.
-
-## Track processing flow
-
-1. **Ynison state update** → `_handle_ynison_state()` determines if our device
-   is active and not paused
-2. **Track change detected** → `_activate_playback()` compares `current_track_id`
-   with `_current_streaming_track_id`, signals `_track_changed_event`
-3. **get_audio_stream()** outer loop:
-   - Streams via `_stream_track()` which fetches StreamDetails
-     (cached 5min, 3 retries with exponential backoff), pipes audio through
-     per-track ffmpeg to fixed PCM format
-   - Progress synced every 5s to both MA metadata and Ynison
-   - PCM frame boundary padding on interruptions
-4. **Track end** → `_signal_track_completion()`:
-   - Sends `progress=duration` to Ynison
-   - For RADIO: replenishes queue via `get_rotor_station_tracks()`
-   - Advances `current_playable_index` via `update_player_state`
-   - Waits for Ynison to confirm new track (ignoring echoes)
-
-## Development setup
-
-```bash
-cd /Users/renso/Projects/ma-provider-yandex-ynison
-scripts/setup.sh       # or: uv sync --extra test
-uv run pytest          # run tests
-uv run ruff check .    # lint
-uv run ruff format .   # format
-uv run mypy            # type check
+    :param param1: Description of what param1 is used for.
+    :param param2: Description of what param2 is used for.
+    :param param3: Description of what param3 is used for.
+    """
 ```
 
-## CI infrastructure
+Do **not** use Google-style (`Args:`) or bullet-style (`- param:`) docstrings.
+AI assistants tend to generate Google-style by default — explicitly steer them
+to Sphinx, and rewrite anything that slips through.
 
-Uses reusable workflows from `trudenboy/ma-provider-tools`:
-- `reusable-test.yml` — pytest, ruff, mypy, codespell
-- `reusable-release.yml` — tag-based releases
-- `reusable-security.yml` — dependency audit
-- `reusable-sync-to-fork.yml` — fork sync for MA server integration
-  - Has TWO sed rewrites for tests: import paths and string literals (mock.patch)
-  - Default target branch: `integration/dev`; for upstream PR use `target_branch=upstream/yandex_ynison`
+## Branching and PRs
 
-## Ynison protocol notes
+- All work-in-progress PRs target `dev` (primary development branch).
+- Before opening a PR: run lint + tests + `pre-commit run --all-files`. CI runs `ruff format --check`, so pushing without `ruff format` is the most common red build.
 
-- Transport: JSON over WebSocket (gRPC-like framing, not binary protobuf)
-- Two-step connection: Redirector → State Service
-- Redirect URL: `wss://ynison.music.yandex.ru/redirector.YnisonRedirectService/GetRedirectToYnison`
-- State URL: `wss://{host}/ynison_state.YnisonStateService/PutYnisonState`
-- Auth: `Authorization: OAuth {token}`, device info in `Sec-WebSocket-Protocol` header
-- Reconnect: exponential backoff (5, 10, 30, 60s saturating) with ±20% jitter, retries indefinitely
-- State merging: top-level sub-object replacement (Ynison sends `player_queue` and `status` as complete objects, so each top-level key is replaced wholesale; top-level keys absent from an update are retained)
-- Radio queue replenishment is done by the active device via REST API — Ynison only syncs state
-- Reference implementations: `bulatorr/go-yaynison` (Go), `FozerG/YandexMusicRPC` (Python)
+## Pull Request Workflow
+
+All non-trivial changes go through a pull request — never push directly to
+`dev`. Inside a PR, follow this loop:
+
+1. **Self-review.** Run at least one self-review pass on the diff (e.g. the
+   `/code-review` skill or an equivalent reviewer) before asking for human
+   review.
+2. **Copilot triage.** Check the PR for GitHub Copilot review comments. For
+   each comment: analyze it, apply a fix when warranted, reply with a short
+   justification, and resolve the thread.
+3. **Version + changelog.** *After* review feedback is addressed, bump the
+   `VERSION` file (PEP 440 — `1.2.0` stable, `1.2.0b1` beta) and add a
+   `CHANGELOG.md` entry — in the same PR. The release pipeline tags and
+   publishes automatically when the new `VERSION` lands on `dev`.
+4. **Ask before merging.** Always request explicit maintainer approval to
+   merge. Do not self-merge or enable auto-merge without it. (Auto-merge is
+   reserved for `distribute.yml`-generated wrapper-sync PRs from
+   `ma-provider-tools`.)
+
+Follow-up commits driven by review (your own pass or Copilot's) land directly
+on the PR branch — no separate PR needed.
+
+## Upstream is Read-Only
+
+Never push to or open PRs against the upstream Music Assistant repo
+(`music-assistant/server` — the true upstream) or the integration fork
+(`trudenboy/ma-server`) without an explicit maintainer instruction. The
+provider repo is the source of truth; sync to the integration fork and
+upstream PR submission run automatically through `ma-provider-tools`
+workflows (`sync-to-fork.yml`, `upstream-pr.yml`).
+
+## Debugging
+
+Music Assistant stores its data in `$HOME/.musicassistant/`. When debugging
+locally:
+
+- **Logs:** `$HOME/.musicassistant/musicassistant.log` (current),
+  `musicassistant.log.1`, `.log.2`, etc. for older rotated logs.
+- **Database:** `$HOME/.musicassistant/library.db` — query via `sqlite3`.
+  **Only execute SELECT queries** — never write to a live database.
