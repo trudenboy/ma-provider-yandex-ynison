@@ -339,6 +339,25 @@ class YnisonClient:
         }
         await self._send(msg)
 
+    async def update_session_params(self, mute_events_if_passive: bool = True) -> None:
+        """Configure session params on the Ynison server.
+
+        `mute_events_if_passive=True` tells Ynison not to forward peer
+        state updates while we're not the active device. Reduces inbound
+        WS noise (and CPU) when running in `borrow` mode alongside other
+        active subscribers, and removes a class of false positives in
+        echo detection — fewer messages means fewer chances to misclassify.
+        """
+        msg = {
+            "update_session_params": {
+                "mute_events_if_passive": mute_events_if_passive,
+            },
+        }
+        self._logger.info(
+            "→ update_session_params: mute_events_if_passive=%s", mute_events_if_passive
+        )
+        await self._send(msg)
+
     async def sync_state_from_eov(self, actual_queue_id: str = "") -> None:
         """Request queue sync from the EOV (Unified Playback Queue) backend.
 
@@ -412,71 +431,42 @@ class YnisonClient:
     _CLOCK_SKEW_BAND_NS: int = 5_000_000_000  # 5 seconds
 
     def _classify_state_as_echo(self, incoming_ps: dict[str, Any]) -> bool:
-        """Return True iff `incoming_ps` is our own broadcast round-tripping."""
+        """Return True iff `incoming_ps` is our own broadcast round-tripping.
+
+        Uses author check on BOTH queue.version.device_id and
+        status.version.device_id — only an update where every block was
+        authored by us is treated as echo. AND-logic is critical: a peer
+        queue change combined with our own status echo would otherwise
+        be silently swallowed (RC-1 in v1.9.1 live testing).
+
+        Why only `device_id` and not `version` value: Ynison's protobuf
+        comment marks `version.version` as `random(int64)`. The server
+        re-stamps it after every `update_playing_status` (we send blank,
+        server fills in). Comparing inbound `version` against an outbound
+        watermark is therefore meaningless — our own restamped echo can
+        carry any value. `device_id` is unique and preserved end-to-end,
+        so authorship is the only reliable echo signal.
+        """
         own_id = self._device_info.device_id
         queue_block = (incoming_ps.get("player_queue") or {}).get("version") or {}
         status_block = (incoming_ps.get("status") or {}).get("version") or {}
-        queue_is_ours = self._block_is_our_echo(
-            queue_block, own_id, self._pending_outbound_queue_version
-        )
-        status_is_ours = self._block_is_our_echo(
-            status_block, own_id, self._pending_outbound_status_version
-        )
+        queue_is_ours = queue_block.get("device_id") == own_id
+        status_is_ours = status_block.get("device_id") == own_id
         return queue_is_ours and status_is_ours
 
-    @classmethod
-    def _block_is_our_echo(
-        cls, version_block: dict[str, Any], own_id: str, pending_watermark: int
-    ) -> bool:
-        """Decide whether one version-block (queue or status) is our echo.
-
-        - Author must be our device_id; otherwise it's a peer/server stamp.
-        - Version must be at or below `pending_watermark` so we know it
-          can't be a fresh peer-driven update riding on a higher version.
-        - Inbound below the watermark by >5 s falls within the clock-skew
-          guard band: still counted as our echo when author matches.
-        """
-        author = version_block.get("device_id")
-        if author is None or author != own_id:
-            return False
-        version_str = version_block.get("version")
-        if not isinstance(version_str, str) or not version_str.isdigit():
-            # Author=ours but no parseable version → safest to treat as echo,
-            # otherwise we keep reacting to our own state being broadcast.
-            return True
-        inbound = int(version_str)
-        if inbound <= pending_watermark:
-            return True
-        # Inbound newer than our watermark but author=ours: server probably
-        # re-stamped (Ynison adds its own time to status.version after we
-        # send `update_playing_status` without a version-block). Update the
-        # watermark so subsequent matching versions are recognised as echo.
-        # We accept it as echo here too — the alternative would be reacting
-        # to our own stale heartbeat as if it were a peer event.
-        return True
-
     def _capture_outbound_versions(self, player_state: dict[str, Any]) -> None:
-        """Record our latest queue/status version timestamps from outbound state.
+        """No-op kept for backwards compatibility with existing call sites.
 
-        Both blocks may include a `version` sub-object whose `version` field
-        is a stringified `time.time_ns()`. We pick the highest value seen
-        for each side and use it as the lower bound for echo detection in
-        `_parse_state`. Skips silently when the field is missing or
-        non-numeric — the watermark stays at its previous value, which is
-        safe (defaults to 0, so we'd never wrongly suppress a peer event).
+        Earlier v2.0 code stamped Lamport-style watermarks here; the
+        underlying comparisons never actually filtered anything (the
+        echo check fell through to author=ours regardless of version),
+        and Ynison's `version.version` is documented as `random(int64)`
+        re-stamped by the server. Author check is sufficient — see
+        `_classify_state_as_echo`. Method retained as a hook in case we
+        later add ring-buffer based equality checks.
         """
-        queue = player_state.get("player_queue") or {}
-        queue_version_str = (queue.get("version") or {}).get("version")
-        if isinstance(queue_version_str, str) and queue_version_str.isdigit():
-            self._pending_outbound_queue_version = max(
-                self._pending_outbound_queue_version, int(queue_version_str)
-            )
-        status = player_state.get("status") or {}
-        status_version_str = (status.get("version") or {}).get("version")
-        if isinstance(status_version_str, str) and status_version_str.isdigit():
-            self._pending_outbound_status_version = max(
-                self._pending_outbound_status_version, int(status_version_str)
-            )
+        # Intentionally empty; see docstring.
+        return
 
     # ------------------------------------------------------------------
     # Connection internals
@@ -617,6 +607,12 @@ class YnisonClient:
             self._logger.info("Reconnect: sending fresh initial state (no stale replay)")
             self._post_reconnect_settle_until = time.monotonic() + 2.0
         await self.send_full_state()
+        # Best-effort: ask the server not to forward peer events while we
+        # are passive. Failure is non-fatal — we just receive more events.
+        try:
+            await self.update_session_params(mute_events_if_passive=True)
+        except Exception:
+            self._logger.debug("update_session_params failed", exc_info=True)
 
         self._has_connected_once = True
 
