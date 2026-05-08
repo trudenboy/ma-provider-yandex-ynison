@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.2.1] - 2026-05-09
+
+### Fixed — typed contract on `player.extra_data["output_format"]`
+
+`_set_player_output_format` now stores a real `AudioFormat` instance
+(fresh copy of `_normalized_format`'s fields) instead of a plain
+dict. MA core writes an `AudioFormat` to this key (see
+`controllers/streams/audio.py:get_player_filter_params`) and
+`DSPDetails.output_format` is typed `AudioFormat | None` — storing
+a dict silently violated the typed contract on the downstream
+readers (`controllers/streams/audio.py:get_player_dsp_details`,
+`controllers/player_queues.py`). Reported on the upstream PR by
+Copilot.
+
 ## [2.2.0] - 2026-05-08
 
 ### Added — first-class MA UI integration for stream mode (opt-in, off by default)
@@ -66,14 +80,6 @@ already integrates with the MA UI through it.
   the next session's first `_register_plugin_queue` from
   showing the previous track's CDN format on the signal-chain
   panel until `_update_metadata_from_stream` re-fires.
-- `_set_player_output_format` now stores a real `AudioFormat`
-  instance on `player.extra_data["output_format"]` instead of a
-  plain dict. MA core writes an `AudioFormat` here (see
-  `controllers/streams/audio.py:get_player_filter_params`) and
-  `DSPDetails.output_format` is typed `AudioFormat | None` —
-  storing a dict silently violates the typed contract on the
-  downstream readers (fixes Copilot review note on the upstream
-  PR).
 
 ### Config UX
 
