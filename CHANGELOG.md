@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.1.1] - 2026-05-08
+
+### Fixed — upstream sync lint compliance
+
+- `tests/test_provider_handoff.py`: added module-level `# mypy: disable-error-code="attr-defined,method-assign"`. The file uses `MagicMock` heavily for `mass.player_queues.*` / `mass.players.*` and accesses runtime mock attributes (`assert_awaited_once`, `return_value`, `call_args`) that don't exist on the typed protocol. Per-line `type: ignore` would be ~50 annotations; one module-level disable is cleaner.
+- `tests/test_config_entries.py`: removed an unused `# type: ignore[arg-type]` comment that mypy flagged as `unused-ignore`.
+
+These were CI-only failures in the upstream `music-assistant/server` fork (its mypy config is stricter than this repo's). Source-repo `pytest`, `ruff`, and `mypy` were all green; the changes are visible only in the synced upstream tests.
+
+### CI sync
+
+`reusable-sync-to-fork.yml` will re-publish to the upstream fork's `upstream/yandex_ynison` branch on next dev push.
+
 ## [2.1.0] - 2026-05-08
 
 ### Live-test driven stabilisation + FSM dispatch refactor
