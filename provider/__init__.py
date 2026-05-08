@@ -16,6 +16,7 @@ from .constants import (
     CONF_ACTION_CLEAR_AUTH,
     CONF_ALLOW_PLAYER_SWITCH,
     CONF_DEVICE_ID,
+    CONF_HANDOFF_HEARTBEAT_INTERVAL,
     CONF_MASS_PLAYER_ID,
     CONF_OUTPUT_BIT_DEPTH,
     CONF_OUTPUT_SAMPLE_RATE,
@@ -26,6 +27,7 @@ from .constants import (
     CONF_X_TOKEN,
     CONF_YM_INSTANCE,
     DEFAULT_DISPLAY_NAME,
+    HANDOFF_HEARTBEAT_DEFAULT,
     OUTPUT_AUTO,
     PLAYBACK_MODE_HANDOFF,
     PLAYBACK_MODE_STREAM,
@@ -332,15 +334,43 @@ async def get_config_entries(  # noqa: PLR0915 — flow naturally returns ~12 Co
                 "Handoff (experimental): the plugin pushes the chosen track into "
                 "Music Assistant's player queue and lets MA stream it natively "
                 "through the linked Yandex Music provider — no extra ffmpeg, no "
-                "PCM resampling. The trade-off is looser sync between the Yandex "
-                "Music app and MA: progress, queue order and pause/resume may "
-                "feel slightly out of step. Spotify Connect intentionally avoids "
-                "this mode for the same reason."
+                "PCM resampling. Spotify Connect intentionally avoids this mode "
+                "(see CONF_HANDOFF_MODE in their provider) for the looser sync "
+                "trade-off described below.\n\n"
+                "Handoff requires a working `yandex_music` music provider in MA — "
+                "without it, play_media() will fail to resolve track URIs.\n\n"
+                "In handoff, the MA player queue is owned by Ynison: starting "
+                "playback from the Yandex Music app will REPLACE any queue you "
+                "built manually in the MA UI, without warning.\n\n"
+                "Audio quality (Hi-Res / lossless) in handoff depends on the "
+                "linked yandex_music provider's quality setting, not on this "
+                "plugin's output_sample_rate / output_bit_depth (those apply "
+                "only to stream mode)."
             ),
             default_value=PLAYBACK_MODE_STREAM,
             options=[
                 ConfigValueOption("Stream (recommended)", PLAYBACK_MODE_STREAM),
                 ConfigValueOption("Handoff (experimental)", PLAYBACK_MODE_HANDOFF),
+            ],
+            advanced=True,
+        ),
+        ConfigEntry(
+            key=CONF_HANDOFF_HEARTBEAT_INTERVAL,
+            type=ConfigEntryType.STRING,
+            label="Handoff progress heartbeat (seconds)",
+            description=(
+                "How often (in seconds) the plugin pushes a fresh `update_playing_status` "
+                "to Ynison while in handoff mode, regardless of MA queue events. Guards "
+                "against the Ynison server re-balancing the active device away from us "
+                "when the player generates QUEUE_TIME_UPDATED events sparsely (typical "
+                "for DLNA/UPnP renderers). Ignored in stream mode."
+            ),
+            default_value=str(int(HANDOFF_HEARTBEAT_DEFAULT)),
+            options=[
+                ConfigValueOption("3 seconds (aggressive)", "3"),
+                ConfigValueOption("5 seconds (default)", "5"),
+                ConfigValueOption("7 seconds", "7"),
+                ConfigValueOption("10 seconds (conservative)", "10"),
             ],
             advanced=True,
         ),

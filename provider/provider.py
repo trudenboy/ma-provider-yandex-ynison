@@ -35,6 +35,7 @@ from .auth import refresh_music_token
 from .constants import (
     CONF_ALLOW_PLAYER_SWITCH,
     CONF_DEVICE_ID,
+    CONF_HANDOFF_HEARTBEAT_INTERVAL,
     CONF_MASS_PLAYER_ID,
     CONF_OUTPUT_BIT_DEPTH,
     CONF_OUTPUT_SAMPLE_RATE,
@@ -44,6 +45,9 @@ from .constants import (
     CONF_X_TOKEN,
     CONF_YM_INSTANCE,
     DEFAULT_DISPLAY_NAME,
+    HANDOFF_HEARTBEAT_DEFAULT,
+    HANDOFF_HEARTBEAT_MAX,
+    HANDOFF_HEARTBEAT_MIN,
     OUTPUT_AUTO,
     PLAYBACK_MODE_HANDOFF,
     PLAYBACK_MODE_STREAM,
@@ -99,6 +103,23 @@ _VALID_SAMPLE_RATES: frozenset[str] = frozenset({"44100", "48000", "96000"})
 _VALID_BIT_DEPTHS: frozenset[str] = frozenset({"16", "24"})
 
 
+def _parse_handoff_heartbeat(raw: Any) -> float:
+    """Coerce config value (str/int/None) to a clamped heartbeat interval (s).
+
+    Accepts string options ("3", "5", "7", "10") from the dropdown as well as
+    legacy int/float values from older configs. Falls back to the default on
+    any unparsable input — the heartbeat is a safety net, not a critical
+    setting, and we don't want it crashing provider load.
+    """
+    if raw is None:
+        return HANDOFF_HEARTBEAT_DEFAULT
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return HANDOFF_HEARTBEAT_DEFAULT
+    return max(HANDOFF_HEARTBEAT_MIN, min(HANDOFF_HEARTBEAT_MAX, value))
+
+
 class YandexYnisonProvider(PluginProvider):
     """Implementation of the Yandex Music Connect (Ynison) Plugin."""
 
@@ -143,6 +164,9 @@ class YandexYnisonProvider(PluginProvider):
         self._playback_mode: str = (
             cast("str", self.config.get_value(CONF_PLAYBACK_MODE)) or PLAYBACK_MODE_STREAM
         )
+        self._handoff_heartbeat_interval: float = _parse_handoff_heartbeat(
+            self.config.get_value(CONF_HANDOFF_HEARTBEAT_INTERVAL)
+        )
 
         # Token source — None = own (manually entered CONF_TOKEN);
         # otherwise the instance_id of a linked yandex_music provider to borrow from.
@@ -184,6 +208,16 @@ class YandexYnisonProvider(PluginProvider):
         self._handoff_current_track_id: str | None = None
         self._handoff_last_progress_sync_mono: float = 0.0
         self._handoff_completion_signaled_for: str | None = None
+        # Grace window after play_media(REPLACE) — suppresses spurious seeks
+        # while MA resolves the stream. Mirrors _seek_grace_until in stream-mode.
+        self._handoff_grace_until: float = 0.0
+        # Last seen MA queue state — drives force-progress on transitions
+        # (P10: bypass throttle on play/pause/idle changes for low-latency
+        # forwarding from MA UI to the Yandex Music app).
+        self._handoff_last_seen_state: PlaybackState | None = None
+        # Independent heartbeat task — guards against Ynison re-balancing the
+        # active device when MA queue events are sparse (DLNA/UPnP).
+        self._handoff_heartbeat_task: asyncio.Task[None] | None = None
 
         # Rate limiter for Yandex API calls (max 2 req/s)
         self._api_throttler = ThrottlerManager(rate_limit=2, period=1.0)
@@ -271,6 +305,14 @@ class YandexYnisonProvider(PluginProvider):
             self._prefetch_task.cancel()
             with suppress(asyncio.CancelledError):
                 await self._prefetch_task
+
+        # Cancel handoff heartbeat task if still alive.
+        heartbeat_task = self._handoff_heartbeat_task
+        self._handoff_heartbeat_task = None
+        if heartbeat_task is not None and not heartbeat_task.done():
+            heartbeat_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await heartbeat_task
 
         if self._ynison:
             await self._ynison.disconnect()
@@ -1038,6 +1080,13 @@ class YandexYnisonProvider(PluginProvider):
         self._prefetched_list = None
         if self._prefetch_task and not self._prefetch_task.done():
             self._prefetch_task.cancel()
+        # Stop the handoff heartbeat — there is no active player to report on.
+        self._cancel_handoff_heartbeat()
+        # Reset handoff bookkeeping so the next activation starts clean.
+        self._handoff_current_track_id = None
+        self._handoff_completion_signaled_for = None
+        self._handoff_grace_until = 0.0
+        self._handoff_last_seen_state = None
 
         if prev_player_id:
             self.logger.debug(
@@ -1253,6 +1302,21 @@ class YandexYnisonProvider(PluginProvider):
     # Handoff mode (experimental)
     # ------------------------------------------------------------------
 
+    def _build_handoff_uri(self, track_id: str) -> str:
+        """Build a Yandex Music URI for handoff `play_media`.
+
+        Use the linked provider's instance_id when known so MA picks the right
+        yandex_music account (matters when borrow + own coexist). Fall back to
+        the bare domain — MA's `parse_uri` accepts both forms.
+        """
+        prov_id = (
+            self._yandex_provider.instance_id
+            if self._yandex_provider is not None
+            and getattr(self._yandex_provider, "instance_id", None)
+            else "yandex_music"
+        )
+        return f"{prov_id}://track/{track_id}"
+
     async def _handoff_activate(self, state: YnisonState, target_player_id: str) -> None:
         """Translate Ynison state into MA player_queue commands (handoff mode).
 
@@ -1270,53 +1334,106 @@ class YandexYnisonProvider(PluginProvider):
         if not new_track:
             return
 
+        # Replay detection (P6): a fresh state with progress < 1s on the same
+        # track means the user reset playback. Reset the completion marker so
+        # the upcoming end-of-track will signal correctly.
+        if state.progress_ms < 1000 and new_track == self._handoff_current_track_id:
+            self._handoff_completion_signaled_for = None
+
         # Ensure pre-fetch primes MA's stream cache for the track. This is
         # cosmetic in handoff (MA fetches its own stream details), but it
         # keeps logs/duration metadata consistent during the transition.
         if new_track != self._handoff_current_track_id and self._yandex_provider:
             await self._prefetch_format_for_track(new_track)
 
+        expected_uri = self._build_handoff_uri(new_track)
+
         if new_track != self._handoff_current_track_id:
-            self.logger.info(
-                "Handoff: track changed %s -> %s, calling player_queues.play_media",
-                self._handoff_current_track_id,
-                new_track,
-            )
+            queue = self.mass.player_queues.get(target_player_id)
             self._handoff_current_track_id = new_track
             self._handoff_completion_signaled_for = None
             self._active_player_id = target_player_id
-            uri = f"yandex_music://track/{new_track}"
-            try:
-                await self.mass.player_queues.play_media(
-                    target_player_id, uri, option=QueueOption.REPLACE
+
+            # Dedup (P5): MA already plays the same URI → just update state and
+            # return. Saves the cost of a fresh play_media REPLACE which would
+            # otherwise restart the stream.
+            if (
+                queue is not None
+                and queue.current_item is not None
+                and getattr(queue.current_item, "uri", None) == expected_uri
+                and queue.state == PlaybackState.PLAYING
+            ):
+                self.logger.debug(
+                    "Handoff: queue already playing %s — skipping play_media", expected_uri
                 )
-            except Exception:
-                self.logger.exception(
-                    "Handoff play_media failed for %s on %s", uri, target_player_id
+            elif (
+                queue is not None
+                and queue.current_item is not None
+                and getattr(queue.current_item, "uri", None) == expected_uri
+                and queue.state == PlaybackState.PAUSED
+            ):
+                # Resume case (P5): same URI but paused — issue play() instead
+                # of play_media to avoid restart.
+                self.logger.info("Handoff: resuming paused queue on %s", expected_uri)
+                try:
+                    await self.mass.player_queues.play(target_player_id)
+                except Exception:
+                    self.logger.exception("Handoff resume play() failed on %s", target_player_id)
+            else:
+                self.logger.info(
+                    "Handoff: track changed %s -> %s, calling player_queues.play_media",
+                    self._handoff_current_track_id,
+                    new_track,
                 )
+                try:
+                    await self.mass.player_queues.play_media(
+                        target_player_id, expected_uri, option=QueueOption.REPLACE
+                    )
+                except Exception:
+                    self.logger.exception(
+                        "Handoff play_media failed for %s on %s",
+                        expected_uri,
+                        target_player_id,
+                    )
+                # Grace period (P2): suppress drift seek detection while MA
+                # resolves the stream and starts playback. Override below if
+                # the queue is already PLAYING with elapsed > 1s, so a real
+                # user seek inside the window still works.
+                self._handoff_grace_until = time.monotonic() + 5.0
+            # Start heartbeat (P1) on first activation. Idempotent — a running
+            # task is reused.
+            self._ensure_handoff_heartbeat()
             return
 
-        # Same track — translate progress drift into seek, pause/resume into
-        # queue.pause/play. Drift threshold mirrors stream mode (3000 ms).
-        try:
-            our_pos_ms = (
-                self.mass.player_queues.get(target_player_id).corrected_elapsed_time * 1000
-                if self.mass.player_queues.get(target_player_id) is not None
-                else 0
-            )
-        except Exception:
-            our_pos_ms = 0
-
+        # Same-track path: drift, pause/resume sync.
         if state.last_update_is_echo:
             return  # ignore our own rebroadcasts
 
-        drift_ms = abs(state.progress_ms - int(our_pos_ms))
+        queue = self.mass.player_queues.get(target_player_id)
+        try:
+            our_pos_ms = int(queue.corrected_elapsed_time * 1000) if queue is not None else 0
+        except Exception:
+            our_pos_ms = 0
+
+        # Grace (P2): suppress drift-seek for the first 5s after play_media,
+        # except when the queue has clearly progressed past the start mark —
+        # in that case a legitimate user seek must still pass through.
+        in_grace = time.monotonic() < self._handoff_grace_until
+        queue_progressed = (
+            queue is not None
+            and queue.state == PlaybackState.PLAYING
+            and queue.corrected_elapsed_time > 1.0
+        )
+        if in_grace and not queue_progressed:
+            return
+
+        drift_ms = abs(state.progress_ms - our_pos_ms)
         if drift_ms > 3000:
             self.logger.info(
                 "Handoff: seek detected on %s (Ynison=%dms, MA=%dms)",
                 new_track,
                 state.progress_ms,
-                int(our_pos_ms),
+                our_pos_ms,
             )
             try:
                 await self.mass.player_queues.seek(target_player_id, state.progress_ms // 1000)
@@ -1325,7 +1442,6 @@ class YandexYnisonProvider(PluginProvider):
 
         # If MA's queue paused while Ynison says playing — resume.
         try:
-            queue = self.mass.player_queues.get(target_player_id)
             if queue is not None and queue.state == PlaybackState.PAUSED:
                 await self.mass.player_queues.play(target_player_id)
         except Exception:
@@ -1337,6 +1453,82 @@ class YandexYnisonProvider(PluginProvider):
             await self.mass.player_queues.pause(target_player_id)
         except Exception:
             self.logger.debug("Handoff pause failed on %s", target_player_id, exc_info=True)
+        # Replay corner case (P6): if Ynison parked us at progress=0 and
+        # then asked for pause, future end-of-track signalling should fire.
+        if self._ynison and self._ynison.state.progress_ms < 1000:
+            self._handoff_completion_signaled_for = None
+
+    def _ensure_handoff_heartbeat(self) -> None:
+        """Start the handoff heartbeat task if not already running."""
+        if self._handoff_heartbeat_task is not None and not self._handoff_heartbeat_task.done():
+            return
+        self._handoff_heartbeat_task = self.mass.create_task(self._handoff_heartbeat_loop())
+
+    def _cancel_handoff_heartbeat(self) -> None:
+        """Cancel the handoff heartbeat task (idempotent)."""
+        task = self._handoff_heartbeat_task
+        self._handoff_heartbeat_task = None
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def _handoff_heartbeat_loop(self) -> None:
+        """Push progress to Ynison on a fixed cadence in handoff mode.
+
+        Ynison may re-balance the active device away from us if we go silent
+        (error 300100001). MA's QUEUE_TIME_UPDATED events arrive sparsely on
+        DLNA/UPnP renderers — so we need an independent timer that keeps the
+        Ynison server informed even when the player itself is quiet.
+
+        The loop reuses ``_handoff_last_progress_sync_mono`` as a watermark:
+        when a real MA event has just sent progress, the heartbeat skips its
+        next tick to avoid double-sending.
+        """
+        try:
+            while True:
+                await asyncio.sleep(self._handoff_heartbeat_interval)
+                if not self._is_handoff:
+                    return
+                if not self._ynison or not self._ynison.connected:
+                    continue
+                target_player_id = self._active_player_id
+                if not target_player_id:
+                    continue
+                queue = self.mass.player_queues.get(target_player_id)
+                if queue is None:
+                    self.logger.debug(
+                        "Handoff heartbeat: queue %s vanished — clearing active player",
+                        target_player_id,
+                    )
+                    self._clear_active_player()
+                    return
+                # Skip if a real MA event just pushed progress within the
+                # heartbeat window — avoid duplicate update_playing_status.
+                now_mono = time.monotonic()
+                if (
+                    now_mono - self._handoff_last_progress_sync_mono
+                    < self._handoff_heartbeat_interval / 2
+                ):
+                    continue
+                self._handoff_last_progress_sync_mono = now_mono
+                elapsed_ms = int(queue.corrected_elapsed_time * 1000)
+                duration_ms = self._best_duration_ms()
+                if duration_ms <= 0 and queue.current_item is not None:
+                    duration_ms = (queue.current_item.duration or 0) * 1000
+                is_paused = queue.state == PlaybackState.PAUSED
+                self.logger.debug(
+                    "Handoff heartbeat: tick player=%s elapsed=%dms paused=%s",
+                    target_player_id,
+                    elapsed_ms,
+                    is_paused,
+                )
+                with suppress(Exception):
+                    await self._send_progress_to_ynison(
+                        progress_ms=elapsed_ms,
+                        duration_ms=duration_ms,
+                        paused=is_paused,
+                    )
+        except asyncio.CancelledError:
+            pass
 
     def _on_ma_player_event(self, event: MassEvent) -> None:
         """Mirror MA queue progress and stop-events back to Ynison (handoff)."""
@@ -1347,15 +1539,26 @@ class YandexYnisonProvider(PluginProvider):
         target_player_id = self._active_player_id
         if not target_player_id or event.object_id != target_player_id:
             return
-        # Throttle — at most one Ynison update every _PROGRESS_SYNC_INTERVAL
-        now_mono = time.monotonic()
-        if now_mono - self._handoff_last_progress_sync_mono < _PROGRESS_SYNC_INTERVAL:
-            return
-        self._handoff_last_progress_sync_mono = now_mono
 
         queue = self.mass.player_queues.get(target_player_id)
         if queue is None:
             return
+
+        # P10: detect playback_state transitions and force a Ynison update
+        # immediately, bypassing the throttle. State changes are rare events
+        # (play/pause/idle), so this never floods the WS.
+        current_state = queue.state
+        state_changed = current_state != self._handoff_last_seen_state
+        self._handoff_last_seen_state = current_state
+
+        # Throttle progress-only updates — at most one every _PROGRESS_SYNC_INTERVAL.
+        now_mono = time.monotonic()
+        if (
+            not state_changed
+            and now_mono - self._handoff_last_progress_sync_mono < _PROGRESS_SYNC_INTERVAL
+        ):
+            return
+        self._handoff_last_progress_sync_mono = now_mono
         elapsed_ms = int(queue.corrected_elapsed_time * 1000)
         duration_ms = self._best_duration_ms()
         if duration_ms <= 0 and queue.current_item is not None:
