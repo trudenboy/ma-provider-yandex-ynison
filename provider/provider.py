@@ -1687,15 +1687,32 @@ class YandexYnisonProvider(PluginProvider):
         if time.monotonic() < self._re_issue_debounce_until:
             return
 
-        # Prefer the elapsed snapshot taken while queue was PLAYING —
-        # Ynison's `progress_ms` echo lags behind a rapid pause/play
-        # toggle in the app and would otherwise restart the track at 0.
-        resume_ms = self._handoff_last_playing_elapsed_ms or state.progress_ms
+        # Pick resume position: prefer the higher of MA's PLAYING snapshot
+        # and Ynison's reported progress.
+        # - Ynison's progress reflects the user's real in-track position
+        #   (set by the Yandex-app when they paused) — authoritative.
+        # - MA's snapshot is reset by every play_media(REPLACE) and only
+        #   accumulates time-since-last-REPLACE, so it stays small after
+        #   a series of pause/play cycles. Trusting the snapshot caused
+        #   resume to land near 0 even when the user paused at 43s in
+        #   the app.
+        # - We still take the max so a fast pause/resume toggle (where
+        #   Ynison's echo lags ours by ~1s) doesn't accidentally reset.
+        ynison_pos = state.progress_ms
+        ma_snapshot = self._handoff_last_playing_elapsed_ms
+        resume_ms = max(ma_snapshot, ynison_pos)
+        source = (
+            "ma_snapshot"
+            if ma_snapshot >= ynison_pos and ma_snapshot > 0
+            else "ynison"
+        )
         self.logger.info(
             "Handoff: queue IDLE on same URI — re-issuing play_media to resume "
-            "(seek=%dms, source=%s)",
+            "(seek=%dms, source=%s, ma_snapshot=%dms, ynison=%dms)",
             resume_ms,
-            "ma_snapshot" if self._handoff_last_playing_elapsed_ms else "ynison",
+            source,
+            ma_snapshot,
+            ynison_pos,
         )
         # Open windows BEFORE the await — see `_apply_track_change` for
         # the rationale. MA's PLAYER_UPDATED events during play_media
