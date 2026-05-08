@@ -8,7 +8,7 @@ Music app via the Ynison protocol (Yandex's equivalent of Spotify Connect).
 - **Type**: `PluginProvider` with `ProviderFeature.AUDIO_SOURCE`
 - **Manifest type**: `plugin` (`multi_instance: true`, `depends_on: yandex_music`)
 - **Domain**: `yandex_ynison`
-- **Stage**: `beta` (v1.9.1)
+- **Stage**: `beta` (v2.1.0)
 - **Architecture reference**: `spotify_connect` provider in MA server
 
 ## Architecture
@@ -99,12 +99,34 @@ Auto-detection (no hint): `superb`/`lossless` → 24-bit/44.1kHz, else → 16-bi
 
 - **URI uses linked instance_id**, not bare `yandex_music://` — picks the correct yandex_music account when both borrow and own coexist (`_build_handoff_uri`).
 - **Heartbeat** (`_handoff_heartbeat_loop`): runs at `handoff_heartbeat_interval` (default 5s, configurable 3–10s). Pushes progress to Ynison even when MA's `QUEUE_TIME_UPDATED` is sparse (DLNA/UPnP), preventing Ynison from re-balancing the active device.
-- **Grace period** (`_handoff_grace_until`, constant `_ECHO_GRACE_PERIOD = 3s`): after `play_media(REPLACE)` we suppress drift-driven seeks for the echo window. The same constant drives stream-mode `_seek_grace_until` after track change / seek / same-track resume. Override: a queue already PLAYING with `elapsed > 1s` lets a real user seek pass through.
-- **Dedup on reconnect**: before issuing `play_media`, compare `queue.current_item.uri` with the expected URI. Skip when already PLAYING; switch to `play()` when same URI but PAUSED. (`PlaybackState` enum exposes only `IDLE` / `PAUSED` / `PLAYING` / `UNKNOWN` — there is no separate `BUFFERING` state.)
+- **Grace periods** (since v2.1): split into two distinct windows. `_drift_suppress_until` (`_DRIFT_SUPPRESS_PERIOD = 10s`) suppresses drift-driven seeks while MA spins up the stream after `play_media(REPLACE)` or a `seek`; `_re_issue_debounce_until` (`_REISSUE_DEBOUNCE_PERIOD = 8s`) blocks another REPLACE while the previous one is still resolving (prevents the IDLE-resume re-issue loop where each `paused=False` echo would re-fire). Override: a queue already PLAYING with `elapsed > 1s` lets a real user seek pass through. Stream mode still uses the older `_seek_grace_until` / `_ECHO_GRACE_PERIOD = 3s` for track change / seek / same-track resume.
+- **Dedup on reconnect**: before issuing `play_media`, compare `queue.current_item.uri` with the expected URI. Skip when already PLAYING; switch to `cmd_play` when same URI but PAUSED. (`PlaybackState` enum exposes only `IDLE` / `PAUSED` / `PLAYING` / `UNKNOWN` — there is no separate `BUFFERING` state.)
 - **Replay reset** (`progress_ms < 1000`): clears `_handoff_completion_signaled_for` so the next end-of-track will re-signal Ynison.
 - **State-change force-update** (P10): MA queue transitions (PLAYING ↔ PAUSED ↔ IDLE) bypass the 2s progress throttle — pause/play from MA UI reflect in the Yandex Music app within ~100 ms.
 - **Owner conflict**: handoff mode treats the MA queue as owned by Ynison. Starting playback from the Yandex Music app calls `play_media(REPLACE)`, which silently overwrites any queue the user built in MA UI.
 - **Audio quality** in handoff is governed by the `yandex_music` provider's `quality` setting, not by this plugin's `output_sample_rate` / `output_bit_depth` (those apply only to stream mode).
+
+#### Handoff FSM (since v2.0)
+
+Two-way sync uses an explicit phase model. The plugin tracks `_expected_phase: HandoffPhase` (values `IDLE`, `ACTIVATING`, `PLAYING`, `PAUSED`, `ENDING`) alongside `_expected_track_id`. `(MA queue.state, _expected_phase)` is the disambiguation pair:
+
+| MA queue.state | _expected_phase | Action |
+|----------------|-----------------|--------|
+| `PLAYING` | `ACTIVATING` | Transition expected → `PLAYING` (set in `_on_ma_player_event` on first PLAYING tick). |
+| `PLAYING` | `PLAYING` | Steady state; only drift-seek logic runs. |
+| `PAUSED` | `PLAYING` | User paused via MA UI; `_on_ma_player_event` mirrors `paused=True` to Ynison. |
+| `PAUSED` | `PAUSED` | Steady paused state; on Ynison `paused=False`, `_apply_idle_resume` re-issues `play_media + seek` (queue went to PAUSED on pause for some players; HTTP stream may have closed by then so REPLACE is required to spin it back up). |
+| `IDLE` | `ENDING` | Natural end-of-track (`elapsed >= duration - 5s`); `_signal_track_completion` to Ynison. The PLAYING→IDLE transition itself triggers the signal in `_on_ma_player_event` (and the heartbeat polls every 5s as a fallback when MA's event bus drops the transition). |
+| `IDLE` | `PAUSED` | Watchdog stop after pause (single-track REPLACE queues drop fast); on Ynison `paused=False`, `_apply_idle_resume` re-issues `play_media + seek`. Resume position is `max(_handoff_last_playing_elapsed_ms, state.progress_ms)` via `_pick_resume_position` — local snapshot can be stale after multiple REPLACE cycles, Ynison-progress reflects the user's app position; both compete and the higher one wins. |
+| `IDLE` | `ACTIVATING` | Stream still resolving; `_drift_suppress_until` blocks seeks, heartbeat forces `paused=False` (don't leak transient IDLE during loadup). |
+
+**Echo classification** uses author check on **both** `queue.version.device_id` AND `status.version.device_id`. An incoming state is our echo only when both blocks are authored by our `device_id`. Version-number comparison is intentionally not used — Ynison's protobuf documents `version.version` as `random(int64)` and the server re-stamps it after every outbound `update_playing_status`, so any inbound watermark comparison is meaningless. The earlier v2.0 Lamport-style watermark scaffolding was dead code (the check fell through to author-only regardless) and has been removed; authorship on both blocks is the only reliable echo signal. The AND-logic is critical: a peer queue change paired with our own status echo would otherwise be silently swallowed (RC-1 in v1.9.1 live testing).
+
+**Reconnect settle window** (`_post_reconnect_settle_until`, 2s): the first Ynison broadcast after reconnect is dropped to avoid acting on pre-reconnect peer state. `_connect_state` sends a fresh initial state, never the cached `self.state.player_state`.
+
+**Idempotency** (`_idempotent`, TTL `_COMMAND_IDEMPOTENCY_TTL = 1s`): duplicate `(action, key)` pairs (e.g. two pauses for the same player_id within 1s) collapse to a single command. Prevents Ynison-echo storms from issuing the same MA call multiple times.
+
+**Cancel-on-track-change** (`_cancel_pending_play_media`): a still-running `play_media` task is cancelled before issuing a new one. Rapid `next` taps used to fire several back-to-back; cancellation avoids a half-finished load racing the new one.
 
 ## Track processing flow
 
