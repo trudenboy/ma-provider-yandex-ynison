@@ -2015,12 +2015,19 @@ class YandexYnisonProvider(PluginProvider):
                 # the user re-taps play, firing duplicate REPLACE that races
                 # the first. Override to paused=False during that window so
                 # the app stays consistent with our intent (we're starting).
-                # Resolve paused: expected_phase=PAUSED > activation window > queue.state.
-                # PAUSED takes precedence so a user pause inside the activation
-                # window doesn't leave the Ynison-app button "unresponsive" for
-                # up to 10s (heartbeat would otherwise keep echoing False).
+                # Resolve paused: PAUSED > ACTIVATING > activation window > queue.state.
+                # PAUSED first so a user pause inside the activation window
+                # is reflected immediately. ACTIVATING second so a slow
+                # play_media (e.g. ~15s on Hi-Res FLAC + slow CDN, post-
+                # auto-advance) doesn't time out the activation window
+                # and start reporting paused=True while the stream is
+                # still starting — Ynison-app would otherwise flip to
+                # "paused" mid-load and the user's next tap races the
+                # in-flight stream.
                 if self._expected_phase == HandoffPhase.PAUSED:
                     is_paused = True
+                elif self._expected_phase == HandoffPhase.ACTIVATING:
+                    is_paused = False
                 elif time.monotonic() < self._drift_suppress_until:
                     is_paused = False
                 else:
@@ -2085,13 +2092,12 @@ class YandexYnisonProvider(PluginProvider):
             if self._expected_phase in (HandoffPhase.ACTIVATING, HandoffPhase.PAUSED):
                 self._expected_phase = HandoffPhase.PLAYING
 
-        # Resolve paused: same priority order as heartbeat —
-        # expected_phase=PAUSED > activation_window > queue.state.
-        # PAUSED takes precedence so a user pause inside the activation
-        # window is reported correctly to Ynison instead of leaking the
-        # transient is_paused=False from the activation grace.
+        # Resolve paused: PAUSED > ACTIVATING > activation window > queue.state.
+        # See heartbeat resolver for the rationale.
         if self._expected_phase == HandoffPhase.PAUSED:
             is_paused = True
+        elif self._expected_phase == HandoffPhase.ACTIVATING:
+            is_paused = False
         elif time.monotonic() < self._drift_suppress_until:
             is_paused = False
         else:
