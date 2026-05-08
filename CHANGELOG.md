@@ -59,10 +59,24 @@ Cleaned up the v2.0 Lamport-style version-watermark code. Research of go-yayniso
 
 New `YnisonClient.update_session_params` method, called automatically right after `send_full_state` on every connection. Tells Ynison's server not to forward peer state updates while we're not the active device, reducing inbound noise (and CPU) in borrow mode alongside other subscribers and removing a class of false positives in echo classification (fewer messages → fewer chances to misclassify).
 
+### Added — shared helpers between stream and handoff modes
+
+Two static helpers extracted to centralise duplicated logic and bring stream-mode parity for fixes previously only in handoff:
+
+- `_classify_drift(ynison_ms, our_ms, threshold_ms=3000)` returns one of `"ignore"` / `"queue_rebuild"` / `"seek"`. The queue-rebuild guard (Ynison reports near-zero while local position is past 5s → not a real seek) is now applied to stream mode too — RADIO replenishment used to yank the stream player back to the start mid-track on every queue rebalance, just like handoff before v2.1. Used in both `_activate_playback` (stream) and `_apply_same_track_sync` (handoff).
+- `_pick_resume_position(local_snapshot_ms, ynison_progress_ms)` returns `(resume_ms, source)`. Takes max of local snapshot and Ynison-reported progress so a stale local accumulator (handoff: reset by every play_media REPLACE; stream: reset by network blip) never beats the user-authoritative Ynison position. Used in `_apply_idle_resume`.
+
+Idempotency cache extended to stream-mode `_on_play` / `_on_pause` callbacks: a duplicate MA pause/play event within 1s collapses to a single `update_playing_status` Ynison call.
+
+### Live-test validated
+
+Pause / resume / next / prev / seek confirmed working correctly in both `playback_mode: stream` and `playback_mode: handoff` after v2.1 refactor + shared helpers.
+
 ### Tests
 
-- All 274 v2.0 tests pass after refactor; behaviour preserved.
-- TestHandoffPause / TestHandoffActivate / TestHandoffIdempotency updated to assert against `players.cmd_pause` / `players.cmd_play` rather than `player_queues.pause` / `play`.
+- 283 tests pass (up from 274 in v2.0).
+- New `TestSharedHelpers` (9 cases): drift threshold edges, queue-rebuild detection, max-position picker, equal/zero edge cases.
+- `TestHandoffPause` / `TestHandoffActivate` / `TestHandoffIdempotency` updated to assert against `players.cmd_pause` / `players.cmd_play` rather than `player_queues.pause` / `play`.
 
 ## [2.0.0] - 2026-05-08
 
