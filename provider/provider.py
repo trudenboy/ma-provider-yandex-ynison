@@ -1681,6 +1681,11 @@ class YandexYnisonProvider(PluginProvider):
             # would restart the stream and trigger the watchdog → IDLE
             # drop on long pauses).
             self.logger.info("Handoff: resuming paused queue on %s", expected_uri)
+            # Open a short drift-suppress window — cmd_play takes 100-500ms
+            # to land, during which `_apply_same_track_sync` could see a
+            # stale Ynison progress echo and fire a spurious seek.
+            self._drift_suppress_until = time.monotonic() + _DRIFT_SUPPRESS_PERIOD
+            self._expected_phase = HandoffPhase.ACTIVATING
             try:
                 await self.mass.players.cmd_play(target_player_id)
             except Exception:
@@ -2078,9 +2083,16 @@ class YandexYnisonProvider(PluginProvider):
                 # for the state change). Heartbeat tick fires every
                 # ≤5s reliably, so doing the same check here fills the
                 # gap. Idempotent via `_handoff_completion_signaled_for`.
+                # IDLE only — accepting PAUSED here would create a tiny
+                # race where a user pause near end-of-track lands before
+                # `_handoff_pause` commits `_expected_phase = PAUSED`,
+                # firing a false-positive completion. The
+                # `_on_ma_player_event` path uses `_expected_phase` as
+                # the user-pause filter; the heartbeat uses queue.state
+                # directly because it can fire BEFORE the phase commit.
                 if (
                     self._expected_phase == HandoffPhase.PLAYING
-                    and queue.state != PlaybackState.PLAYING
+                    and queue.state == PlaybackState.IDLE
                     and self._expected_track_id
                     and self._handoff_completion_signaled_for != self._expected_track_id
                     and self._is_at_natural_end_of_track(queue)
