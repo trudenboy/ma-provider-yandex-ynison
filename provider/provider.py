@@ -1483,6 +1483,13 @@ class YandexYnisonProvider(PluginProvider):
         self._handoff_last_progress_sync_mono = 0.0
         self._handoff_last_playing_elapsed_ms = 0
         self._command_idempotency.clear()
+        # Drop the captured CDN source format too — leaving it set would
+        # make the next session's first `_register_plugin_queue` (fired
+        # before the new stream's `_update_metadata_from_stream` runs)
+        # show the previous track's quality on the signal-chain panel
+        # until the re-fire corrects it. None falls back to the
+        # documented cold-start behaviour (PCM as source = output).
+        self._actual_input_format = None
 
         if prev_player_id:
             self.logger.debug(
