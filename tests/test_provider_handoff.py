@@ -78,6 +78,8 @@ def _make_mock_mass() -> MagicMock:
     mass.players.get_player = MagicMock(return_value=fake_player)
     mass.players.select_source = AsyncMock()
     mass.players.cmd_stop = AsyncMock()
+    mass.players.cmd_pause = AsyncMock()
+    mass.players.cmd_play = AsyncMock()
     mass.players.trigger_player_update = MagicMock()
 
     # player_queues — the handoff target
@@ -245,7 +247,12 @@ class TestHandoffActivate:
         provider.mass.player_queues.seek.assert_not_awaited()
 
     async def test_paused_queue_resumes_when_ynison_says_playing(self) -> None:
-        """If MA queue is paused while Ynison says playing, resume the queue."""
+        """If MA queue is paused while Ynison says playing, resume via cmd_play.
+
+        Uses `mass.players.cmd_play` (not `player_queues.play`) so the queue
+        stays in PAUSED state instead of triggering MA's _watch_pause
+        watchdog → IDLE → REPLACE-loop on the next pause.
+        """
         provider = _make_handoff_provider()
         provider._expected_track_id = "track-1"
         queue = provider.mass.player_queues.get.return_value
@@ -255,7 +262,8 @@ class TestHandoffActivate:
         state = _make_state("track-1", progress_ms=10_000)
         await provider._handoff_activate(state, "player-A")
 
-        provider.mass.player_queues.play.assert_awaited_once_with("player-A")
+        provider.mass.players.cmd_play.assert_awaited_once_with("player-A")
+        provider.mass.player_queues.play.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -263,15 +271,20 @@ class TestHandoffPause:
     """Pause translation."""
 
     async def test_handoff_pause_calls_queue_pause(self) -> None:
-        """Ynison pause translates to player_queues.pause on the active player."""
+        """Ynison pause translates to players.cmd_pause on the active player.
+
+        Uses cmd_pause directly (not player_queues.pause) so queue stays
+        in PAUSED state — see _handoff_pause docstring for the rationale.
+        """
         provider = _make_handoff_provider()
         await provider._handoff_pause("player-A")
-        provider.mass.player_queues.pause.assert_awaited_once_with("player-A")
+        provider.mass.players.cmd_pause.assert_awaited_once_with("player-A")
+        provider.mass.player_queues.pause.assert_not_awaited()
 
     async def test_handoff_pause_swallows_errors(self) -> None:
-        """Failures inside player_queues.pause must not propagate to Ynison handler."""
+        """Failures inside cmd_pause must not propagate to Ynison handler."""
         provider = _make_handoff_provider()
-        provider.mass.player_queues.pause = AsyncMock(side_effect=Exception("boom"))
+        provider.mass.players.cmd_pause = AsyncMock(side_effect=Exception("boom"))
         # Must not raise
         await provider._handoff_pause("player-A")
 
@@ -306,10 +319,12 @@ class TestHandoffPause:
 
         await provider._handle_ynison_state(state)
 
+        # No active player → neither cmd_pause nor queue.pause should fire.
+        provider.mass.players.cmd_pause.assert_not_awaited()
         provider.mass.player_queues.pause.assert_not_awaited()
 
     async def test_paused_state_uses_active_player_id(self) -> None:
-        """When _active_player_id is set, pause is routed to that player."""
+        """When _active_player_id is set, pause is routed via cmd_pause."""
         provider = _make_handoff_provider()
         provider._active_player_id = "player-A"
 
@@ -332,7 +347,7 @@ class TestHandoffPause:
 
         await provider._handle_ynison_state(state)
 
-        provider.mass.player_queues.pause.assert_awaited_once_with("player-A")
+        provider.mass.players.cmd_pause.assert_awaited_once_with("player-A")
 
 
 @pytest.mark.asyncio
@@ -422,7 +437,12 @@ class TestHandoffActivateExtended:
         assert provider._expected_track_id == "track-Z"
 
     async def test_resume_via_play_when_queue_paused_with_same_uri(self) -> None:
-        """Same URI but PAUSED → call play(), not play_media()."""
+        """Same URI but PAUSED → call cmd_play, not play_media().
+
+        Resume path goes through `players.cmd_play` rather than
+        `player_queues.play` so the queue stays in PAUSED state and we
+        don't trigger MA's pause watchdog into IDLE.
+        """
         provider = _make_handoff_provider()
         provider._yandex_provider = None
         queue = provider.mass.player_queues.get.return_value
@@ -433,7 +453,8 @@ class TestHandoffActivateExtended:
         await provider._handoff_activate(_make_state("track-Z"), "player-A")
 
         provider.mass.player_queues.play_media.assert_not_awaited()
-        provider.mass.player_queues.play.assert_awaited_once_with("player-A")
+        provider.mass.players.cmd_play.assert_awaited_once_with("player-A")
+        provider.mass.player_queues.play.assert_not_awaited()
 
     async def test_grace_blocks_drift_seek_after_play_media(self) -> None:
         """Drift seek is suppressed inside the drift-suppress window after play_media."""
@@ -789,7 +810,7 @@ class TestHandoffIdempotency:
         await provider._handoff_pause("player-A")
         await provider._handoff_pause("player-A")
         # Second pause is a duplicate — Ynison echoed the same `paused=True`.
-        provider.mass.player_queues.pause.assert_awaited_once_with("player-A")
+        provider.mass.players.cmd_pause.assert_awaited_once_with("player-A")
 
     async def test_pause_after_ttl_expires_is_reissued(self) -> None:
         """A pause that arrives after the idempotency window goes through again."""
@@ -799,7 +820,7 @@ class TestHandoffIdempotency:
         for key in list(provider._command_idempotency.keys()):
             provider._command_idempotency[key] -= 10.0
         await provider._handoff_pause("player-A")
-        assert provider.mass.player_queues.pause.await_count == 2
+        assert provider.mass.players.cmd_pause.await_count == 2
 
     async def test_play_media_duplicate_track_change_skipped(self) -> None:
         """Same `(track, play_media)` within TTL doesn't re-issue play_media."""
@@ -898,10 +919,10 @@ class TestHandoffFsmTransitions:
         assert provider._expected_phase == HandoffPhase.PAUSED
 
     async def test_pause_failure_does_not_advance_phase(self) -> None:
-        """If pause raises, expected_phase stays where it was."""
+        """If cmd_pause raises, expected_phase stays where it was."""
         provider = _make_handoff_provider()
         provider._expected_phase = HandoffPhase.PLAYING
-        provider.mass.player_queues.pause = AsyncMock(side_effect=Exception("boom"))
+        provider.mass.players.cmd_pause = AsyncMock(side_effect=Exception("boom"))
         await provider._handoff_pause("player-A")
         # Despite the exception, idempotency cache prevents retries — but
         # phase MUST NOT have transitioned to PAUSED on failure.

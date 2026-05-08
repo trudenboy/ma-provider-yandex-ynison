@@ -117,10 +117,15 @@ _ECHO_GRACE_PERIOD = 3.0
 # branch only; a separate constant keeps the intent clear.
 _DRIFT_SUPPRESS_PERIOD = 5.0
 
-# Re-issue debounce: how long after IDLE-resume play_media we refuse to
-# fire another play_media(REPLACE), giving MA's queue runner time to
-# actually start the stream before we react to the next IDLE-state echo.
-_REISSUE_DEBOUNCE_PERIOD = 3.0
+# Re-issue debounce: how long after a play_media (initial or IDLE-resume)
+# we refuse to fire another play_media(REPLACE). 8s comfortably covers
+# real Chromecast/DLNA/web-player startup latency (typically 4-6s) so a
+# stream of `paused=False` echoes from Ynison while MA is still spinning
+# the stream up doesn't trigger duplicate REPLACEs that race the first.
+# Three seconds turned out to be too short — heartbeat at T+3.5s reported
+# `paused=True` (queue still IDLE), Ynison-app showed pause, user re-tapped
+# play, second REPLACE fired, which raced the first. See PR #48 live test.
+_REISSUE_DEBOUNCE_PERIOD = 8.0
 
 # Idempotency cache TTL for outbound peer-commands (1 s). A second
 # `_apply_*` call carrying the same `(action, track_id)` key inside this
@@ -1551,13 +1556,16 @@ class YandexYnisonProvider(PluginProvider):
                 and getattr(queue.current_item, "uri", None) == expected_uri
                 and queue.state == PlaybackState.PAUSED
             ):
-                # Resume case (P5): same URI but paused — issue play() instead
-                # of play_media to avoid restart.
+                # Resume case (P5): same URI but paused — issue cmd_play
+                # directly on the player (no queue.play_media REPLACE that
+                # would restart the stream). Bypasses queue's _watch_pause
+                # watchdog as well, keeping the queue in PAUSED state for
+                # long pauses instead of dropping to IDLE after 30s.
                 self.logger.info("Handoff: resuming paused queue on %s", expected_uri)
                 try:
-                    await self.mass.player_queues.play(target_player_id)
+                    await self.mass.players.cmd_play(target_player_id)
                 except Exception:
-                    self.logger.exception("Handoff resume play() failed on %s", target_player_id)
+                    self.logger.exception("Handoff resume cmd_play failed on %s", target_player_id)
                 else:
                     self._expected_track_id = new_track
                     self._handoff_completion_signaled_for = None
@@ -1715,23 +1723,34 @@ class YandexYnisonProvider(PluginProvider):
                 except Exception:
                     self.logger.exception("Handoff seek failed on %s", target_player_id)
 
-        # If MA's queue paused while Ynison says playing — resume.
+        # If MA's queue paused while Ynison says playing — resume directly
+        # via cmd_play (no queue.play_media REPLACE) to keep playback fast
+        # and avoid the watchdog → IDLE drop on long pauses.
         try:
             if queue is not None and queue.state == PlaybackState.PAUSED:
-                await self.mass.player_queues.play(target_player_id)
+                await self.mass.players.cmd_play(target_player_id)
         except Exception:
             self.logger.debug("Handoff resume sync skipped", exc_info=True)
 
     async def _handoff_pause(self, target_player_id: str) -> None:
-        """Pause MA queue when Ynison reports paused (handoff mode)."""
+        """Pause MA queue when Ynison reports paused (handoff mode).
+
+        Uses `mass.players.cmd_pause` rather than `mass.player_queues.pause`
+        deliberately. The queue-level pause schedules a `_watch_pause`
+        watchdog that calls `stop()` after 30s, dropping queue.state to
+        IDLE — and a single-track REPLACE queue actually trips this
+        watchdog within seconds, not 30. Once the queue is IDLE, every
+        resume requires a fresh `play_media(REPLACE)` (3-5s of silence)
+        instead of an instant `cmd_play`. Calling cmd_pause directly
+        keeps queue.state == PAUSED for as long as the user wants and
+        lets resume go through the fast path.
+        """
         # Suppress duplicate pause within the idempotency TTL — Ynison may
-        # echo the same `paused=True` state multiple times back-to-back, and
-        # MA's `player_queues.pause` is cheap but not free; double-issuing it
-        # also generates extra MA → Ynison round-trips for no reason.
+        # echo the same `paused=True` state multiple times back-to-back.
         if not self._idempotent("pause", target_player_id):
             return
         try:
-            await self.mass.player_queues.pause(target_player_id)
+            await self.mass.players.cmd_pause(target_player_id)
         except Exception:
             self.logger.debug("Handoff pause failed on %s", target_player_id, exc_info=True)
         else:
@@ -1801,7 +1820,16 @@ class YandexYnisonProvider(PluginProvider):
                 # MA queues land in IDLE on pause, not PAUSED, and reporting
                 # paused=False in that case made the Yandex Music app think
                 # we kept playing while the player was actually silent.
-                is_paused = queue.state != PlaybackState.PLAYING
+                #
+                # Exception: while we're still inside the activation/resume
+                # window (`_drift_suppress_until > now`) the queue is briefly
+                # IDLE because MA hasn't started the stream yet — reporting
+                # paused=True in that gap makes Ynison-app show "paused" and
+                # the user re-taps play, firing duplicate REPLACE that races
+                # the first. Override to paused=False during that window so
+                # the app stays consistent with our intent (we're starting).
+                in_activation_window = time.monotonic() < self._drift_suppress_until
+                is_paused = queue.state != PlaybackState.PLAYING and not in_activation_window
                 self.logger.debug(
                     "Handoff heartbeat: tick player=%s elapsed=%dms paused=%s",
                     target_player_id,
@@ -1861,8 +1889,12 @@ class YandexYnisonProvider(PluginProvider):
             if self._expected_phase in (HandoffPhase.ACTIVATING, HandoffPhase.PAUSED):
                 self._expected_phase = HandoffPhase.PLAYING
 
-        # See heartbeat: anything other than PLAYING is reported as paused.
-        is_paused = queue.state != PlaybackState.PLAYING
+        # See heartbeat: anything other than PLAYING is reported as paused —
+        # except inside the activation/resume window, where IDLE is just
+        # "stream still loading" and reporting paused=True would make the
+        # Yandex app show pause while we're trying to start.
+        in_activation_window = time.monotonic() < self._drift_suppress_until
+        is_paused = queue.state != PlaybackState.PLAYING and not in_activation_window
         self.mass.create_task(
             self._send_progress_to_ynison(
                 progress_ms=elapsed_ms,
