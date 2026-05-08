@@ -379,17 +379,15 @@ class YandexYnisonProvider(PluginProvider):
                     (EventType.QUEUE_TIME_UPDATED, EventType.PLAYER_UPDATED),
                 )
             )
-            # MEDIA_ITEM_PLAYED is MA's authoritative end-of-track signal
-            # (fires from `player_queues._track_played` after a media item
-            # finishes playing — used by scrobbling plugins). Strictly
-            # unambiguous: not based on elapsed-vs-duration heuristics
-            # and not racing with queue.current_item being cleared.
-            self._on_unload_callbacks.append(
-                self.mass.subscribe(
-                    self._on_ma_media_item_played,
-                    (EventType.MEDIA_ITEM_PLAYED,),
-                )
-            )
+            # NOTE: MEDIA_ITEM_PLAYED was tried as a primary natural-end
+            # signal but turned out unreliable: MA fires it whenever its
+            # internal "fully played" heuristic decides a track is done
+            # (>= 90% playback time), and that heuristic confuses the
+            # seek-on-activation flow into firing within ~30s of starting
+            # a 4-minute track. Stick with the queue state-transition
+            # fallback in `_on_ma_player_event` (PLAYING → PAUSED/IDLE +
+            # `_is_at_natural_end_of_track`) which uses our own snapshot
+            # of the last-known PLAYING elapsed time.
             self.logger.info(
                 "Playback mode: HANDOFF — MA player_queue will own audio "
                 "(experimental, expect looser app sync)"
@@ -2075,38 +2073,6 @@ class YandexYnisonProvider(PluginProvider):
                     )
         except asyncio.CancelledError:
             pass
-
-    def _on_ma_media_item_played(self, event: MassEvent) -> None:
-        """Signal track completion to Ynison on MEDIA_ITEM_PLAYED.
-
-        Authoritative end-of-track event from MA's queue runner — fires
-        when the media item finished playing (not on pause / stop / seek).
-        Match against `_expected_track_id` via the URI to avoid signalling
-        completion for tracks the plugin didn't activate.
-        """
-        if not self._is_handoff:
-            return
-        if not self._ynison or not self._ynison.connected:
-            return
-        if not self._expected_track_id:
-            return
-        # event.object_id is the played media_item.uri (e.g.
-        # "yandex_music://track/123"). We synthesise the same URI for the
-        # current expected track and compare verbatim — guards against
-        # cross-talk from other queues / providers.
-        played_uri = event.object_id
-        expected_uri = self._build_handoff_uri(self._expected_track_id)
-        if played_uri != expected_uri:
-            return
-        if self._handoff_completion_signaled_for == self._expected_track_id:
-            return
-        self._handoff_completion_signaled_for = self._expected_track_id
-        self._expected_phase = HandoffPhase.ENDING
-        self.logger.info(
-            "Handoff: MA MEDIA_ITEM_PLAYED for %s — signalling completion to Ynison",
-            self._expected_track_id,
-        )
-        self.mass.create_task(self._signal_track_completion())
 
     def _on_ma_player_event(self, event: MassEvent) -> None:
         """Mirror MA queue progress and stop-events back to Ynison (handoff)."""

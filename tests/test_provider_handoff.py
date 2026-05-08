@@ -708,26 +708,22 @@ class TestOnMaPlayerEvent:
         provider._on_ma_player_event(event)
         assert provider.mass.create_task.call_count == first_call_count
 
-    def test_media_item_played_signals_completion_once(self) -> None:
-        """MEDIA_ITEM_PLAYED event for the active track signals once."""
+    def test_state_transition_near_duration_signals_completion(self) -> None:
+        """PLAYING→IDLE near track duration signals completion via state-transition."""
         provider = self._setup()
         provider._expected_track_id = "track-1"
-        provider._yandex_provider = None  # URI uses bare yandex_music://
         provider._expected_phase = HandoffPhase.PLAYING
+        provider._handoff_last_seen_state = PlaybackState.PLAYING
+        queue = provider.mass.player_queues.get.return_value
+        queue.state = PlaybackState.IDLE
+        queue.current_item = MagicMock()
+        queue.current_item.duration = 200
+        queue.corrected_elapsed_time = 199.0  # near end
 
-        # MA fires MEDIA_ITEM_PLAYED with object_id = media_item.uri.
         event = MagicMock()
-        event.object_id = "yandex_music://track/track-1"
-        provider._on_ma_media_item_played(event)
+        event.object_id = "player-A"
+        provider._on_ma_player_event(event)
         assert provider._handoff_completion_signaled_for == "track-1"
-
-        # Second event for same track must NOT re-signal — the marker
-        # already matches `_expected_track_id`.
-        before = provider.mass.create_task.call_count
-        provider._on_ma_media_item_played(event)
-        assert provider._handoff_completion_signaled_for == "track-1"
-        # No new completion task created.
-        assert provider.mass.create_task.call_count == before
 
     def test_idle_queue_at_pause_does_not_signal_completion(self) -> None:
         """IDLE mid-track (e.g. pause on single-track queue) must NOT advance.
@@ -781,15 +777,21 @@ class TestOnMaPlayerEvent:
 
         assert provider._handoff_completion_signaled_for is None
 
-    def test_media_item_played_for_other_track_does_not_signal(self) -> None:
-        """MEDIA_ITEM_PLAYED for a different URI must not affect our state."""
+    def test_state_transition_pause_mid_track_does_not_signal(self) -> None:
+        """PLAYING→PAUSED mid-track (user pause) must NOT signal completion."""
         provider = self._setup()
         provider._expected_track_id = "track-1"
-        provider._yandex_provider = None
+        provider._expected_phase = HandoffPhase.PLAYING
+        provider._handoff_last_seen_state = PlaybackState.PLAYING
+        queue = provider.mass.player_queues.get.return_value
+        queue.state = PlaybackState.PAUSED
+        queue.current_item = MagicMock()
+        queue.current_item.duration = 200
+        queue.corrected_elapsed_time = 30.0  # mid-track, not near end
 
         event = MagicMock()
-        event.object_id = "yandex_music://track/some-other-track"
-        provider._on_ma_media_item_played(event)
+        event.object_id = "player-A"
+        provider._on_ma_player_event(event)
 
         assert provider._handoff_completion_signaled_for is None
 
