@@ -13,7 +13,7 @@ Connect).
 
 ## Status
 
-**Beta** (v2.0.0) — see [CHANGELOG.md](CHANGELOG.md) and [ROADMAP.md](ROADMAP.md).
+**Beta** (v2.1.0) — see [CHANGELOG.md](CHANGELOG.md) and [ROADMAP.md](ROADMAP.md).
 
 ## Architecture
 

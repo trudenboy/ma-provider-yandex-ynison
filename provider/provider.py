@@ -1490,244 +1490,257 @@ class YandexYnisonProvider(PluginProvider):
         )
         return f"{prov_id}://track/{track_id}"
 
-    async def _handoff_activate(  # noqa: PLR0915 — three-way branch + dedup/resume cases
-        self, state: YnisonState, target_player_id: str
-    ) -> None:
-        """Translate Ynison state into MA player_queue commands (handoff mode).
+    async def _handoff_activate(self, state: YnisonState, target_player_id: str) -> None:
+        """Centralized FSM dispatcher for Ynison handoff state events.
 
-        Instead of streaming PCM ourselves, push the chosen track into MA's
-        queue and let the linked yandex_music MusicProvider deliver audio
-        natively through MA's pipeline. This avoids the inner ffmpeg and the
-        associated PCM resampling.
+        Classifies the incoming Ynison state diff and routes to the
+        appropriate `_apply_*` action method. Three top-level cases:
 
-        Trade-off: progress, queue and pause/resume will flow MA → Ynison via
-        ``_on_ma_player_event`` rather than from our own stream loop, which
-        Spotify Connect's authors flagged as a sync-quality problem (see the
-        commented-out CONF_HANDOFF_MODE in spotify_connect/__init__.py).
+        1. Track id changed → `_apply_track_change` (REPLACE / dedup /
+           cmd_play resume).
+        2. Same track, queue IDLE on the same URI → `_apply_idle_resume`
+           (re-issue play_media + seek for resume after pause-watchdog).
+        3. Same track, queue alive → `_apply_same_track_sync` (drift
+           detection + queue-PAUSED → cmd_play mirror).
+
+        The plugin trades native MA pipeline (no inner ffmpeg, no PCM
+        resampling) for looser sync — Spotify Connect's authors hit the
+        same trade-off (see commented `CONF_HANDOFF_MODE` in
+        spotify_connect/__init__.py).
         """
         new_track = state.current_track_id
         if not new_track:
             return
 
-        # Replay detection (P6): a fresh state with progress < 1s on the same
-        # track means the user reset playback. Reset the completion marker so
-        # the upcoming end-of-track will signal correctly.
+        # Replay reset (P6): fresh state at progress < 1s on the same
+        # track means the user reset playback. Clear the completion
+        # marker so the next end-of-track signals correctly.
         if state.progress_ms < 1000 and new_track == self._expected_track_id:
             self._handoff_completion_signaled_for = None
 
-        # Ensure pre-fetch primes MA's stream cache for the track. This is
-        # cosmetic in handoff (MA fetches its own stream details), but it
-        # keeps logs/duration metadata consistent during the transition.
-        if new_track != self._expected_track_id and self._yandex_provider:
-            await self._prefetch_format_for_track(new_track)
-
         expected_uri = self._build_handoff_uri(new_track)
+        is_track_change = new_track != self._expected_track_id
 
-        if new_track != self._expected_track_id:
-            queue = self.mass.player_queues.get(target_player_id)
-            # Capture the previous id for logging/recovery — it's about to be
-            # mutated below, and a few branches need to know the from-id.
-            prev_track_id = self._expected_track_id
-            self._active_player_id = target_player_id
-            # Discard the elapsed snapshot — it belongs to the previous track.
-            self._handoff_last_playing_elapsed_ms = 0
-
-            # Track whether we successfully owned the new track in MA, so the
-            # heartbeat (P1) only kicks in when we have something coherent to
-            # report. Otherwise a heartbeat after a failed play_media would
-            # keep streaming the previous/idle queue's progress to Ynison and
-            # delay rebalancing away from a non-working device.
-            activated = False
-
-            # Dedup (P5): MA already plays the same URI → just update state and
-            # return. Saves the cost of a fresh play_media REPLACE which would
-            # otherwise restart the stream.
-            if (
-                queue is not None
-                and queue.current_item is not None
-                and getattr(queue.current_item, "uri", None) == expected_uri
-                and queue.state == PlaybackState.PLAYING
-            ):
-                self.logger.debug(
-                    "Handoff: queue already playing %s — skipping play_media", expected_uri
-                )
-                self._expected_track_id = new_track
-                self._handoff_completion_signaled_for = None
-                activated = True
-            elif (
-                queue is not None
-                and queue.current_item is not None
-                and getattr(queue.current_item, "uri", None) == expected_uri
-                and queue.state == PlaybackState.PAUSED
-            ):
-                # Resume case (P5): same URI but paused — issue cmd_play
-                # directly on the player (no queue.play_media REPLACE that
-                # would restart the stream). Bypasses queue's _watch_pause
-                # watchdog as well, keeping the queue in PAUSED state for
-                # long pauses instead of dropping to IDLE after 30s.
-                self.logger.info("Handoff: resuming paused queue on %s", expected_uri)
-                try:
-                    await self.mass.players.cmd_play(target_player_id)
-                except Exception:
-                    self.logger.exception("Handoff resume cmd_play failed on %s", target_player_id)
-                else:
-                    self._expected_track_id = new_track
-                    self._handoff_completion_signaled_for = None
-                    activated = True
-            else:
-                # Idempotency: same track-change command within 1s is a
-                # duplicate (Ynison echoed our own state back). Skip the
-                # second play_media to avoid an unnecessary stream restart.
-                if not self._idempotent("play_media", new_track):
-                    return
-                # Cancel a still-running play_media for the previous track —
-                # rapid `next` taps in the Yandex app fire several back-to-
-                # back, and a half-finished load racing the new one confuses
-                # MA's queue runner.
-                await self._cancel_pending_play_media()
-                self.logger.info(
-                    "Handoff: track changed %s -> %s, calling player_queues.play_media",
-                    prev_track_id,
-                    new_track,
-                )
-                # Open the activation window BEFORE the await — MA fires
-                # PLAYER_UPDATED events while play_media is still resolving,
-                # and our `_on_ma_player_event` handler must see
-                # `_drift_suppress_until` already set so it forces
-                # paused=False instead of leaking a stale paused=True from
-                # the brief queue-IDLE moment between cmd_stop and the new
-                # stream actually starting. Same for `_re_issue_debounce_until`
-                # — covers the entire window where a paused=False echo could
-                # otherwise re-fire IDLE-resume against an in-flight stream.
-                # Saved so we can roll back on failure.
-                prev_drift = self._drift_suppress_until
-                prev_debounce = self._re_issue_debounce_until
-                prev_phase = self._expected_phase
-                now = time.monotonic()
-                self._drift_suppress_until = now + _DRIFT_SUPPRESS_PERIOD
-                self._re_issue_debounce_until = now + _REISSUE_DEBOUNCE_PERIOD
-                self._expected_phase = HandoffPhase.ACTIVATING
-                try:
-                    self._play_media_task = asyncio.create_task(
-                        self.mass.player_queues.play_media(
-                            target_player_id, expected_uri, option=QueueOption.REPLACE
-                        )
-                    )
-                    await self._play_media_task
-                except asyncio.CancelledError:
-                    # Superseded by a fresher track change — leave the
-                    # _expected_track_id as-is so the new invocation handles it.
-                    raise
-                except Exception:
-                    # Don't commit _expected_track_id when play_media
-                    # fails — otherwise the next Ynison update for the same
-                    # track id would fall into the same-track branch and
-                    # never retry play_media, leaving MA stuck out of sync.
-                    # Roll back the optimistic window/phase state so they
-                    # don't lie to subsequent calls.
-                    self._drift_suppress_until = prev_drift
-                    self._re_issue_debounce_until = prev_debounce
-                    self._expected_phase = prev_phase
-                    self.logger.exception(
-                        "Handoff play_media failed for %s on %s",
-                        expected_uri,
-                        target_player_id,
-                    )
-                else:
-                    self._expected_track_id = new_track
-                    self._handoff_completion_signaled_for = None
-                    activated = True
-            # Start heartbeat (P1) only on a clean activation. Idempotent —
-            # a running task is reused.
-            if activated:
-                self._ensure_handoff_heartbeat()
+        if is_track_change:
+            # Pre-fetch primes MA's stream-detail cache. Cosmetic in
+            # handoff (MA fetches its own details), keeps logs/duration
+            # consistent during the transition.
+            if self._yandex_provider:
+                await self._prefetch_format_for_track(new_track)
+            await self._apply_track_change(state, target_player_id, new_track, expected_uri)
             return
-
-        # Same-track path: drift, pause/resume sync.
-        # NOTE: we do NOT short-circuit on `state.last_update_is_echo` here.
-        # Echo detection compares `version.device_id` only, so a peer
-        # pause→play that lands while our heartbeat still owns the latest
-        # version block is treated as an echo — and that mistakenly muted
-        # the resume path. Echo skip is applied only inside the drift-seek
-        # block below, where it actually matters.
 
         queue = self.mass.player_queues.get(target_player_id)
 
-        # IDLE-resume: pausing a single-track queue lands MA's queue runner in
-        # IDLE rather than PAUSED. When Ynison says "playing the same track",
-        # neither the drift-seek nor the resume-from-PAUSED branch revives the
-        # queue — `play()` does nothing on an IDLE queue. Re-issue play_media
-        # with the expected URI so MA spins the stream back up; then let the
-        # drift detector below re-align the position to whatever Ynison
-        # reported.
+        # IDLE-resume on same URI: a single-track REPLACE queue lands in
+        # IDLE on pause (no upcoming items). When Ynison says "playing
+        # this track" again, neither drift-seek nor PAUSED-resume revives
+        # the queue. Re-issue play_media to spin the stream back up.
         if (
             queue is not None
             and queue.state == PlaybackState.IDLE
             and queue.current_item is not None
             and getattr(queue.current_item, "uri", None) == expected_uri
         ):
-            # Debounce: if we issued play_media very recently (re-issue
-            # window still open), don't fire another REPLACE — MA is still
-            # spinning up the stream and queue.state == IDLE just means it
-            # hasn't transitioned to PLAYING yet. Without this guard a
-            # stream of paused=False echoes (after our heartbeat) would
-            # re-issue every WS round-trip and the player would never settle.
-            if time.monotonic() < self._re_issue_debounce_until:
-                return
+            await self._apply_idle_resume(state, target_player_id, expected_uri)
+            return
 
-            # Prefer the elapsed snapshot we recorded while the queue was
-            # genuinely PLAYING — Ynison's `progress_ms` echo lags behind a
-            # fast pause/play toggle in the app and would otherwise restart
-            # the track at 0. Fall back to Ynison's reported position only
-            # if we never saw a PLAYING tick.
-            resume_ms = self._handoff_last_playing_elapsed_ms or state.progress_ms
-            self.logger.info(
-                "Handoff: queue IDLE on same URI — re-issuing play_media to resume "
-                "(seek=%dms, source=%s)",
-                resume_ms,
-                "ma_snapshot" if self._handoff_last_playing_elapsed_ms else "ynison",
+        await self._apply_same_track_sync(state, target_player_id, queue, new_track)
+
+    async def _apply_track_change(  # noqa: PLR0915 — sub-case branches inline
+        self,
+        state: YnisonState,
+        target_player_id: str,
+        new_track: str,
+        expected_uri: str,
+    ) -> None:
+        """Handle a new-track Ynison event in handoff mode.
+
+        Three sub-cases based on MA queue state for the expected URI:
+        - PLAYING: dedup, just update bookkeeping;
+        - PAUSED: cmd_play resume (no REPLACE, keeps queue PAUSED);
+        - else: cancel any pending play_media + issue REPLACE.
+        """
+        queue = self.mass.player_queues.get(target_player_id)
+        prev_track_id = self._expected_track_id
+        self._active_player_id = target_player_id
+        # Drop the elapsed snapshot — it belongs to the previous track.
+        self._handoff_last_playing_elapsed_ms = 0
+
+        # Heartbeat is started only on a clean activation; otherwise a
+        # heartbeat after a failed play_media would keep streaming the
+        # previous/idle queue progress to Ynison and delay rebalancing.
+        activated = False
+
+        same_uri_playing = (
+            queue is not None
+            and queue.current_item is not None
+            and getattr(queue.current_item, "uri", None) == expected_uri
+            and queue.state == PlaybackState.PLAYING
+        )
+        same_uri_paused = (
+            queue is not None
+            and queue.current_item is not None
+            and getattr(queue.current_item, "uri", None) == expected_uri
+            and queue.state == PlaybackState.PAUSED
+        )
+
+        if same_uri_playing:
+            # Dedup (P5): MA already plays the URI; just update state.
+            self.logger.debug(
+                "Handoff: queue already playing %s — skipping play_media", expected_uri
             )
-            # Open windows BEFORE the await so MA's PLAYER_UPDATED events
-            # fired during play_media see them set — otherwise heartbeat /
-            # _on_ma_player_event would leak `paused=True` into the brief
-            # IDLE window between cmd_stop and the new stream PLAYING.
+            self._expected_track_id = new_track
+            self._handoff_completion_signaled_for = None
+            activated = True
+        elif same_uri_paused:
+            # Same URI but paused — cmd_play resume (no REPLACE that
+            # would restart the stream and trigger the watchdog → IDLE
+            # drop on long pauses).
+            self.logger.info("Handoff: resuming paused queue on %s", expected_uri)
+            try:
+                await self.mass.players.cmd_play(target_player_id)
+            except Exception:
+                self.logger.exception("Handoff resume cmd_play failed on %s", target_player_id)
+            else:
+                self._expected_track_id = new_track
+                self._handoff_completion_signaled_for = None
+                activated = True
+        else:
+            # Idempotency: same track-change command within 1s is a
+            # duplicate (Ynison echoed our state back). Skip duplicate
+            # play_media to avoid an unnecessary stream restart.
+            if not self._idempotent("play_media", new_track):
+                return
+            await self._cancel_pending_play_media()
+            self.logger.info(
+                "Handoff: track changed %s -> %s, calling player_queues.play_media",
+                prev_track_id,
+                new_track,
+            )
+            # Open the activation window BEFORE the await — MA fires
+            # PLAYER_UPDATED events while play_media is still resolving,
+            # and our `_on_ma_player_event` handler must see
+            # `_drift_suppress_until` already set so it forces
+            # paused=False instead of leaking a stale paused=True. Same
+            # for `_re_issue_debounce_until` — covers the window where a
+            # paused=False echo could otherwise re-fire IDLE-resume
+            # against an in-flight stream. Saved for rollback on failure.
+            prev_drift = self._drift_suppress_until
+            prev_debounce = self._re_issue_debounce_until
+            prev_phase = self._expected_phase
             now = time.monotonic()
             self._drift_suppress_until = now + _DRIFT_SUPPRESS_PERIOD
             self._re_issue_debounce_until = now + _REISSUE_DEBOUNCE_PERIOD
             self._expected_phase = HandoffPhase.ACTIVATING
             try:
-                await self.mass.player_queues.play_media(
-                    target_player_id, expected_uri, option=QueueOption.REPLACE
+                self._play_media_task = asyncio.create_task(
+                    self.mass.player_queues.play_media(
+                        target_player_id, expected_uri, option=QueueOption.REPLACE
+                    )
                 )
-                if resume_ms >= 1000:
-                    # play_media(REPLACE) starts decoding at position 0. If
-                    # we just call seek next, MA decodes ~1-2s of "from 0"
-                    # before the seek lands, and the user hears the track
-                    # restart-then-jump. Pause first, seek, then play —
-                    # the brief silence is far less jarring than the
-                    # restart-from-zero glitch. Best-effort wrappers so a
-                    # transient failure on any leg still falls through to
-                    # the heartbeat / drift-seek recovery paths.
-                    with suppress(Exception):
-                        await self.mass.players.cmd_pause(target_player_id)
-                    await self.mass.player_queues.seek(target_player_id, resume_ms // 1000)
-                    with suppress(Exception):
-                        await self.mass.players.cmd_play(target_player_id)
+                await self._play_media_task
+            except asyncio.CancelledError:
+                # Superseded by a fresher track change — leave the
+                # _expected_track_id as-is for the new invocation.
+                raise
             except Exception:
+                # play_media failed — don't commit _expected_track_id
+                # (otherwise the same-track branch would never retry
+                # play_media). Roll back the optimistic window/phase
+                # state so they don't lie to subsequent calls.
+                self._drift_suppress_until = prev_drift
+                self._re_issue_debounce_until = prev_debounce
+                self._expected_phase = prev_phase
                 self.logger.exception(
-                    "Handoff IDLE-resume play_media failed on %s", target_player_id
+                    "Handoff play_media failed for %s on %s",
+                    expected_uri,
+                    target_player_id,
                 )
-            return  # let the next state-update drive normal flow
+            else:
+                self._expected_track_id = new_track
+                self._handoff_completion_signaled_for = None
+                activated = True
 
+        if activated:
+            self._ensure_handoff_heartbeat()
+
+    async def _apply_idle_resume(
+        self, state: YnisonState, target_player_id: str, expected_uri: str
+    ) -> None:
+        """Re-issue play_media + seek when queue dropped to IDLE.
+
+        Pausing a single-track REPLACE queue eventually drops MA's queue
+        runner to IDLE. When Ynison says "playing this track" again,
+        we have to spin the stream back up via REPLACE. The seek+
+        cmd_pause/cmd_play dance avoids the audible 0-then-jump glitch.
+        """
+        # Debounce: a recent play_media is still resolving; don't fire
+        # another REPLACE just because Ynison's paused=False keeps
+        # echoing on every WS round-trip — the player would never settle.
+        if time.monotonic() < self._re_issue_debounce_until:
+            return
+
+        # Prefer the elapsed snapshot taken while queue was PLAYING —
+        # Ynison's `progress_ms` echo lags behind a rapid pause/play
+        # toggle in the app and would otherwise restart the track at 0.
+        resume_ms = self._handoff_last_playing_elapsed_ms or state.progress_ms
+        self.logger.info(
+            "Handoff: queue IDLE on same URI — re-issuing play_media to resume "
+            "(seek=%dms, source=%s)",
+            resume_ms,
+            "ma_snapshot" if self._handoff_last_playing_elapsed_ms else "ynison",
+        )
+        # Open windows BEFORE the await — see `_apply_track_change` for
+        # the rationale. MA's PLAYER_UPDATED events during play_media
+        # must see them set so heartbeat doesn't leak paused=True.
+        now = time.monotonic()
+        self._drift_suppress_until = now + _DRIFT_SUPPRESS_PERIOD
+        self._re_issue_debounce_until = now + _REISSUE_DEBOUNCE_PERIOD
+        self._expected_phase = HandoffPhase.ACTIVATING
+        try:
+            await self.mass.player_queues.play_media(
+                target_player_id, expected_uri, option=QueueOption.REPLACE
+            )
+            if resume_ms >= 1000:
+                # play_media(REPLACE) starts decoding at 0. Naive seek
+                # alone leaks ~1-2s of "from 0" audio before landing.
+                # Pause-seek-play sequence trades that for brief silence.
+                # Best-effort wrappers — a transient leg failure falls
+                # back to heartbeat / drift-seek recovery paths.
+                with suppress(Exception):
+                    await self.mass.players.cmd_pause(target_player_id)
+                await self.mass.player_queues.seek(target_player_id, resume_ms // 1000)
+                with suppress(Exception):
+                    await self.mass.players.cmd_play(target_player_id)
+        except Exception:
+            self.logger.exception("Handoff IDLE-resume play_media failed on %s", target_player_id)
+
+    async def _apply_same_track_sync(
+        self,
+        state: YnisonState,
+        target_player_id: str,
+        queue: Any,
+        new_track: str,
+    ) -> None:
+        """Run drift-seek + queue-PAUSED → cmd_play resume mirror.
+
+        Runs on every same-track Ynison update where the IDLE-resume
+        branch did not fire. Two responsibilities:
+        - Drift seek when Ynison and MA disagree on position by >3s
+          (with queue-rebuild guard for the progress=0 echo).
+        - Resume MA queue if it transitioned to PAUSED while Ynison
+          says playing (rare but possible if MA UI paused while Ynison
+          remained PLAYING).
+        """
         try:
             our_pos_ms = int(queue.corrected_elapsed_time * 1000) if queue is not None else 0
         except Exception:
             our_pos_ms = 0
 
-        # Drift-seek suppression: ignore drift-detection for the first
-        # `_DRIFT_SUPPRESS_PERIOD` seconds after play_media/seek, EXCEPT
-        # when the queue is already PLAYING with elapsed > 1s — a real
-        # user seek inside the window must still pass through.
+        # Drift-seek suppression: ignore drift inside the activation
+        # window EXCEPT when the queue is already PLAYING with elapsed
+        # > 1s — a real user seek within the window must still pass.
         in_grace = time.monotonic() < self._drift_suppress_until
         queue_progressed = (
             queue is not None
@@ -1737,20 +1750,16 @@ class YandexYnisonProvider(PluginProvider):
         if in_grace and not queue_progressed:
             return
 
-        # Drift detection: do NOT trust echoes here — `version.device_id`-based
-        # echo means our own heartbeat just bounced, but that doesn't reflect
-        # a real seek. The IDLE-resume / PAUSED-resume branches above must
-        # still run regardless of echo, which is why echo skip is local to
-        # this drift block only.
+        # Drift detection: skip echoes — they'd reflect our own heartbeat
+        # bouncing back, not a real seek. IDLE-/PAUSED-resume branches
+        # above run regardless of echo; the skip is local to drift only.
         if not state.last_update_is_echo:
             drift_ms = abs(state.progress_ms - our_pos_ms)
-            # Suppress "seek to 0" when MA already has meaningful progress
-            # (>5s) — RADIO queue rebalances often emit a fresh state with
-            # progress=0 for the same track, and obeying that as a real seek
-            # yanks the player back to the start mid-track. A genuine user
-            # seek to the very beginning is rare and would resolve on the
-            # next state update; the cost of ignoring it is far smaller
-            # than the cost of restart-from-zero on every queue rebalance.
+            # Suppress "seek to 0" when MA is already past 5s — RADIO
+            # queue rebalances broadcast a fresh state with progress=0
+            # for the same track, and obeying that yanks the player
+            # back to the start mid-track. A real user seek to 0 is
+            # rare and would resolve on the next update.
             looks_like_queue_rebuild = state.progress_ms < 1000 and our_pos_ms > 5000
             if drift_ms > 3000 and not looks_like_queue_rebuild:
                 self.logger.info(
@@ -1772,9 +1781,9 @@ class YandexYnisonProvider(PluginProvider):
                     our_pos_ms,
                 )
 
-        # If MA's queue paused while Ynison says playing — resume directly
-        # via cmd_play (no queue.play_media REPLACE) to keep playback fast
-        # and avoid the watchdog → IDLE drop on long pauses.
+        # MA queue paused while Ynison says playing → cmd_play resume.
+        # cmd_play (not queue.play) keeps the queue in PAUSED → PLAYING
+        # transition fast, avoids watchdog-driven IDLE drop.
         try:
             if queue is not None and queue.state == PlaybackState.PAUSED:
                 await self.mass.players.cmd_play(target_player_id)

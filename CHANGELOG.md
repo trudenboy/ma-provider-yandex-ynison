@@ -2,6 +2,68 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.1.0] - 2026-05-08
+
+### Live-test driven stabilisation + FSM dispatch refactor
+
+Continuation of v2.0 architectural work, addressing the issues surfaced in live testing of v2.0:
+1. Repeated `play_media(REPLACE)` on rapid pause/play tap landing in IDLE-resume race.
+2. ~3-5s "button unresponsive" delay after pause in the Yandex app.
+3. Restart-from-zero glitch on resume (play_media(REPLACE) decodes from 0 before our seek lands).
+4. Drift-detect treating queue-rebuild `progress=0` echoes as user seeks, yanking playback to start mid-track.
+
+### Added — handoff dispatcher refactor (`provider/provider.py`)
+
+`_handoff_activate` is now a thin centralized FSM dispatcher (~30 lines) that classifies each Ynison state event and routes it to one of three explicit action methods:
+
+- `_apply_track_change` — handles new-track scenarios (PLAYING dedup, PAUSED → cmd_play resume, else REPLACE with cancel-on-track-change).
+- `_apply_idle_resume` — re-issues play_media when MA's queue has dropped to IDLE on the same URI (post pause-watchdog), with cmd_pause/seek/cmd_play sequence to avoid the audible 0-then-jump glitch.
+- `_apply_same_track_sync` — drift-seek detection (with queue-rebuild guard) and queue-PAUSED → cmd_play resume mirror.
+
+Each method's contract is documented; the dispatcher itself only branches on (track changed?, queue.state, queue.current_item.uri). This eliminates the previous 200-line `_handoff_activate` blob and makes the decision flow auditable.
+
+### Changed — pause via `mass.players.cmd_pause` / resume via `cmd_play`
+
+Switched from `mass.player_queues.pause` / `play` to `mass.players.cmd_pause` / `cmd_play` for handoff pause and resume operations. The queue-level pause schedules MA's `_watch_pause` watchdog that drops queue.state to IDLE within seconds for a single-track REPLACE queue, forcing every resume through play_media(REPLACE) → 3-5s of silence. cmd_pause directly on the player keeps queue.state == PAUSED for as long as the user wants and lets resume go through the fast path.
+
+### Changed — paused resolver priority
+
+Heartbeat / `_on_ma_player_event` now resolve `is_paused` via:
+1. `_expected_phase == PAUSED` → True (user pause is authoritative; was previously losing to activation window for up to 10s, leaving the Yandex-app button "unresponsive");
+2. `_drift_suppress_until > now` → False (we're activating; queue's brief IDLE shouldn't bleed through);
+3. `queue.state != PLAYING` → True.
+
+### Added — immediate paused echo + activation timing fixes
+
+- `_handoff_pause` now closes `_drift_suppress_until` immediately and pushes one paused=True update to Ynison without waiting for the next heartbeat tick. Yandex-app button reflects state in <500ms instead of 3-5s.
+- `_drift_suppress_until` / `_re_issue_debounce_until` / `_expected_phase` are set BEFORE awaiting `play_media` (in both `_apply_track_change` and `_apply_idle_resume`). MA fires PLAYER_UPDATED events while play_media is still resolving; without the windows pre-set, those events leaked stale `paused=True` to Ynison and triggered duplicate-REPLACE races.
+- Same for `_handoff_pause`: `_expected_phase = PAUSED` is set BEFORE awaiting cmd_pause (rolled back on exception).
+
+### Added — drift-seek-to-0 guard
+
+Drift-seek now skips when Ynison reports progress<1s while MA is already past 5s. RADIO queue rebalances broadcast a fresh state with progress=0 for the same track; obeying it as a real user seek yanked playback back to the start mid-track. Genuine user seek to 0 is rare and resolves on the next state update.
+
+### Added — IDLE-resume cmd_pause/seek/cmd_play dance
+
+`_apply_idle_resume` now wraps the seek with `cmd_pause` before and `cmd_play` after. play_media(REPLACE) starts decoding at position 0; naive seek alone leaks ~1-2s of "from 0" audio before landing. Pause-seek-play sequence trades that for brief silence.
+
+### Changed — `_REISSUE_DEBOUNCE_PERIOD` 3s → 8s, `_DRIFT_SUPPRESS_PERIOD` 5s → 10s
+
+Three seconds turned out to be too short — heartbeat at T+3.5s reported `paused=True` (queue still IDLE while stream loading), the Yandex app showed pause, the user re-tapped play, a second REPLACE fired and raced the first. Eight seconds comfortably covers real Chromecast/DLNA/web-player startup latency. Drift suppress bumped in tandem to keep the activation window aligned end-to-end.
+
+### Refactored — Ynison echo classification (`provider/ynison_client.py`)
+
+Cleaned up the v2.0 Lamport-style version-watermark code. Research of go-yaynison's proto schemas confirmed `version.version` is documented as `random(int64)` and the server re-stamps it after every `update_playing_status`; comparing inbound watermarks against outbound was a no-op (the existing check always fell through to author=ours). Echo detection now uses author check on both queue.version.device_id AND status.version.device_id explicitly, with documentation of why authorship is the only reliable signal.
+
+### Added — `update_session_params(mute_events_if_passive=True)`
+
+New `YnisonClient.update_session_params` method, called automatically right after `send_full_state` on every connection. Tells Ynison's server not to forward peer state updates while we're not the active device, reducing inbound noise (and CPU) in borrow mode alongside other subscribers and removing a class of false positives in echo classification (fewer messages → fewer chances to misclassify).
+
+### Tests
+
+- All 274 v2.0 tests pass after refactor; behaviour preserved.
+- TestHandoffPause / TestHandoffActivate / TestHandoffIdempotency updated to assert against `players.cmd_pause` / `players.cmd_play` rather than `player_queues.pause` / `play`.
+
 ## [2.0.0] - 2026-05-08
 
 ### Architectural refactor — handoff state-sync foundations
