@@ -8,7 +8,7 @@ Music app via the Ynison protocol (Yandex's equivalent of Spotify Connect).
 - **Type**: `PluginProvider` with `ProviderFeature.AUDIO_SOURCE`
 - **Manifest type**: `plugin` (`multi_instance: true`, `depends_on: yandex_music`)
 - **Domain**: `yandex_ynison`
-- **Stage**: `beta` (v2.1.1)
+- **Stage**: `beta` (v2.1.2)
 - **Architecture reference**: `spotify_connect` provider in MA server
 
 ## Architecture
