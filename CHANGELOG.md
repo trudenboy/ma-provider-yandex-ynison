@@ -2,6 +2,87 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.2.0] - 2026-05-08
+
+### Added — first-class MA UI integration for stream mode (opt-in, off by default)
+
+Borrowed approach from spotify_connect PR #3857. Stream-mode plugin
+sources previously rendered as an "empty" player card in the MA UI:
+no seek bar, no signal chain, no quality indicator. The MA frontend
+resolves all of that via a `PlayerQueue` looked up by
+`player.active_source` — and when a `PluginSource` is active,
+`active_source` equals `instance_id`, but no queue exists with that id.
+
+This release adds an **opt-in** advanced toggle — `Show full player
+card in MA UI` (`enable_ui_integration`, default **off**) — that
+publishes a frontend-only fake queue under our `instance_id` so the
+UI can render the player card in full while keeping backend command
+routing unchanged. Disabled by default because the integration relies
+on private frontend behaviours that may break across MA versions and
+can interfere with "Play Now" on local content (see Known limitation
+below). Hidden in handoff mode (where MA already owns a real queue).
+
+- New `_register_plugin_queue(player_id)`: fires `QUEUE_ADDED` +
+  `QUEUE_UPDATED` events with `queue_id == instance_id` and a fake
+  queue dict containing `current_item.streamdetails.audio_format`
+  (our actual `_normalized_format`, so the quality indicator matches
+  44.1/16 vs Hi-Res 96/24) plus `dsp` from
+  `mass.streams.audio.get_stream_dsp_details()` for the downstream
+  player chain. Does NOT register in `player_queues._queues` —
+  the backend stays unaware so play/pause/play_media commands keep
+  flowing through the `PluginSource` callbacks. Called on activation
+  and on each track change.
+- New `_set_player_output_format(player_id)` / `_clear_player_output_format`:
+  stamps and clears `player.extra_data["output_format"]` so the
+  signal-chain panel knows our PCM output format (we bypass the
+  streams controller, so MA never fills it in otherwise).
+- New `_signal_seek_to_frontend(elapsed_ms, player_id)`: on a
+  Ynison-driven seek, emits `QUEUE_TIME_UPDATED` with our fake
+  queue id so the frontend seek-bar snaps to the new position
+  immediately instead of waiting for the next progress tick.
+
+Stream-mode only — handoff has a real `play_media` queue and
+already integrates with the MA UI through it.
+
+### Other changes (post-review)
+
+- `_register_plugin_queue` now derives the fake queue's `state`
+  from the live `YnisonState.is_paused` flag, and the pause
+  branch of `_handle_ynison_state` re-publishes the queue so the
+  frontend player card mirrors pause/resume immediately (fixes
+  Copilot review note: previously the queue was hard-coded to
+  `state=playing` until the next track-change re-fire).
+- `unload()` now strips our `output_format` stamp from the
+  player up front, so a config-driven reload while the source
+  is active no longer leaves stale signal-chain info on the
+  player (fixes Copilot review note about absent cleanup path).
+- `_signal_seek_to_frontend` no longer mutates the private
+  `Player._attr_elapsed_time` attribute. The `QUEUE_TIME_UPDATED`
+  event alone is sufficient to snap the frontend seek-bar, and
+  dropping the private write removes a silent-breakage path
+  across MA versions (fixes Copilot review note).
+- `_clear_active_player` now resets `_actual_input_format` to
+  `None` alongside the other session-scoped state, preventing
+  the next session's first `_register_plugin_queue` from
+  showing the previous track's CDN format on the signal-chain
+  panel until `_update_metadata_from_stream` re-fires.
+
+### Config UX
+
+- `Device name in Yandex Music` (`publish_name`) is no longer
+  in the *advanced* section. Field is exposed at the top of
+  the config form so users see it without expanding advanced.
+  Existing values are preserved on upgrade.
+
+### Known limitation (without MA core changes)
+
+If the user clicks "Play Now" on local content while our plugin
+source is active, the MA frontend sends `play_media(queue_id=instance_id)`
+which the backend can't find in `_queues` and errors. Workaround:
+deselect the plugin source first. The companion MA core fix is in
+the spotify_connect PR (a `play_media` reroute in `player_queues.py`)
+and benefits us automatically when it lands.
+
 ## [2.1.2] - 2026-05-08
 
 ### Fixed — upstream mypy follow-up
