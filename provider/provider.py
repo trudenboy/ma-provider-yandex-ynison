@@ -1849,7 +1849,15 @@ class YandexYnisonProvider(PluginProvider):
         # Drift detection: skip echoes — they'd reflect our own heartbeat
         # bouncing back, not a real seek. IDLE-/PAUSED-resume branches
         # above run regardless of echo; the skip is local to drift only.
-        if not state.last_update_is_echo:
+        # Also skip if MA's queue has no current_item: the track ended,
+        # `_signal_track_completion` may have sent progress=duration to
+        # Ynison, and we'd otherwise try to seek the empty queue back to
+        # that "phantom" position.
+        if (
+            not state.last_update_is_echo
+            and queue is not None
+            and getattr(queue, "current_item", None) is not None
+        ):
             verdict = self._classify_drift(state.progress_ms, our_pos_ms)
             if verdict == "seek":
                 self.logger.info(
