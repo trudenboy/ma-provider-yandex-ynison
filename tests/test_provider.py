@@ -1028,7 +1028,7 @@ class TestPCMNormalization:
         assert source.audio_format.channels == 2
 
     async def test_superb_quality_uses_lossless_profile(self) -> None:
-        """When YM quality=superb, format switches to PCM s24le/48kHz."""
+        """When YM quality=superb, format switches to PCM s24le/44.1kHz (default lossless)."""
         provider = _make_provider()
 
         mock_yandex = MagicMock()
@@ -1040,7 +1040,7 @@ class TestPCMNormalization:
 
         mock_yandex.config.get_value.assert_called_with("quality")
         assert provider._normalized_format.content_type == ContentType.PCM_S24LE
-        assert provider._normalized_format.sample_rate == 48000
+        assert provider._normalized_format.sample_rate == 44100
         assert provider._normalized_format.bit_depth == 24
         assert provider._source_details.audio_format == provider._normalized_format
 
@@ -1072,7 +1072,7 @@ class TestPCMNormalization:
         provider._yandex_provider = mock_yandex
         provider._update_normalized_format()
 
-        assert provider._normalized_format.sample_rate == 48000
+        assert provider._normalized_format.sample_rate == 44100
         assert provider._normalized_format.bit_depth == 24
         assert provider._normalized_format.content_type == ContentType.PCM_S24LE
 
@@ -1092,6 +1092,126 @@ class TestPCMNormalization:
 
         assert provider._normalized_format.bit_depth == 24
         assert provider._normalized_format.content_type == ContentType.PCM_S24LE
+
+    async def test_update_normalized_format_hint_lifts_to_hires(self) -> None:
+        """Hint with 96 kHz / 24 bit lifts auto base to actual values."""
+        provider = _make_provider()
+        mock_yandex = MagicMock()
+        mock_yandex.domain = "yandex_music"
+        mock_yandex.type = ProviderType.MUSIC
+        mock_yandex.config.get_value = MagicMock(return_value="superb")
+        provider._yandex_provider = mock_yandex
+
+        hint = MagicMock()
+        hint.sample_rate = 96000
+        hint.bit_depth = 24
+        provider._update_normalized_format(hint=hint)
+
+        assert provider._normalized_format.sample_rate == 96000
+        assert provider._normalized_format.bit_depth == 24
+        assert provider._normalized_format.content_type == ContentType.PCM_S24LE
+
+    async def test_update_normalized_format_hint_keeps_native_rate(self) -> None:
+        """Hint with 44.1 kHz stays at 44.1, not the old 48 kHz default."""
+        provider = _make_provider()
+        mock_yandex = MagicMock()
+        mock_yandex.domain = "yandex_music"
+        mock_yandex.type = ProviderType.MUSIC
+        mock_yandex.config.get_value = MagicMock(return_value="superb")
+        provider._yandex_provider = mock_yandex
+
+        hint = MagicMock()
+        hint.sample_rate = 44100
+        hint.bit_depth = 24
+        provider._update_normalized_format(hint=hint)
+
+        assert provider._normalized_format.sample_rate == 44100
+        assert provider._normalized_format.bit_depth == 24
+
+    async def test_update_normalized_format_explicit_config_overrides_hint(self) -> None:
+        """Explicit CONF_OUTPUT_SAMPLE_RATE wins over the hint."""
+        provider = _make_provider()
+        provider._cfg_sample_rate = "48000"
+        mock_yandex = MagicMock()
+        mock_yandex.domain = "yandex_music"
+        mock_yandex.type = ProviderType.MUSIC
+        mock_yandex.config.get_value = MagicMock(return_value="superb")
+        provider._yandex_provider = mock_yandex
+
+        hint = MagicMock()
+        hint.sample_rate = 96000
+        hint.bit_depth = 24
+        provider._update_normalized_format(hint=hint)
+
+        assert provider._normalized_format.sample_rate == 48000
+
+    async def test_update_normalized_format_ignores_implausible_hint(self) -> None:
+        """Hint with sample_rate=0 (e.g. broken stream_details) is ignored."""
+        provider = _make_provider()
+        mock_yandex = MagicMock()
+        mock_yandex.domain = "yandex_music"
+        mock_yandex.type = ProviderType.MUSIC
+        mock_yandex.config.get_value = MagicMock(return_value="superb")
+        provider._yandex_provider = mock_yandex
+
+        hint = MagicMock()
+        hint.sample_rate = 0
+        hint.bit_depth = 0
+        provider._update_normalized_format(hint=hint)
+
+        # Falls back to default lossless 44.1/24
+        assert provider._normalized_format.sample_rate == 44100
+        assert provider._normalized_format.bit_depth == 24
+
+    async def test_prefetch_format_adapts_normalized_and_source(self) -> None:
+        """Pre-fetch updates both _normalized_format and _source_details.audio_format."""
+        provider = _make_provider()
+        mock_yandex = MagicMock()
+        mock_yandex.domain = "yandex_music"
+        mock_yandex.type = ProviderType.MUSIC
+        mock_yandex.config.get_value = MagicMock(return_value="superb")
+        provider._yandex_provider = mock_yandex
+        sd = MagicMock()
+        sd.audio_format.sample_rate = 96000
+        sd.audio_format.bit_depth = 24
+        _stub_attr(provider, "_get_stream_details_with_retry", AsyncMock(return_value=sd))
+
+        await provider._prefetch_format_for_track("track:hires")
+
+        assert provider._normalized_format.sample_rate == 96000
+        assert provider._source_details.audio_format.sample_rate == 96000
+
+    async def test_prefetch_format_handles_failure(self) -> None:
+        """Pre-fetch swallowing API errors leaves the previous format intact."""
+        provider = _make_provider()
+        mock_yandex = MagicMock()
+        mock_yandex.domain = "yandex_music"
+        mock_yandex.type = ProviderType.MUSIC
+        mock_yandex.config.get_value = MagicMock(return_value="superb")
+        provider._yandex_provider = mock_yandex
+        provider._update_normalized_format()  # establish baseline
+        baseline_sr = provider._normalized_format.sample_rate
+        baseline_bd = provider._normalized_format.bit_depth
+        _stub_attr(
+            provider,
+            "_get_stream_details_with_retry",
+            AsyncMock(side_effect=Exception("api boom")),
+        )
+
+        await provider._prefetch_format_for_track("track:fail")
+
+        assert provider._normalized_format.sample_rate == baseline_sr
+        assert provider._normalized_format.bit_depth == baseline_bd
+
+    async def test_prefetch_format_no_yandex_provider_is_noop(self) -> None:
+        """Without a linked yandex_music provider, pre-fetch is a no-op."""
+        provider = _make_provider()
+        provider._yandex_provider = None
+        baseline = provider._normalized_format
+
+        await provider._prefetch_format_for_track("track:any")
+
+        assert provider._normalized_format is baseline
 
     async def test_audio_format_not_modified_by_stream(self) -> None:
         """PluginSource audio_format stays fixed (not updated from stream)."""
@@ -1919,10 +2039,10 @@ class TestBytesToMs:
         assert provider._bytes_to_ms(176400) == 1000
 
     def test_24bit(self) -> None:
-        """24-bit stereo 48000Hz: 288000 bytes = 1000ms."""
+        """24-bit stereo 44.1kHz: 264600 bytes = 1000ms."""
         provider = _make_provider()
         provider._normalized_format = make_pcm_format(PCM_LOSSLESS_PARAMS)
-        assert provider._bytes_to_ms(288000) == 1000
+        assert provider._bytes_to_ms(264600) == 1000
 
     def test_zero(self) -> None:
         """Zero bytes = zero milliseconds."""
