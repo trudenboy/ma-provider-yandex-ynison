@@ -1830,6 +1830,13 @@ class YandexYnisonProvider(PluginProvider):
                 duration_ms=self._best_duration_ms(),
                 paused=True,
             )
+        # Mark progress sync watermark to skip the next heartbeat tick.
+        # Without this, the heartbeat ~5s after our explicit echo would
+        # fire and — in the worst case where heartbeat scheduling lands
+        # in the middle of pause processing — race against the user's
+        # paused=True with a stale paused=False, briefly flipping the
+        # Yandex-app button back to "play".
+        self._handoff_last_progress_sync_mono = time.monotonic()
         try:
             await self.mass.players.cmd_pause(target_player_id)
         except Exception:
