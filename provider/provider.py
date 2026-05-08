@@ -2171,10 +2171,39 @@ class YandexYnisonProvider(PluginProvider):
             )
         )
 
-        # Note: end-of-track is now signalled via the dedicated
-        # `_on_ma_media_item_played` handler subscribed to
-        # `EventType.MEDIA_ITEM_PLAYED` — unambiguous and timing-
-        # independent. This handler keeps progress mirroring only.
+        # End-of-track signal — primary path is the dedicated
+        # `_on_ma_media_item_played` handler (MEDIA_ITEM_PLAYED event).
+        # Belt-and-braces fallback below: detect queue state transition
+        # PLAYING → {PAUSED, IDLE} near track duration. MEDIA_ITEM_PLAYED
+        # is fired by MA only when the queue transitions from one media
+        # item to the next OR when MA's `_handle_playback_progress_report`
+        # decides the item is "fully played" (>= 90% playback time);
+        # in some single-track REPLACE scenarios (e.g. seek-to-near-end
+        # then short remaining playback) the threshold can fail and we'd
+        # never get the event. The state-transition check fills that gap
+        # — gated on `_expected_phase == PLAYING` to skip user pauses
+        # mid-track (which set PAUSED via `_handoff_pause`). The marker
+        # `_handoff_completion_signaled_for` is shared with the primary
+        # path so they don't double-fire.
+        if (
+            state_changed
+            and prev_state == PlaybackState.PLAYING
+            and current_state in (PlaybackState.PAUSED, PlaybackState.IDLE)
+            and self._expected_phase == HandoffPhase.PLAYING
+            and self._expected_track_id
+            and self._handoff_completion_signaled_for != self._expected_track_id
+            and self._is_at_natural_end_of_track(queue)
+        ):
+            self._handoff_completion_signaled_for = self._expected_track_id
+            self._expected_phase = HandoffPhase.ENDING
+            self.logger.info(
+                "Handoff: queue PLAYING -> %s on %s near duration — "
+                "signalling natural-end completion to Ynison "
+                "(MEDIA_ITEM_PLAYED fallback)",
+                current_state.value if hasattr(current_state, "value") else current_state,
+                self._expected_track_id,
+            )
+            self.mass.create_task(self._signal_track_completion())
 
     def _is_at_natural_end_of_track(self, queue: Any) -> bool:
         """Return True iff the queue's elapsed time is close to track duration.
