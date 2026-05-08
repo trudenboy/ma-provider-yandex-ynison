@@ -927,3 +927,69 @@ class TestHandoffFsmTransitions:
         # Despite the exception, idempotency cache prevents retries — but
         # phase MUST NOT have transitioned to PAUSED on failure.
         assert provider._expected_phase == HandoffPhase.PLAYING
+
+
+class TestSharedHelpers:
+    """Static helpers reused by both stream and handoff modes."""
+
+    def test_classify_drift_below_threshold_is_ignore(self) -> None:
+        """Drift inside 3s threshold returns 'ignore'."""
+        assert YandexYnisonProvider._classify_drift(11_000, 10_000) == "ignore"
+        assert YandexYnisonProvider._classify_drift(10_000, 10_000) == "ignore"
+
+    def test_classify_drift_genuine_seek(self) -> None:
+        """Drift > threshold and not queue-rebuild → 'seek'."""
+        assert YandexYnisonProvider._classify_drift(60_000, 10_000) == "seek"
+        assert YandexYnisonProvider._classify_drift(10_000, 60_000) == "seek"
+
+    def test_classify_drift_queue_rebuild(self) -> None:
+        """Ynison ~0 while we're past 5s → 'queue_rebuild' (don't seek)."""
+        assert YandexYnisonProvider._classify_drift(0, 30_000) == "queue_rebuild"
+        assert YandexYnisonProvider._classify_drift(500, 8_000) == "queue_rebuild"
+
+    def test_classify_drift_zero_to_zero_below_threshold(self) -> None:
+        """0 vs 0 is 'ignore' (no drift); not a queue_rebuild signal."""
+        assert YandexYnisonProvider._classify_drift(0, 0) == "ignore"
+
+    def test_classify_drift_genuine_seek_to_zero(self) -> None:
+        """User explicitly seeked back to 0, our pos < 5s — honor it."""
+        # Our pos = 4s, Ynison says 0 → drift 4s > threshold 3s, but our
+        # pos NOT past 5s → not classified as queue rebuild → 'seek'.
+        assert YandexYnisonProvider._classify_drift(0, 4_000) == "seek"
+
+    def test_pick_resume_position_local_wins_when_higher(self) -> None:
+        """Local snapshot > Ynison → use local."""
+        ms, source = YandexYnisonProvider._pick_resume_position(
+            local_snapshot_ms=15_000,
+            ynison_progress_ms=10_000,
+        )
+        assert ms == 15_000
+        assert source == "local_snapshot"
+
+    def test_pick_resume_position_ynison_wins_when_higher(self) -> None:
+        """Ynison > local snapshot → use Ynison."""
+        ms, source = YandexYnisonProvider._pick_resume_position(
+            local_snapshot_ms=1_000,
+            ynison_progress_ms=43_000,
+        )
+        assert ms == 43_000
+        assert source == "ynison"
+
+    def test_pick_resume_position_local_zero_falls_back_to_ynison(self) -> None:
+        """Local=0 falls back to Ynison even if equal-or-higher numerically."""
+        ms, source = YandexYnisonProvider._pick_resume_position(
+            local_snapshot_ms=0,
+            ynison_progress_ms=0,
+        )
+        # Both 0; local_snapshot=0 is treated as "no snapshot", source is ynison.
+        assert ms == 0
+        assert source == "ynison"
+
+    def test_pick_resume_position_equal_prefers_local(self) -> None:
+        """Equal non-zero values prefer local (more recent measurement)."""
+        ms, source = YandexYnisonProvider._pick_resume_position(
+            local_snapshot_ms=5_000,
+            ynison_progress_ms=5_000,
+        )
+        assert ms == 5_000
+        assert source == "local_snapshot"

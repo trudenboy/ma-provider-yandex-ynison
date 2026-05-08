@@ -932,20 +932,28 @@ class YandexYnisonProvider(PluginProvider):
                 else:
                     our_ms = self._streaming_progress_ms
                     if our_ms >= 0:
-                        drift_ms = abs(state.progress_ms - our_ms)
-                        if drift_ms > 3000:
+                        verdict = self._classify_drift(state.progress_ms, our_ms)
+                        if verdict == "seek":
                             self.logger.info(
                                 "Seek detected on track %s: "
                                 "expected ~%dms, Ynison at %dms (drift %dms)",
                                 new_track,
                                 our_ms,
                                 state.progress_ms,
-                                int(drift_ms),
+                                abs(state.progress_ms - our_ms),
                             )
                             self._seek_position_ms = state.progress_ms
                             self._track_changed_event.set()
                             self._seek_grace_until = now + _ECHO_GRACE_PERIOD
                             significant_change = True
+                        elif verdict == "queue_rebuild":
+                            self.logger.debug(
+                                "Stream: drift to 0 ignored on %s (Ynison=%dms, "
+                                "stream=%dms) — queue-rebuild echo, not a user seek",
+                                new_track,
+                                state.progress_ms,
+                                our_ms,
+                            )
 
         # Update metadata from state
         self._update_metadata(state)
@@ -1460,6 +1468,58 @@ class YandexYnisonProvider(PluginProvider):
         self._command_idempotency[composite] = now
         return True
 
+    @staticmethod
+    def _classify_drift(
+        ynison_ms: int,
+        our_ms: int,
+        threshold_ms: int = 3000,
+    ) -> str:
+        """Classify drift between Ynison-reported and our local position.
+
+        Returns one of:
+        - ``"ignore"`` — drift below threshold; no seek needed.
+        - ``"queue_rebuild"`` — Ynison reports near-zero while we're
+          past 5s; treat as a RADIO queue-rebuild echo, not a real
+          user seek (otherwise we'd yank playback back to start
+          mid-track on every queue replenishment).
+        - ``"seek"`` — genuine drift; honor it.
+
+        Used by both handoff (`_apply_same_track_sync`) and stream
+        mode (`_handle_ynison_state` drift block) to keep the
+        rebuild-vs-seek heuristic consistent.
+        """
+        drift = abs(ynison_ms - our_ms)
+        if drift <= threshold_ms:
+            return "ignore"
+        if ynison_ms < 1000 and our_ms > 5000:
+            return "queue_rebuild"
+        return "seek"
+
+    @staticmethod
+    def _pick_resume_position(
+        *,
+        local_snapshot_ms: int,
+        ynison_progress_ms: int,
+    ) -> tuple[int, str]:
+        """Pick the best resume position from local snapshot + Ynison.
+
+        Returns ``(resume_ms, source_label)``. Local snapshots can
+        be stale after multiple REPLACE cycles (handoff) or after a
+        network blip (stream). Ynison's progress is set by the user's
+        app on pause and is authoritative for "where the user wants
+        to resume". Take the max so:
+        - A fast pause/resume toggle (Ynison echo lags by ~1s but
+          local snapshot is current) lands at the local value.
+        - A long pause where local accumulator was reset by REPLACE
+          cycles (snapshot=1s, Ynison=43s) lands at Ynison's 43s.
+
+        Source label is for logging; values: ``"local_snapshot"`` or
+        ``"ynison"``.
+        """
+        if local_snapshot_ms >= ynison_progress_ms and local_snapshot_ms > 0:
+            return local_snapshot_ms, "local_snapshot"
+        return ynison_progress_ms, "ynison"
+
     async def _cancel_pending_play_media(self) -> None:
         """Cancel a still-running play_media task, if any.
 
@@ -1687,24 +1747,12 @@ class YandexYnisonProvider(PluginProvider):
         if time.monotonic() < self._re_issue_debounce_until:
             return
 
-        # Pick resume position: prefer the higher of MA's PLAYING snapshot
-        # and Ynison's reported progress.
-        # - Ynison's progress reflects the user's real in-track position
-        #   (set by the Yandex-app when they paused) — authoritative.
-        # - MA's snapshot is reset by every play_media(REPLACE) and only
-        #   accumulates time-since-last-REPLACE, so it stays small after
-        #   a series of pause/play cycles. Trusting the snapshot caused
-        #   resume to land near 0 even when the user paused at 43s in
-        #   the app.
-        # - We still take the max so a fast pause/resume toggle (where
-        #   Ynison's echo lags ours by ~1s) doesn't accidentally reset.
-        ynison_pos = state.progress_ms
+        # Pick resume position via shared helper — see `_pick_resume_position`.
         ma_snapshot = self._handoff_last_playing_elapsed_ms
-        resume_ms = max(ma_snapshot, ynison_pos)
-        source = (
-            "ma_snapshot"
-            if ma_snapshot >= ynison_pos and ma_snapshot > 0
-            else "ynison"
+        ynison_pos = state.progress_ms
+        resume_ms, source = self._pick_resume_position(
+            local_snapshot_ms=ma_snapshot,
+            ynison_progress_ms=ynison_pos,
         )
         self.logger.info(
             "Handoff: queue IDLE on same URI — re-issuing play_media to resume "
@@ -1777,14 +1825,8 @@ class YandexYnisonProvider(PluginProvider):
         # bouncing back, not a real seek. IDLE-/PAUSED-resume branches
         # above run regardless of echo; the skip is local to drift only.
         if not state.last_update_is_echo:
-            drift_ms = abs(state.progress_ms - our_pos_ms)
-            # Suppress "seek to 0" when MA is already past 5s — RADIO
-            # queue rebalances broadcast a fresh state with progress=0
-            # for the same track, and obeying that yanks the player
-            # back to the start mid-track. A real user seek to 0 is
-            # rare and would resolve on the next update.
-            looks_like_queue_rebuild = state.progress_ms < 1000 and our_pos_ms > 5000
-            if drift_ms > 3000 and not looks_like_queue_rebuild:
+            verdict = self._classify_drift(state.progress_ms, our_pos_ms)
+            if verdict == "seek":
                 self.logger.info(
                     "Handoff: seek detected on %s (Ynison=%dms, MA=%dms)",
                     new_track,
@@ -1795,10 +1837,10 @@ class YandexYnisonProvider(PluginProvider):
                     await self.mass.player_queues.seek(target_player_id, state.progress_ms // 1000)
                 except Exception:
                     self.logger.exception("Handoff seek failed on %s", target_player_id)
-            elif drift_ms > 3000:
+            elif verdict == "queue_rebuild":
                 self.logger.debug(
                     "Handoff: drift to 0 ignored on %s (Ynison=%dms, MA=%dms) "
-                    "— treated as queue-rebuild echo, not a user seek",
+                    "— queue-rebuild echo, not a user seek",
                     new_track,
                     state.progress_ms,
                     our_pos_ms,
@@ -2092,6 +2134,11 @@ class YandexYnisonProvider(PluginProvider):
             raise UnsupportedFeaturedException("Ynison client not initialized")
         if not self._ynison.connected:
             raise PlayerCommandFailed("Ynison WebSocket disconnected")
+        # Idempotency: MA may fire the same play callback twice (e.g.
+        # racing UI and remote-control taps). Collapse duplicates so
+        # the WS doesn't see two `paused=False` updates within 1s.
+        if not self._idempotent("on_play", None):
+            return
         state = self._ynison.state
         await self._send_progress_to_ynison(
             progress_ms=state.progress_ms,
@@ -2105,6 +2152,10 @@ class YandexYnisonProvider(PluginProvider):
             raise UnsupportedFeaturedException("Ynison client not initialized")
         if not self._ynison.connected:
             raise PlayerCommandFailed("Ynison WebSocket disconnected")
+        # Idempotency: same as `_on_play` — drop a duplicate pause
+        # within the TTL window so we don't echo paused=True twice.
+        if not self._idempotent("on_pause", None):
+            return
         state = self._ynison.state
         await self._send_progress_to_ynison(
             progress_ms=state.progress_ms,
