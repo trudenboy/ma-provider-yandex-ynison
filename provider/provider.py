@@ -2071,6 +2071,31 @@ class YandexYnisonProvider(PluginProvider):
                         duration_ms=duration_ms,
                         paused=is_paused,
                     )
+                # Heartbeat-side natural-end detection. MA's event bus
+                # sometimes drops the PLAYING→PAUSED/IDLE transition
+                # event for handoff (we observed cases where stream
+                # finished cleanly but `_on_ma_player_event` never ran
+                # for the state change). Heartbeat tick fires every
+                # ≤5s reliably, so doing the same check here fills the
+                # gap. Idempotent via `_handoff_completion_signaled_for`.
+                if (
+                    self._expected_phase == HandoffPhase.PLAYING
+                    and queue.state != PlaybackState.PLAYING
+                    and self._expected_track_id
+                    and self._handoff_completion_signaled_for != self._expected_track_id
+                    and self._is_at_natural_end_of_track(queue)
+                ):
+                    self._handoff_completion_signaled_for = self._expected_track_id
+                    self._expected_phase = HandoffPhase.ENDING
+                    self.logger.info(
+                        "Handoff heartbeat: detected natural-end on %s "
+                        "(queue.state=%s, elapsed=%dms) — signalling "
+                        "completion to Ynison",
+                        self._expected_track_id,
+                        queue.state.value if hasattr(queue.state, "value") else queue.state,
+                        elapsed_ms,
+                    )
+                    self.mass.create_task(self._signal_track_completion())
         except asyncio.CancelledError:
             pass
 
