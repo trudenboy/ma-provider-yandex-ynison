@@ -79,6 +79,7 @@ PluginSource → MA Player (Chromecast / DLNA / AirPlay / etc.)
 | `output_sample_rate` | String | `auto` | PCM sample rate: `auto` / `44100` / `48000` / `96000`. Auto adapts to first track via `_prefetch_format_for_track` (lossless 44.1 / 96 kHz preserved). |
 | `output_bit_depth` | String | `auto` | PCM bit depth: `auto` / `16` / `24`. Auto adapts to first track. |
 | `playback_mode` | String | `stream` | `stream` (default, plugin owns audio source) or `handoff` (experimental, MA player_queue plays via yandex_music). Affects `SUPPORTED_FEATURES` at setup. |
+| `handoff_heartbeat_interval` | String (`3`/`5`/`7`/`10`) | `5` | Handoff-only: how often to push `update_playing_status` to Ynison even without MA queue events. Guards against `YNISON_ERROR_REBALANCED`. Ignored in stream mode. |
 | `publish_name` | String | `Music Assistant` | Device name in Yandex Music app |
 | `device_id` | String | auto-generated | 16-char hex, persisted per instance (hidden) |
 
@@ -92,7 +93,18 @@ Auto-detection (no hint): `superb`/`lossless` → 24-bit/44.1kHz, else → 16-bi
 ### Playback modes
 
 - **stream** (default): plugin advertises `AUDIO_SOURCE`, owns a `PluginSource` and emits PCM via `get_audio_stream()` → MA's outer ffmpeg → player. Two ffmpeg passes (inner per-track + outer per-session).
-- **handoff** (experimental): plugin does NOT advertise `AUDIO_SOURCE`. On Ynison track change it calls `mass.player_queues.play_media(player_id, "yandex_music://track/<id>", REPLACE)`. MA streams natively through the linked `yandex_music` MusicProvider → no inner ffmpeg, no PCM resampling. Pause/seek/track-end mirror back to Ynison via subscription on `EventType.QUEUE_TIME_UPDATED` / `PLAYER_UPDATED`. Trade-off: looser sync between the Yandex Music app and MA — Spotify Connect avoids this for the same reason (see commented `CONF_HANDOFF_MODE` in `spotify_connect/__init__.py`).
+- **handoff** (experimental): plugin does NOT advertise `AUDIO_SOURCE`. On Ynison track change it calls `mass.player_queues.play_media(player_id, "<yandex_music_instance>://track/<id>", REPLACE)`. MA streams natively through the linked `yandex_music` MusicProvider → no inner ffmpeg, no PCM resampling. Pause/seek/track-end mirror back to Ynison via subscription on `EventType.QUEUE_TIME_UPDATED` / `PLAYER_UPDATED`. Trade-off: looser sync between the Yandex Music app and MA — Spotify Connect avoids this for the same reason (see commented `CONF_HANDOFF_MODE` in `spotify_connect/__init__.py`).
+
+#### Handoff invariants and safety nets
+
+- **URI uses linked instance_id**, not bare `yandex_music://` — picks the correct yandex_music account when both borrow and own coexist (`_build_handoff_uri`).
+- **Heartbeat** (`_handoff_heartbeat_loop`): runs at `handoff_heartbeat_interval` (default 5s, configurable 3–10s). Pushes progress to Ynison even when MA's `QUEUE_TIME_UPDATED` is sparse (DLNA/UPnP), preventing Ynison from re-balancing the active device.
+- **Grace period** (`_handoff_grace_until`): 5s after `play_media(REPLACE)` we suppress drift-driven seeks. Override: a queue already PLAYING with `elapsed > 1s` lets a real user seek pass through.
+- **Dedup on reconnect**: before issuing `play_media`, compare `queue.current_item.uri` with the expected URI. Skip when already PLAYING/BUFFERING; switch to `play()` when same URI but PAUSED.
+- **Replay reset** (`progress_ms < 1000`): clears `_handoff_completion_signaled_for` so the next end-of-track will re-signal Ynison.
+- **State-change force-update** (P10): MA queue transitions (PLAYING ↔ PAUSED ↔ IDLE) bypass the 2s progress throttle — pause/play from MA UI reflect in the Yandex Music app within ~100 ms.
+- **Owner conflict**: handoff mode treats the MA queue as owned by Ynison. Starting playback from the Yandex Music app calls `play_media(REPLACE)`, which silently overwrites any queue the user built in MA UI.
+- **Audio quality** in handoff is governed by the `yandex_music` provider's `quality` setting, not by this plugin's `output_sample_rate` / `output_bit_depth` (those apply only to stream mode).
 
 ## Track processing flow
 

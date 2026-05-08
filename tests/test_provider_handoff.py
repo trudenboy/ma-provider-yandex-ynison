@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import time
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -10,7 +12,6 @@ import pytest
 from music_assistant_models.enums import (
     PlaybackState,
     ProviderFeature,
-    ProviderType,
 )
 
 from provider import _features_for_mode
@@ -185,15 +186,9 @@ class TestHandoffActivate:
     async def test_new_track_calls_play_media(self) -> None:
         """A new Ynison track id triggers player_queues.play_media with the right URI."""
         provider = _make_handoff_provider()
-        # link a yandex_music provider so the pre-fetch path is exercised
-        ym = MagicMock()
-        ym.domain = "yandex_music"
-        ym.type = ProviderType.MUSIC
-        ym.config.get_value = MagicMock(return_value="superb")
-        provider._yandex_provider = ym
-        provider._get_stream_details_with_retry = AsyncMock(  # type: ignore[method-assign]
-            side_effect=Exception("no stream details — irrelevant for play_media call")
-        )
+        # Without a linked yandex_music provider the URI falls back to the
+        # bare domain — that's what we assert here.
+        provider._yandex_provider = None
 
         state = _make_state("track-1")
         await provider._handoff_activate(state, "player-A")
@@ -284,6 +279,220 @@ class TestHandoffPause:
 # ------------------------------------------------------------------
 # _on_ma_player_event
 # ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestHandoffActivateExtended:
+    """Doortop coverage for grace, dedup, replay, instance-id URI."""
+
+    async def test_uri_uses_yandex_provider_instance_id(self) -> None:
+        """When a yandex_music provider is linked, its instance_id is in the URI."""
+        provider = _make_handoff_provider()
+        ym = MagicMock()
+        ym.instance_id = "ym-borrow-A"
+        provider._yandex_provider = ym
+        provider._get_stream_details_with_retry = AsyncMock(  # type: ignore[method-assign]
+            side_effect=Exception("ignored")
+        )
+
+        await provider._handoff_activate(_make_state("track-X"), "player-A")
+
+        provider.mass.player_queues.play_media.assert_awaited_once()
+        assert (
+            provider.mass.player_queues.play_media.call_args.args[1]
+            == "ym-borrow-A://track/track-X"
+        )
+
+    async def test_uri_falls_back_to_domain_without_provider(self) -> None:
+        """Missing yandex_music link → URI uses bare `yandex_music` domain."""
+        provider = _make_handoff_provider()
+        provider._yandex_provider = None
+
+        await provider._handoff_activate(_make_state("track-Y"), "player-A")
+
+        assert (
+            provider.mass.player_queues.play_media.call_args.args[1]
+            == "yandex_music://track/track-Y"
+        )
+
+    async def test_dedup_skips_play_media_when_queue_already_playing_same_uri(self) -> None:
+        """If MA queue already plays the expected URI, no fresh play_media."""
+        provider = _make_handoff_provider()
+        provider._yandex_provider = None
+        queue = provider.mass.player_queues.get.return_value
+        queue.state = PlaybackState.PLAYING
+        queue.current_item = MagicMock()
+        queue.current_item.uri = "yandex_music://track/track-Z"
+
+        await provider._handoff_activate(_make_state("track-Z"), "player-A")
+
+        provider.mass.player_queues.play_media.assert_not_awaited()
+        # bookkeeping is still updated
+        assert provider._handoff_current_track_id == "track-Z"
+
+    async def test_resume_via_play_when_queue_paused_with_same_uri(self) -> None:
+        """Same URI but PAUSED → call play(), not play_media()."""
+        provider = _make_handoff_provider()
+        provider._yandex_provider = None
+        queue = provider.mass.player_queues.get.return_value
+        queue.state = PlaybackState.PAUSED
+        queue.current_item = MagicMock()
+        queue.current_item.uri = "yandex_music://track/track-Z"
+
+        await provider._handoff_activate(_make_state("track-Z"), "player-A")
+
+        provider.mass.player_queues.play_media.assert_not_awaited()
+        provider.mass.player_queues.play.assert_awaited_once_with("player-A")
+
+    async def test_grace_blocks_drift_seek_after_play_media(self) -> None:
+        """Drift seek is suppressed inside the grace window after play_media."""
+        provider = _make_handoff_provider()
+        provider._yandex_provider = None
+        # Trigger play_media once → grace window opens.
+        await provider._handoff_activate(_make_state("track-1"), "player-A")
+        assert provider._handoff_grace_until > time.monotonic()
+
+        # Same track, big drift, queue still resolving (PLAYING but elapsed=0,
+        # which is the typical state in the first second after play_media).
+        queue = provider.mass.player_queues.get.return_value
+        queue.state = PlaybackState.PLAYING
+        queue.corrected_elapsed_time = 0.0
+
+        await provider._handoff_activate(_make_state("track-1", progress_ms=60_000), "player-A")
+        provider.mass.player_queues.seek.assert_not_awaited()
+
+    async def test_grace_overridden_by_playing_state_with_elapsed(self) -> None:
+        """A real seek inside grace must still go through if queue progressed."""
+        provider = _make_handoff_provider()
+        provider._yandex_provider = None
+        await provider._handoff_activate(_make_state("track-1"), "player-A")
+
+        queue = provider.mass.player_queues.get.return_value
+        queue.state = PlaybackState.PLAYING
+        queue.corrected_elapsed_time = 5.0  # > 1s elapsed → override
+
+        await provider._handoff_activate(_make_state("track-1", progress_ms=60_000), "player-A")
+        provider.mass.player_queues.seek.assert_awaited_once_with("player-A", 60)
+
+    async def test_replay_resets_completion_marker(self) -> None:
+        """Same track with progress<1s clears the completion-once marker."""
+        provider = _make_handoff_provider()
+        provider._yandex_provider = None
+        provider._handoff_current_track_id = "track-1"
+        provider._handoff_completion_signaled_for = "track-1"
+
+        await provider._handoff_activate(_make_state("track-1", progress_ms=500), "player-A")
+        assert provider._handoff_completion_signaled_for is None
+
+
+@pytest.mark.asyncio
+class TestHandoffHeartbeat:
+    """Independent progress heartbeat (P1)."""
+
+    async def test_heartbeat_loop_sends_progress_when_active(self) -> None:
+        """One heartbeat tick fires _send_progress_to_ynison."""
+        provider = _make_handoff_provider()
+        provider._handoff_heartbeat_interval = 0.05
+        provider._active_player_id = "player-A"
+        ynison = MagicMock()
+        ynison.connected = True
+        ynison.state.duration_ms = 200_000
+        provider._ynison = ynison
+        provider._actual_duration_ms = 200_000
+        queue = provider.mass.player_queues.get.return_value
+        queue.state = PlaybackState.PLAYING
+        queue.corrected_elapsed_time = 30.0
+        send_mock = AsyncMock()
+        provider._send_progress_to_ynison = send_mock  # type: ignore[method-assign]
+
+        task = asyncio.create_task(provider._handoff_heartbeat_loop())
+        await asyncio.sleep(0.12)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+        assert send_mock.await_count >= 1
+        call = send_mock.await_args_list[0]
+        assert call.kwargs["progress_ms"] == 30000
+        assert call.kwargs["paused"] is False
+
+    async def test_heartbeat_skips_without_active_player(self) -> None:
+        """No active_player_id → heartbeat skips its tick."""
+        provider = _make_handoff_provider()
+        provider._handoff_heartbeat_interval = 0.05
+        provider._active_player_id = None
+        ynison = MagicMock()
+        ynison.connected = True
+        provider._ynison = ynison
+        send_mock = AsyncMock()
+        provider._send_progress_to_ynison = send_mock  # type: ignore[method-assign]
+
+        task = asyncio.create_task(provider._handoff_heartbeat_loop())
+        await asyncio.sleep(0.12)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+        send_mock.assert_not_awaited()
+
+    async def test_heartbeat_clears_player_when_queue_disappears(self) -> None:
+        """Queue gone → loop clears active player and exits."""
+        provider = _make_handoff_provider()
+        provider._handoff_heartbeat_interval = 0.05
+        provider._active_player_id = "player-A"
+        ynison = MagicMock()
+        ynison.connected = True
+        provider._ynison = ynison
+        provider.mass.player_queues.get = MagicMock(return_value=None)
+
+        task = asyncio.create_task(provider._handoff_heartbeat_loop())
+        await asyncio.sleep(0.12)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+        assert provider._active_player_id is None
+
+
+class TestForceProgressOnStateChange:
+    """P10: state transitions bypass the 2s throttle for low-latency forwarding."""
+
+    def _setup(self) -> YandexYnisonProvider:
+        """Build a handoff provider hooked up to a connected Ynison mock."""
+        provider = _make_handoff_provider()
+        provider._active_player_id = "player-A"
+        ynison = MagicMock()
+        ynison.connected = True
+        ynison.state.duration_ms = 200_000
+        provider._ynison = ynison
+        provider._actual_duration_ms = 200_000
+        return provider
+
+    def test_state_change_triggers_send_within_throttle_window(self) -> None:
+        """A PLAYING→PAUSED transition forwards progress even mid-throttle."""
+        provider = self._setup()
+        # Simulate: throttle taken recently
+        provider._handoff_last_progress_sync_mono = time.monotonic()
+        # Make sure we're using the same `now` reference baseline
+        queue = provider.mass.player_queues.get.return_value
+        queue.state = PlaybackState.PLAYING
+
+        event = MagicMock()
+        event.object_id = "player-A"
+
+        # First tick: state goes from None → PLAYING (state_changed=True)
+        provider._on_ma_player_event(event)
+        first_calls = provider.mass.create_task.call_count
+        assert first_calls >= 1
+
+        # Second tick: same PLAYING state inside throttle window → no send
+        provider._on_ma_player_event(event)
+        assert provider.mass.create_task.call_count == first_calls
+
+        # Third tick: state transitions to PAUSED → bypasses throttle
+        queue.state = PlaybackState.PAUSED
+        provider._on_ma_player_event(event)
+        assert provider.mass.create_task.call_count > first_calls
 
 
 class TestOnMaPlayerEvent:
