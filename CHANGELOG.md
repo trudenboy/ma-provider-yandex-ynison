@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.2.2] - 2026-05-12
+
+### Changed
+
+- Removed 50 `# type: ignore` comments from `tests/test_*.py` that became
+  unused after the upstream mypy coverage extension (PR
+  `trudenboy/ma-provider-tools#59`). All `[unused-ignore]` mypy errors
+  resolved.
+
 ## [2.2.1] - 2026-05-09
 
 ### Fixed — typed contract on `player.extra_data["output_format"]`
