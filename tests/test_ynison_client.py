@@ -1644,9 +1644,7 @@ class TestTokenRefreshOnReconnect:
 
         on_auth_failure.assert_awaited_once()
         assert client._token == SecretStr("new-token")
-        client._logger.info.assert_any_call(
-            "Token refreshed, will retry with new token"
-        )
+        client._logger.info.assert_any_call("Token refreshed, will retry with new token")
 
     async def test_auth_failure_no_callback(self) -> None:
         """LoginFailed without on_auth_failure keeps retrying on the same token."""
