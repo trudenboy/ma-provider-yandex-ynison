@@ -16,7 +16,7 @@ description: Документация провайдера Yandex Music Connect 
 [![Stars](https://img.shields.io/github/stars/trudenboy/ma-provider-yandex-ynison?style=flat&logo=github)](https://github.com/trudenboy/ma-provider-yandex-ynison/stargazers)
 
 
-<div class="topic-pills"> <code>music-assistant</code> <code>home-assistant</code> <code>python</code> <code>plugin-provider</code> <code>yandex-ynison</code> <code>yandex-music</code> <code>music-connect</code> <code>russia</code> <code>russian-music</code> <code>spotify-connect-alt</code>
+<div class="topic-pills"> <code>music-assistant</code> <code>home-assistant</code> <code>python</code> <code>plugin-provider</code> <code>yandex-connect</code> <code>yandex</code> <code>ynison</code> <code>yandex-music</code> <code>music-connect</code> <code>яндекс</code> <code>музыка</code> <code>spotify-connect-alt</code>
 </div>
 
 
