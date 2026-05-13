@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.2.9] - 2026-05-13
+
+### Documented — multi-user restricted-filter limitation on UI integration
+
+MA's websocket gate
+(`controllers/webserver/websocket_client.py:444-454`) drops
+`QUEUE_*` events whose `event.object_id` is not in the user's
+`player_filter` list. Our fake-queue events use the plugin
+`instance_id` as `object_id` (matching `player.active_source` for
+the frontend's queue lookup), so users with a restricted
+`player_filter` see an empty player card when the integration is
+on.
+
+Switching `object_id` to `player_id` would pass the filter but
+break the frontend's queue lookup for everyone, since
+`player.active_source` points at `instance_id`. A clean fix needs
+an MA-core carve-out for plugin source ids (similar to the
+existing `_sendspin_player_id` exception) or a frontend change to
+route QUEUE_* events by `data.queue_id` — both out of scope.
+
+Documented the limitation in the `enable_ui_integration` config
+description and `_register_plugin_queue` docstring so admins know
+to expect this on multi-user setups.
+
 ## [2.2.8] - 2026-05-13
 
 ### Fixed — `paused=False` on empty server-side queue triggered 400030001 cascade
