@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.2.6] - 2026-05-13
+
+### Fixed — local-vs-upstream mypy version skew on `arg-type` ignore
+
+The local pin is `music-assistant-models 1.1.111`; upstream PR CI
+uses `1.1.117` and tightens `ConfigValueType`. The
+`get_config_entries(mass, values=values)` call in
+`tests/test_config_entries.py:298` is therefore `arg-type` against
+upstream but valid locally — leaving a plain `# type: ignore[arg-type]`
+made the source-repo CI gate flag `unused-ignore`. Switched to
+`# type: ignore[arg-type, unused-ignore]` so the comment is correct
+under either dependency version.
+
 ## [2.2.5] - 2026-05-13
 
 ### Fixed — upstream mypy compliance (round 2)
