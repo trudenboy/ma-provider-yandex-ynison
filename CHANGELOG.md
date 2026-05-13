@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.2.8] - 2026-05-13
+
+### Fixed — `paused=False` on empty server-side queue triggered 400030001 cascade
+
+When the server-side Ynison queue went empty mid-stream (typical
+trigger: the user closed the Yandex Music app on the phone, or a
+post-reconnect broadcast landed on a stale session with
+`currentIndex=-1 / playable_list=[]`), the next regular
+`_sync_progress` tick fired `update_playing_status(paused=False, …)`,
+which Ynison rejects with error 400030001
+("Player is not paused, but queue is probably empty") and closes the
+WebSocket. The reconnect then landed on the same empty-queue state,
+the next tick fired the same error, and the connection ping-ponged
+through reconnects (sometimes degrading into a rebalance loop with
+error 300100002) for minutes.
+
+`_send_progress_to_ynison` now short-circuits when `paused=False`
+and `self._ynison.state.current_track_id is None`, with a debug log
+explaining the skip. `paused=True` is still sent (one-sided guard;
+the server accepts that combination). Two unit tests cover both
+branches.
+
+Observed live 2026-05-13 15:23–15:27 in
+`music_assistant.yandex_ynison`.
+
 ## [2.2.7] - 2026-05-13
 
 ### Changed — handoff task hygiene + latency
