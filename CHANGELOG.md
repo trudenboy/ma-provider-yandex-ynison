@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.2.3] - 2026-05-13
+
+### Fixed — rollback on failed handoff resume
+
+`_apply_track_change` was setting `_expected_phase = ACTIVATING` and
+opening the drift-suppress window *before* awaiting `cmd_play` in the
+`same_uri_paused` branch, but on exception only logged and left those
+optimistic values in place. The heartbeat / event-sync code would
+then keep reporting `paused=False` and treat the session as
+"activating" indefinitely even though playback never resumed. Now
+the branch snapshots `_drift_suppress_until` / `_expected_phase`
+before the await and restores them on `Exception`, symmetric with
+the rollback logic already in place for the REPLACE branches.
+Reported on the upstream PR by Copilot.
+
 ## [2.2.2] - 2026-05-12
 
 ### Changed
