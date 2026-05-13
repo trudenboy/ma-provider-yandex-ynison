@@ -2,6 +2,36 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.2.7] - 2026-05-13
+
+### Changed — handoff task hygiene + latency
+
+- `_play_media_task` is now created via `self.mass.create_task(...)`
+  instead of bare `asyncio.create_task(...)`. The new path registers
+  the task with the `MusicAssistant` instance so it is auto-cancelled
+  on stop / reload and picks up the standard unhandled-exception log
+  callback. The reference is still kept on `self._play_media_task`
+  so `_cancel_pending_play_media` can supersede an in-flight
+  activation on rapid track changes. Fixes Copilot review note on
+  the upstream PR.
+- `_handoff_activate` now fires `_prefetch_format_for_track` in the
+  background (`mass.create_task(...)`) instead of awaiting it before
+  `play_media`. The prefetch is cosmetic in handoff mode (it only
+  primes MA's stream-detail cache; the resulting `_normalized_format`
+  is never used), but awaiting it added up to `_PREFETCH_FORMAT_TIMEOUT`
+  (2.5 s) of avoidable latency to every handoff track change. The
+  cache prime now races MA's own stream-detail resolution; whichever
+  finishes first is used and both paths are correct. Fixes Copilot
+  review note on the upstream PR.
+
+### Tests
+
+- `tests/test_provider_handoff.py::_make_mock_mass`: `mass.create_task`
+  mock now wraps coroutines into real `asyncio.Task` objects when a
+  running loop is available, so callers can both `await` the returned
+  task and `cancel()` it — matching the real `MusicAssistant.create_task`
+  contract that `_play_media_task` relies on.
+
 ## [2.2.6] - 2026-05-13
 
 ### Fixed — local-vs-upstream mypy version skew on `arg-type` ignore

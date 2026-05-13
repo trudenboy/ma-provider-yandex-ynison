@@ -26,7 +26,7 @@ Connect).
 
 ## Status
 
-**Beta** (v2.2.6) — see [CHANGELOG.md](CHANGELOG.md) and [ROADMAP.md](ROADMAP.md).
+**Beta** (v2.2.7) — see [CHANGELOG.md](CHANGELOG.md) and [ROADMAP.md](ROADMAP.md).
 
 ## Architecture
 
