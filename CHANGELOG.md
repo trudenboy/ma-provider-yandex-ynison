@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.2.4] - 2026-05-13
+
+### Fixed — upstream mypy compliance
+
+Module-level `# mypy: disable-error-code="..."` headers added to
+`tests/test_provider.py` (`attr-defined,unreachable`) and
+`tests/test_ynison_client.py` (`attr-defined`); the existing header
+on `tests/test_provider_handoff.py` widened to include `unreachable`.
+The per-line `# type: ignore` markers stripped in 2.2.2 (because
+upstream mypy flagged them as `unused-ignore`) left the upstream CI
+flagging `attr-defined` on the underlying MagicMock-style assertions
+(`assert_called`, `assert_any_call`, `return_value`, `call_count`)
+that mypy can't see through the typed callable signatures. Module-level
+disables cover those without `unused-ignore` complaints.
+
 ## [2.2.3] - 2026-05-13
 
 ### Fixed — rollback on failed handoff resume
