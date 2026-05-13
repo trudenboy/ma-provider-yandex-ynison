@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.2.5] - 2026-05-13
+
+### Fixed — upstream mypy compliance (round 2)
+
+After 2.2.4 widened the module-level disable headers, upstream CI
+surfaced a second batch of `attr-defined`-adjacent errors that the
+previous header didn't cover:
+
+- `tests/test_provider.py`: widened header to also include
+  `method-assign`, `misc`, `assignment` — covers the two lambda
+  reassignments of `provider.mass.create_task` and a `mock.method =
+  AsyncMock(...)` reassignment that upstream mypy flags as method
+  override.
+- `tests/test_config_entries.py`: restored `# type: ignore[arg-type]`
+  on the `get_config_entries(mass, values=values)` call where
+  `values: dict[str, object]` doesn't match the strict
+  `dict[str, ConfigValueType] | None` parameter type. The local
+  override `[[tool.mypy.overrides]] tests.* warn_unused_ignores=false`
+  keeps the per-line ignore silent here while upstream's stricter
+  config genuinely needs it (recurring pattern, previously hit in
+  2.1.2).
+
 ## [2.2.4] - 2026-05-13
 
 ### Fixed — upstream mypy compliance
