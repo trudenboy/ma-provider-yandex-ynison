@@ -903,6 +903,7 @@ wheels = [
 name = "ma-provider-yandex-ynison"
 source = { editable = "." }
 dependencies = [
+    { name = "music-assistant-models" },
     { name = "ya-passport-auth" },
 ]
 
@@ -930,6 +931,7 @@ requires-dist = [
     { name = "codespell", marker = "extra == 'test'", specifier = ">=2.4" },
     { name = "hass-client", marker = "extra == 'test'", specifier = ">=1.2" },
     { name = "music-assistant", marker = "extra == 'test'", git = "https://github.com/music-assistant/server.git?rev=dev" },
+    { name = "music-assistant-models", specifier = ">=1.1.120" },
     { name = "music-assistant-models", marker = "extra == 'test'", specifier = ">=1.1.120" },
     { name = "mypy", marker = "extra == 'test'", specifier = ">=1.19" },
     { name = "pre-commit", marker = "extra == 'test'", specifier = ">=4.5" },
