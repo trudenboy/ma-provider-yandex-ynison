@@ -533,9 +533,25 @@ class YandexYnisonProvider(PluginProvider):
                 if self._stream_stop_event.is_set():
                     break
 
-                # Track finished naturally — signal completion to Ynison.
-                # Yandex controls the queue; we just wait for the next track.
-                if not self._track_changed_event.is_set() and self._ynison:
+                # Differentiate "track finished naturally" from "inner loop
+                # broke out early". The inner chunk loop's break conditions
+                # cover: track change, stop event, pause, and same-queue
+                # reconnect/session supersede. If ANY of those triggered, we
+                # must NOT signal completion — doing so would tell Ynison the
+                # old track ended and Yandex would advance the queue,
+                # producing the "press pause, next track starts" bug.
+                broke_for_pause = self._ynison is not None and self._ynison.state.is_paused
+                broke_for_session_change = had_claim and (
+                    self._in_use_by_queue != player_id
+                    or self._active_session_id != captured_session_id
+                )
+                natural_end = (
+                    not self._track_changed_event.is_set()
+                    and not broke_for_pause
+                    and not broke_for_session_change
+                    and self._ynison is not None
+                )
+                if natural_end:
                     self.logger.info("Track %s finished, advancing to next", track_id)
                     await self._signal_track_completion()
                     if not await self._wait_for_track_change(track_id):

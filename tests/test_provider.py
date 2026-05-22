@@ -2728,3 +2728,67 @@ class TestPauseSilenceKeepalive:
         provider._stream_stop_event.set()
         with suppress(StopAsyncIteration, asyncio.CancelledError):
             await gen.aclose()
+
+    async def test_mid_stream_pause_does_not_signal_track_completion(self) -> None:
+        """Regression: pause mid-stream MUST NOT call `_signal_track_completion`.
+
+        Reproduces the "press pause in the app → next track starts" bug: the
+        inner chunk loop breaks on `is_paused`, the code AFTER the inner loop
+        treats every non-`_track_changed_event` exit as natural end-of-track
+        and calls `_signal_track_completion`, which tells Ynison the old
+        track ended → Yandex advances the queue → next track lands.
+        """
+        provider = _make_provider()
+        provider._yandex_provider = MagicMock()
+        provider._in_use_by_queue = "queue1"
+        provider._active_session_id = "session-1"
+
+        ynison = MagicMock()
+        ynison.state.is_paused = False
+        ynison.state.current_track_id = "track42"
+        ynison.state.progress_ms = 13_000
+        provider._ynison = ynison
+
+        # _stream_track yields one chunk, then waits until we flip is_paused
+        # to True so the chunk-loop break condition fires.
+        async def _stub_stream_track(
+            _track_id: str, *, seek_ms: int = 0, session_params: dict[str, Any] | None = None
+        ) -> Any:
+            yield b"\x00\x00\x00\x00"
+            # Give the test a chance to flip is_paused before we yield more.
+            await asyncio.sleep(0.05)
+            yield b"\x00\x00\x00\x00"
+
+        _stub_attr(provider, "_stream_track", _stub_stream_track)
+
+        signal_calls = 0
+
+        async def _spy_signal_completion() -> None:
+            nonlocal signal_calls
+            signal_calls += 1
+
+        _stub_attr(provider, "_signal_track_completion", _spy_signal_completion)
+        # And stop on the next outer-loop turn so the test does not hang.
+        # _signal_track_completion is also what would trigger
+        # _wait_for_track_change; stub it to be a no-op.
+
+        streamdetails = MagicMock()
+        gen = provider.get_audio_stream(streamdetails, seek_position=0)
+
+        async def _flip_to_paused() -> None:
+            await asyncio.sleep(0.02)
+            ynison.state.is_paused = True
+
+        flipper = asyncio.create_task(_flip_to_paused())
+        # Drive the generator: collect the real chunk, then start receiving
+        # silence after the pause flip. Stop after a few silence chunks.
+        chunks: list[bytes] = []
+        for _ in range(3):
+            chunks.append(await asyncio.wait_for(gen.__anext__(), timeout=2.0))
+
+        await flipper
+        provider._stream_stop_event.set()
+        with suppress(StopAsyncIteration, asyncio.CancelledError):
+            await gen.aclose()
+
+        assert signal_calls == 0, "pause must not trigger _signal_track_completion"
