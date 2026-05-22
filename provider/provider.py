@@ -744,6 +744,21 @@ class YandexYnisonProvider(PluginProvider):
             state.progress_ms,
         )
 
+        # Post-reconnect settle window: the first inbound state after a WS
+        # reconnect may reflect pre-reconnect peer state (active device etc).
+        # Acting on it would re-issue play_media, mirror a stale paused flag
+        # to MA, or worst case clobber a fresh local claim. The 2 s window in
+        # YnisonClient._connect_state gives the server time to emit a state
+        # broadcast that reflects our re-registered presence; until then we
+        # only log.
+        if self._ynison and self._ynison.in_post_reconnect_settle:
+            self.logger.debug(
+                "Skipping state inside post-reconnect settle window (track=%s paused=%s)",
+                track_id,
+                state.is_paused,
+            )
+            return
+
         if is_our_device and not state.is_paused:
             # Pre-fetch next batch when playing second-to-last track
             self._maybe_prefetch(current_index, playable_list, entity_id, entity_type)
