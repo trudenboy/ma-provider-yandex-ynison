@@ -18,6 +18,9 @@ test = [
   "codespell>=2.4",
   "music-assistant @ git+https://github.com/music-assistant/server.git@dev",
   "music-assistant-models>=1.1.120",
+  # Upstream MA's auth_providers imports hass-client unconditionally; not yet
+  # in their pyproject. Listed here so test installs work without manual help.
+  "hass-client>=1.2",
   "aiohttp>=3.9.0",
   "ruff>=0.14",
   "mypy>=1.19",

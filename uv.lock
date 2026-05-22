@@ -706,6 +706,18 @@ wheels = [
 ]
 
 [[package]]
+name = "hass-client"
+version = "1.2.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "aiohttp" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/7a/60/7da4ec1f6657ea3db6ac44c867be6a99d73ea63f68bb6931698cb4b70ee3/hass_client-1.2.3.tar.gz", hash = "sha256:b4bf8ef6757d64857ade829a3bda2bab8b797ffc5ee8fecdd0a6fd4f526736b0", size = 15607, upload-time = "2026-04-02T16:46:24.447Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ad/79/6f199f824c151b1b04270e4b117658676e033f4cf1fece1ae481b07774b6/hass_client-1.2.3-py3-none-any.whl", hash = "sha256:cc9f55daced223370bcda7e8dc4c9aa923ded1d0ac96733c1e74cd072e1f4099", size = 15345, upload-time = "2026-04-02T16:46:23.532Z" },
+]
+
+[[package]]
 name = "httpcore"
 version = "1.0.9"
 source = { registry = "https://pypi.org/simple" }
@@ -898,6 +910,7 @@ dependencies = [
 test = [
     { name = "aiohttp" },
     { name = "codespell" },
+    { name = "hass-client" },
     { name = "music-assistant" },
     { name = "music-assistant-models" },
     { name = "mypy" },
@@ -915,6 +928,7 @@ test = [
 requires-dist = [
     { name = "aiohttp", marker = "extra == 'test'", specifier = ">=3.9.0" },
     { name = "codespell", marker = "extra == 'test'", specifier = ">=2.4" },
+    { name = "hass-client", marker = "extra == 'test'", specifier = ">=1.2" },
     { name = "music-assistant", marker = "extra == 'test'", git = "https://github.com/music-assistant/server.git?rev=dev" },
     { name = "music-assistant-models", marker = "extra == 'test'", specifier = ">=1.1.120" },
     { name = "mypy", marker = "extra == 'test'", specifier = ">=1.19" },
