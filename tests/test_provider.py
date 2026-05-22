@@ -1,4 +1,4 @@
-# mypy: disable-error-code="attr-defined,unreachable,method-assign,misc,assignment"
+# mypy: disable-error-code="attr-defined,unreachable,method-assign,misc,assignment,unused-ignore"
 """Tests for the YandexYnisonProvider."""
 
 from __future__ import annotations
