@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.0.0b1] - 2026-05-22
+
+### Changed
+
+- Migrated to the new `AudioSource` MediaItem contract from upstream Music Assistant (PR `music-assistant/server#3938`). Requires `music-assistant >= 1.1.120` and the matching `music-assistant-models`. The plugin source now appears in the new "Live Inputs" browser node as a first-class library item rather than a per-player source-list entry. External triggers (selecting MA from the Yandex Music app) continue to auto-start playback on the configured target player.
+- Lock model rewritten around per-queue ownership plus a per-request session id; same-queue reconnects no longer race the previous stream's teardown.
+- `get_stream_details` is now side-effect-free so preload paths can fetch stream metadata without claiming the source.
+- Lossless PCM auto-mode default sample rate is 48 kHz instead of 44.1 kHz when no source hint is available; the format pre-fetch still lifts auto-mode to the real source rate (e.g. 96 kHz for Hi-Res) before playback starts.
+
+### Removed
+
+- The experimental `playback_mode = handoff` option and the related `handoff_heartbeat_interval` setting. Configurations carrying these values lose them silently on upgrade and the plugin always runs in the (formerly "stream") AudioSource path.
+- The experimental `enable_ui_integration` toggle. The new `AudioSource` flow renders a real queue card without any workaround, so the previous fake-queue mechanism — and the multi-user `player_filter` limitation documented in 2.2.9 — are gone.
+
 ## [2.2.9] - 2026-05-13
 
 ### Documented — multi-user restricted-filter limitation on UI integration
