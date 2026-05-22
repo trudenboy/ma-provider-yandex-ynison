@@ -203,7 +203,12 @@ class YandexYnisonProvider(PluginProvider):
                     item_id=AUDIO_SOURCE_ID,
                     provider_domain=self.domain,
                     provider_instance=self.instance_id,
-                    audio_format=self._normalized_format,
+                    # Fresh AudioFormat copy: AudioFormat is mutable and MA's
+                    # FFMpeg._log_reader_task sets `input_format.codec_type`
+                    # in-place. Sharing `self._normalized_format` here would
+                    # let that mutation leak into the ProviderMapping and into
+                    # later StreamDetails snapshots.
+                    audio_format=make_pcm_format(self._normalized_params),
                 )
             },
             can_play_pause=False,
@@ -302,7 +307,10 @@ class YandexYnisonProvider(PluginProvider):
         return StreamDetails(
             provider=self.instance_id,
             item_id=source_id,
-            audio_format=self._normalized_format,
+            # Fresh AudioFormat copy per call: MA's ffmpeg mutates
+            # input_format.codec_type in place, so a shared instance would
+            # propagate that mutation into future stream-details snapshots.
+            audio_format=make_pcm_format(self._normalized_params),
             media_type=MediaType.AUDIO_SOURCE,
             stream_type=StreamType.CUSTOM,
             stream_metadata=self._stream_metadata,
@@ -351,6 +359,15 @@ class YandexYnisonProvider(PluginProvider):
         # superseding session: the loop exits early, and the finally clear
         # below skips the release so it doesn't clobber the new claim.
         captured_session_id = self._active_session_id
+
+        # MA's streams controller may pass a non-zero seek_position (e.g. a
+        # resume initiated through a path that does NOT go through Ynison and
+        # therefore did not set `_seek_position_ms`). Honor it as the seed for
+        # the upcoming track. The Ynison-driven seek path (`_activate_playback`
+        # / `_on_seek`) keeps writing `_seek_position_ms` directly, which
+        # subsequent track iterations consume — only the seed differs.
+        if seek_position > 0 and self._seek_position_ms == 0:
+            self._seek_position_ms = seek_position * 1000
 
         # Freeze format for this streaming session so every inner ffmpeg
         # produces data matching the outer ffmpeg's captured input_format.
@@ -1312,10 +1329,14 @@ class YandexYnisonProvider(PluginProvider):
         is_lossless = quality in YANDEX_MUSIC_LOSSLESS_QUALITIES
         base = dict(PCM_LOSSLESS_PARAMS if is_lossless else PCM_LOSSY_PARAMS)
         # Promote auto-base from the real stream details when available.
+        # Validate the hint against the same allow-lists we use for explicit
+        # config overrides — a Yandex API hiccup that returns an unsupported
+        # rate (or 0) must not poison the AudioSource provider_mapping or the
+        # outer ffmpeg input_format.
         if hint is not None:
-            if hint.sample_rate:
+            if hint.sample_rate and str(hint.sample_rate) in _VALID_SAMPLE_RATES:
                 base["sample_rate"] = hint.sample_rate
-            if hint.bit_depth:
+            if hint.bit_depth and str(hint.bit_depth) in _VALID_BIT_DEPTHS:
                 base["bit_depth"] = hint.bit_depth
 
         # Apply config overrides. MA's ConfigEntry options constrain the UI to
@@ -1423,7 +1444,11 @@ class YandexYnisonProvider(PluginProvider):
                     item_id=AUDIO_SOURCE_ID,
                     provider_domain=self.domain,
                     provider_instance=self.instance_id,
-                    audio_format=self._normalized_format,
+                    # Fresh AudioFormat copy — `self._normalized_format` is a
+                    # shared mutable that MA's ffmpeg sets `codec_type` on
+                    # in-place. Sharing it would let that mutation leak into
+                    # the rebuilt AudioSource and any future stream-details.
+                    audio_format=make_pcm_format(self._normalized_params),
                 )
             },
             can_play_pause=has_provider,
@@ -1775,5 +1800,5 @@ class YandexYnisonProvider(PluginProvider):
         # Also trigger local stream restart so seek takes effect
         # immediately without waiting for the Ynison echo.
         self._seek_position_ms = seek_ms
-        self._seek_grace_until = time.monotonic() + 5.0
+        self._seek_grace_until = time.monotonic() + _ECHO_GRACE_PERIOD
         self._track_changed_event.set()

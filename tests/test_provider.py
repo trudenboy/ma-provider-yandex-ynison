@@ -1146,10 +1146,13 @@ class TestPCMNormalization:
             async for _ in provider._stream_track("track:123"):
                 pass
 
-        # audio_format should still be _normalized_format, not sd.audio_format;
-        # the AudioSource carries it via its ProviderMapping in the new model
+        # AudioSource carries the format via its ProviderMapping in the new model.
+        # We deliberately store a *fresh copy* per mapping (not `is original_format`)
+        # so that MA's in-place ffmpeg mutations on `_normalized_format` cannot
+        # leak into the mapping — but value equality must hold.
         mapping = next(iter(provider._audio_source.provider_mappings))
-        assert mapping.audio_format is original_format
+        assert mapping.audio_format == original_format
+        assert mapping.audio_format is not original_format
 
     async def test_stream_track_api_error_returns_empty(self) -> None:
         """If get_stream_details fails, _stream_track yields nothing."""
