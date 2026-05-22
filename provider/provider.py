@@ -7,7 +7,7 @@ import random
 import time
 from collections.abc import AsyncGenerator, Callable
 from contextlib import suppress
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from music_assistant_models.enums import (
     ContentType,
@@ -79,6 +79,18 @@ if TYPE_CHECKING:
 
 # How often (seconds) to sync progress to MA UI and Ynison.
 _PROGRESS_SYNC_INTERVAL = 5.0
+
+# Grace window after our own REPLACE/seek during which incoming Ynison
+# progress updates are treated as our own echo (not a user seek).
+_ECHO_GRACE_PERIOD = 3.0
+
+# Bound on the synchronous pre-fetch in _prefetch_format_for_track. A slow
+# pre-fetch is treated like a failed one — fall back to the current format
+# and let the in-stream `_get_stream_details_with_retry` handle retries.
+_PREFETCH_FORMAT_TIMEOUT = 2.5
+
+# Idempotency cache TTL for outbound peer-commands.
+_COMMAND_IDEMPOTENCY_TTL = 1.0
 
 # stable id for the single AudioSource this provider exposes;
 # combined with the provider instance_id this forms the persistent uri
@@ -206,6 +218,12 @@ class YandexYnisonProvider(PluginProvider):
         # stream request — used to reject stale on_source_unselected callbacks
         # after a same-queue reconnect supersedes the previous request.
         self._active_session_id: str | None = None
+
+        # Idempotency cache for outbound peer-commands. Suppresses duplicate
+        # (action, key) pairs inside `_COMMAND_IDEMPOTENCY_TTL` — protects
+        # against echo-storms where the same Ynison broadcast lands on our
+        # state-handler twice in quick succession.
+        self._command_idempotency: dict[tuple[str, str | None], float] = {}
 
     # ------------------------------------------------------------------
     # Provider lifecycle
@@ -770,7 +788,7 @@ class YandexYnisonProvider(PluginProvider):
             # Active device switched away — fully release player
             self._clear_active_player()
 
-    async def _activate_playback(self, state: YnisonState) -> None:
+    async def _activate_playback(self, state: YnisonState) -> None:  # noqa: PLR0915
         """Activate playback on the target MA player."""
         target_player_id = self._get_target_player_id()
         if not target_player_id:
@@ -786,7 +804,17 @@ class YandexYnisonProvider(PluginProvider):
         # (set by get_stream_details when the streams controller picks up the request)
         # to prevent queuing redundant play_media calls during the ~5s gap.
         if self._active_player_id != target_player_id or needs_reselect:
+            # Pre-fetch the upcoming track's real format BEFORE submitting
+            # play_media so the AudioSource's provider_mapping carries the
+            # right audio_format when the streams controller calls
+            # get_stream_details(). Skip on same-track same-player resume —
+            # the cached format is still correct for that case.
+            upcoming = state.current_track_id
+            switching_player = self._active_player_id != target_player_id
+            new_for_us = upcoming and upcoming != self._current_streaming_track_id
             self._active_player_id = target_player_id
+            if upcoming and (switching_player or new_for_us):
+                await self._prefetch_format_for_track(upcoming)
             self.mass.create_task(
                 self.mass.player_queues.play_media(target_player_id, str(self._audio_source.uri))
             )
@@ -803,14 +831,14 @@ class YandexYnisonProvider(PluginProvider):
             # Grace period: ignore seek detection for a few seconds after
             # track change — Ynison echoes can report stale progress that
             # looks like a large drift.
-            self._seek_grace_until = time.monotonic() + 5.0
+            self._seek_grace_until = time.monotonic() + _ECHO_GRACE_PERIOD
         elif new_track and new_track == self._current_streaming_track_id:
             # Same-track resume after pause: explicitly seek to the Ynison position
             # so the new stream starts at the right offset.
             if needs_reselect:
                 self._seek_position_ms = state.progress_ms
                 self._track_changed_event.set()
-                self._seek_grace_until = time.monotonic() + 5.0
+                self._seek_grace_until = time.monotonic() + _ECHO_GRACE_PERIOD
                 significant_change = True
             else:
                 # Detect seek: compare Ynison progress against our stream position.
@@ -824,8 +852,9 @@ class YandexYnisonProvider(PluginProvider):
                 else:
                     our_ms = self._streaming_progress_ms
                     if our_ms >= 0:
-                        drift_ms = abs(state.progress_ms - our_ms)
-                        if drift_ms > 3000:
+                        verdict = self._classify_drift(state.progress_ms, our_ms)
+                        if verdict == "seek":
+                            drift_ms = abs(state.progress_ms - our_ms)
                             self.logger.info(
                                 "Seek detected on track %s: "
                                 "expected ~%dms, Ynison at %dms (drift %dms)",
@@ -836,8 +865,16 @@ class YandexYnisonProvider(PluginProvider):
                             )
                             self._seek_position_ms = state.progress_ms
                             self._track_changed_event.set()
-                            self._seek_grace_until = now + 5.0
+                            self._seek_grace_until = now + _ECHO_GRACE_PERIOD
                             significant_change = True
+                        elif verdict == "queue_rebuild":
+                            self.logger.debug(
+                                "Drift on track %s classified as queue-rebuild "
+                                "echo (Ynison=%dms, ours=%dms) — not seeking",
+                                new_track,
+                                state.progress_ms,
+                                our_ms,
+                            )
 
         # Update metadata from state
         self._update_metadata(state)
@@ -1094,6 +1131,100 @@ class YandexYnisonProvider(PluginProvider):
         if self._in_use_by_queue == queue_id:
             self._in_use_by_queue = None
 
+    def _idempotent(self, action: str, key: str | None) -> bool:
+        """Return ``True`` if ``(action, key)`` was not seen within the TTL window.
+
+        :param action: A short string identifying the command kind.
+        :param key: Sub-key inside the action namespace, or ``None``.
+        """
+        now = time.monotonic()
+        for stale_key in [
+            k for k, ts in self._command_idempotency.items() if now - ts > _COMMAND_IDEMPOTENCY_TTL
+        ]:
+            self._command_idempotency.pop(stale_key, None)
+        composite = (action, key)
+        last = self._command_idempotency.get(composite)
+        if last is not None and now - last < _COMMAND_IDEMPOTENCY_TTL:
+            return False
+        self._command_idempotency[composite] = now
+        return True
+
+    @staticmethod
+    def _classify_drift(
+        ynison_ms: int,
+        our_ms: int,
+        threshold_ms: int = 3000,
+    ) -> Literal["ignore", "queue_rebuild", "seek"]:
+        """Classify drift between Ynison-reported and our local position.
+
+        Returns one of:
+
+        - ``"ignore"`` — drift below ``threshold_ms``; no seek needed.
+        - ``"queue_rebuild"`` — Ynison reports near-zero progress while we
+          are past 5s into the track; treat as a RADIO queue-rebuild echo,
+          not a user seek (otherwise we'd yank playback to the start every
+          time the rotor station refills the queue).
+        - ``"seek"`` — genuine drift; honor it.
+
+        :param ynison_ms: Position reported by Ynison in milliseconds.
+        :param our_ms: Position tracked locally in milliseconds.
+        :param threshold_ms: Minimum drift to consider non-ignorable.
+        """
+        drift = abs(ynison_ms - our_ms)
+        if drift <= threshold_ms:
+            return "ignore"
+        if ynison_ms < 1000 and our_ms > 5000:
+            return "queue_rebuild"
+        return "seek"
+
+    async def _prefetch_format_for_track(self, track_id: str) -> None:
+        """Pre-fetch stream details for *track_id* and adapt PCM format.
+
+        Best-effort: bounded by ``_PREFETCH_FORMAT_TIMEOUT`` so a slow Yandex
+        API does not stall ``_activate_playback``. On timeout / error the
+        current format stays in place and the in-stream
+        ``_get_stream_details_with_retry`` handles retries.
+
+        :param track_id: Yandex Music track id to query.
+        """
+        if not self._yandex_provider:
+            return
+        try:
+            stream_details = await asyncio.wait_for(
+                self._get_stream_details_with_retry(track_id),
+                timeout=_PREFETCH_FORMAT_TIMEOUT,
+            )
+        except TimeoutError:
+            self.logger.info(
+                "Pre-fetch of stream details for %s exceeded %.1fs — "
+                "keeping current format; in-stream fetch will retry",
+                track_id,
+                _PREFETCH_FORMAT_TIMEOUT,
+            )
+            return
+        except Exception:
+            self.logger.warning(
+                "Pre-fetch of stream details failed for %s — keeping current format",
+                track_id,
+                exc_info=True,
+            )
+            return
+        old_sr = self._normalized_params.get("sample_rate")
+        old_bd = self._normalized_params.get("bit_depth")
+        self._update_normalized_format(hint=stream_details.audio_format)
+        new_sr = self._normalized_params.get("sample_rate")
+        new_bd = self._normalized_params.get("bit_depth")
+        if (old_sr, old_bd) != (new_sr, new_bd):
+            self.logger.info(
+                "Pre-fetch adapted format for %s: %dHz/%dbit -> %dHz/%dbit (source=%s)",
+                track_id,
+                old_sr or 0,
+                old_bd or 0,
+                new_sr or 0,
+                new_bd or 0,
+                stream_details.audio_format,
+            )
+
     def _clear_active_player(self) -> None:
         """Clear the active player and reset plugin state."""
         prev_player_id = self._active_player_id
@@ -1104,6 +1235,7 @@ class YandexYnisonProvider(PluginProvider):
         self._stream_stop_event.set()
         self._streaming_progress_ms = 0
         self._prefetched_list = None
+        self._command_idempotency.clear()
         if self._prefetch_task and not self._prefetch_task.done():
             self._prefetch_task.cancel()
 
@@ -1149,18 +1281,24 @@ class YandexYnisonProvider(PluginProvider):
             self._yandex_provider = None
             self._update_source_capabilities()
 
-    def _update_normalized_format(self) -> None:
+    def _update_normalized_format(self, hint: AudioFormat | None = None) -> None:
         """Set PCM normalization profile based on config and YM quality.
 
-        Priority: explicit config values > auto-detection from YM quality.
-        Auto-detection reads the quality tier from the linked yandex_music
-        provider's config (`provider.config.get_value("quality")`), since
-        yandex_music does not expose a typed accessor method.
-        Auto-detection: superb/lossless → 24bit/48kHz, else → 16bit/44.1kHz.
+        Priority: explicit config values > hint from real stream_details >
+        auto-detection from YM quality. The hint is fed by
+        ``_prefetch_format_for_track`` when ``CONF_OUTPUT_SAMPLE_RATE`` is
+        ``auto`` so the AudioSource ``provider_mapping.audio_format`` matches
+        the actual source rate of the upcoming track before MA's outer
+        ffmpeg captures it. Without a hint, falls back to YM-quality-based
+        detection (superb/lossless → 24bit/48kHz, else → 16bit/44.1kHz).
 
         Creates fresh AudioFormat instances each time to prevent mutation by
         MA's FFMpeg._log_reader_task (which sets input_format.codec_type
         in-place on the object passed as input_format to the outer ffmpeg).
+
+        :param hint: Optional real source AudioFormat (from a stream-details
+            pre-fetch). Lifts auto mode from the quality-based default to the
+            track's actual sample rate and bit depth.
         """
         # Start with auto-detected base from YM quality config
         # (yandex_music does not expose get_quality(); read from its ProviderConfig instead)
@@ -1172,7 +1310,13 @@ class YandexYnisonProvider(PluginProvider):
                 if isinstance(config_quality, str):
                     quality = config_quality
         is_lossless = quality in YANDEX_MUSIC_LOSSLESS_QUALITIES
-        base = PCM_LOSSLESS_PARAMS if is_lossless else PCM_LOSSY_PARAMS
+        base = dict(PCM_LOSSLESS_PARAMS if is_lossless else PCM_LOSSY_PARAMS)
+        # Promote auto-base from the real stream details when available.
+        if hint is not None:
+            if hint.sample_rate:
+                base["sample_rate"] = hint.sample_rate
+            if hint.bit_depth:
+                base["bit_depth"] = hint.bit_depth
 
         # Apply config overrides. MA's ConfigEntry options constrain the UI to
         # known-good strings, but a stale persisted value or hand-edited config
@@ -1307,6 +1451,8 @@ class YandexYnisonProvider(PluginProvider):
             raise UnsupportedFeaturedException("Ynison client not initialized")
         if not self._ynison.connected:
             raise PlayerCommandFailed("Ynison WebSocket disconnected")
+        if not self._idempotent("on_play", None):
+            return
         state = self._ynison.state
         await self._send_progress_to_ynison(
             progress_ms=state.progress_ms,
@@ -1320,6 +1466,8 @@ class YandexYnisonProvider(PluginProvider):
             raise UnsupportedFeaturedException("Ynison client not initialized")
         if not self._ynison.connected:
             raise PlayerCommandFailed("Ynison WebSocket disconnected")
+        if not self._idempotent("on_pause", None):
+            return
         state = self._ynison.state
         await self._send_progress_to_ynison(
             progress_ms=state.progress_ms,
