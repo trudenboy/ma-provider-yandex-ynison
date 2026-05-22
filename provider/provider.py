@@ -114,6 +114,14 @@ _VALID_BIT_DEPTHS: frozenset[str] = frozenset({"16", "24"})
 class YandexYnisonProvider(PluginProvider):
     """Implementation of the Yandex Music Connect (Ynison) Plugin."""
 
+    # Upstream MA's audio_analysis providers (Loudness Analysis, Smart Fades)
+    # branch on `provider.is_streaming_provider` to decide whether to run an
+    # analysis pass. The `PluginProvider` base class does not declare the
+    # attribute, so without this class-level default the analysers raise
+    # `AttributeError` once per track. We're a live source — analysing each
+    # transient track buys nothing — so opt out explicitly.
+    is_streaming_provider: bool = False
+
     @property
     def instance_name_postfix(self) -> str | None:
         """Return display name as instance postfix for multi-instance setups."""
@@ -352,8 +360,15 @@ class YandexYnisonProvider(PluginProvider):
         """
         self._stream_stop_event.clear()
         # snapshot the consumer at session start; the rest of this generator
-        # treats the queue_id as the player_id (they are the same by convention)
+        # treats the queue_id as the player_id (they are the same by convention).
+        # The lock may legitimately be empty here — MA's `_load_item` preload
+        # path drives the generator to fill an initial audio buffer BEFORE
+        # `on_source_selected` has been dispatched, so `_in_use_by_queue` is
+        # still None on that call. `had_claim` records whether a lock was
+        # already in force at entry; only in that case do we enforce
+        # cross-session invariants on the loop and the `finally` cleanup.
         player_id = self._in_use_by_queue or ""
+        had_claim = self._in_use_by_queue is not None
         # Snapshot the active session id too so a same-queue reconnect (which
         # updates _active_session_id but not _in_use_by_queue) is treated as a
         # superseding session: the loop exits early, and the finally clear
@@ -375,10 +390,15 @@ class YandexYnisonProvider(PluginProvider):
         session_fmt: AudioFormat = make_pcm_format(session_params)
 
         try:
-            while (
-                not self._stream_stop_event.is_set()
-                and self._in_use_by_queue == player_id
-                and self._active_session_id == captured_session_id
+            while not self._stream_stop_event.is_set() and (
+                # Preload path: no claim was active at entry — drive the loop
+                # purely off Ynison state and the stop event. on_source_selected
+                # may fire later; it doesn't disqualify us mid-stream.
+                not had_claim
+                or (
+                    self._in_use_by_queue == player_id
+                    and self._active_session_id == captured_session_id
+                )
             ):
                 if not self._ynison or not self._ynison.state.current_track_id:
                     # Wait for a track to appear
@@ -402,8 +422,13 @@ class YandexYnisonProvider(PluginProvider):
                     pause_deadline = time.monotonic() + 30.0
                     while (
                         not self._stream_stop_event.is_set()
-                        and self._in_use_by_queue == player_id
-                        and self._active_session_id == captured_session_id
+                        and (
+                            not had_claim
+                            or (
+                                self._in_use_by_queue == player_id
+                                and self._active_session_id == captured_session_id
+                            )
+                        )
                         and self._ynison
                         and self._ynison.state.current_track_id == track_id
                         and self._ynison.state.is_paused
@@ -447,8 +472,13 @@ class YandexYnisonProvider(PluginProvider):
                     if (
                         self._track_changed_event.is_set()
                         or self._stream_stop_event.is_set()
-                        or self._in_use_by_queue != player_id
-                        or self._active_session_id != captured_session_id
+                        or (
+                            had_claim
+                            and (
+                                self._in_use_by_queue != player_id
+                                or self._active_session_id != captured_session_id
+                            )
+                        )
                     ):
                         break
 
@@ -481,13 +511,16 @@ class YandexYnisonProvider(PluginProvider):
                 # the top of the loop from the latest Ynison state.
                 self._current_streaming_track_id = None
         finally:
-            # Release ownership only if no one else has claimed the source since
-            # this session started. Guard on BOTH the queue id AND the session
-            # id — a same-queue reconnect refreshes the session id without
-            # changing the queue id, and clearing the lock on the old
-            # generator's teardown would clobber the new session's claim.
+            # Release ownership only if THIS generator owned the claim at
+            # entry AND no one else has superseded it since. The double-guard
+            # protects against a same-queue reconnect refreshing the session
+            # id without changing the queue id; clearing the lock on the old
+            # generator's teardown would otherwise clobber the new session's
+            # claim. `had_claim` keeps the preload path from touching the lock
+            # at all (no claim ever existed to release).
             if (
-                self._in_use_by_queue == player_id
+                had_claim
+                and self._in_use_by_queue == player_id
                 and self._active_session_id == captured_session_id
             ):
                 self._in_use_by_queue = None
