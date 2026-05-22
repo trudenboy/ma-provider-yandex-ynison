@@ -238,6 +238,15 @@ class YandexYnisonProvider(PluginProvider):
         # state-handler twice in quick succession.
         self._command_idempotency: dict[tuple[str, str | None], float] = {}
 
+        # Tracks whether we have driven the MA player into PAUSED via
+        # `cmd_pause`. Paired with the silence-keepalive loop in
+        # `get_audio_stream`: cmd_pause is what makes the MA UI show paused
+        # and freezes the elapsed-time extrapolation; silence-keepalive is
+        # what keeps the stream connection alive across the pause without
+        # replaying the pre-pause buffer on resume. We flip back to PLAYING
+        # via `cmd_play` from `_activate_playback` on the unpause edge.
+        self._paused_at_player: bool = False
+
     # ------------------------------------------------------------------
     # Provider lifecycle
     # ------------------------------------------------------------------
@@ -896,6 +905,22 @@ class YandexYnisonProvider(PluginProvider):
             self.logger.warning("Ynison active on our device but no MA player available")
             return
 
+        # Unpause edge: we are entering this method because Ynison reports
+        # the device active AND not paused. If `_paused_at_player` is set,
+        # we previously drove the MA player into PAUSED via `cmd_pause` —
+        # release it via `cmd_play` so the player drains the silence
+        # back-fill that the keep-alive loop produced and resumes real
+        # audio. Clear the flag unconditionally so a failure to cmd_play
+        # does not strand us in a "paused at player but flag stuck" state.
+        if self._paused_at_player:
+            self._paused_at_player = False
+            try:
+                await self.mass.players.cmd_play(target_player_id)
+            except Exception:
+                self.logger.debug(
+                    "cmd_play failed for %s during unpause", target_player_id, exc_info=True
+                )
+
         # Detect resume after pause: stream was stopped but player still associated
         needs_reselect = self._stream_stop_event.is_set()
         self._stream_stop_event.clear()
@@ -1101,28 +1126,38 @@ class YandexYnisonProvider(PluginProvider):
         )
 
     async def _pause_playback(self) -> None:
-        """Handle pause — switch the running stream to silence keep-alive.
+        """Handle pause — drive the MA player to PAUSED, keep the stream live.
 
-        Silence keep-alive (see ``get_audio_stream``) lets the stream stay
-        open during a pause: the generator yields PCM zeros at real-time rate
-        so MA's outer buffer and the player connection survive the pause
-        without a tear-down + ``play_media`` restart on resume. Without this,
-        every pause/resume from the Yandex Music app cost 2-3 s of preload +
-        ffmpeg start-up + player-buffer fill before audio became audible
-        again.
+        Two coordinated signals do the work:
 
-        Therefore we no longer:
-        - set ``_stream_stop_event`` (would force-exit the generator),
-        - call ``mass.players.cmd_stop(player_id)`` (would drain the player).
+        1. ``mass.players.cmd_pause(player_id)`` — tells MA's player state
+           machine to flip to PAUSED. Without this MA still considers the
+           player as PLAYING and the UI elapsed-time keeps ticking forward
+           (StreamMetadata does not carry an `is_paused` flag — pause is a
+           player-state concept, not a stream-bytes concept).
+        2. The silence keep-alive loop in ``get_audio_stream`` — yields PCM
+           zeros into the active stream while paused so MA's outer buffer
+           and the player connection stay alive without replaying pre-pause
+           audio on resume. (A pure cmd_pause without silence would leave
+           the buffer full of pre-pause audio; on cmd_play the user would
+           hear ~3 s of replayed pre-pause audio before fresh audio caught
+           up.)
 
-        ``_stream_stop_event`` stays the sole responsibility of "permanent"
-        teardown paths (``_clear_active_player``, ``unload``). The generator
-        notices ``self._ynison.state.is_paused`` directly and re-routes into
-        the silence loop.
+        We deliberately do NOT:
+        - set ``_stream_stop_event`` — that is reserved for permanent
+          teardown (``_clear_active_player``, ``unload``);
+        - call ``mass.players.cmd_stop`` — that drains the player and forces
+          a full ``play_media → preload → ffmpeg restart`` cycle on resume
+          (the original 2-3 s pause-resume cost we are eliminating).
         """
         player_id = self._in_use_by_queue
-        if player_id:
-            self.mass.players.trigger_player_update(player_id)
+        if not player_id:
+            return
+        try:
+            await self.mass.players.cmd_pause(player_id)
+        except Exception:
+            self.logger.debug("cmd_pause failed for %s", player_id, exc_info=True)
+        self._paused_at_player = True
 
     # ------------------------------------------------------------------
     # Player selection
@@ -1338,6 +1373,7 @@ class YandexYnisonProvider(PluginProvider):
         self._streaming_progress_ms = 0
         self._prefetched_list = None
         self._command_idempotency.clear()
+        self._paused_at_player = False
         if self._prefetch_task and not self._prefetch_task.done():
             self._prefetch_task.cancel()
 

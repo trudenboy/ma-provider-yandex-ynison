@@ -102,6 +102,8 @@ def _make_mock_mass() -> MagicMock:
     mass.players.all_players = MagicMock(return_value=[])
     mass.players.get_player = MagicMock(return_value=None)
     mass.players.cmd_stop = AsyncMock()
+    mass.players.cmd_pause = AsyncMock()
+    mass.players.cmd_play = AsyncMock()
     mass.players.cmd_volume_set = AsyncMock()
     mass.players.trigger_player_update = MagicMock()
 
@@ -1801,6 +1803,16 @@ class TestPausePlayback:
 
         provider.mass.players.cmd_stop.assert_not_called()
 
+    async def test_calls_cmd_pause_to_drive_player_state(self) -> None:
+        """Pause must signal cmd_pause so MA's player state machine flips."""
+        provider = _make_provider()
+        provider._in_use_by_queue = "player1"
+
+        await provider._pause_playback()
+
+        provider.mass.players.cmd_pause.assert_awaited_once_with("player1")
+        assert provider._paused_at_player is True
+
     async def test_preserves_in_use_by_queue(self) -> None:
         """The lock stays with the active session — release is the teardown's job."""
         provider = _make_provider()
@@ -1820,15 +1832,6 @@ class TestPausePlayback:
 
         assert provider._streaming_progress_ms == 50_000
 
-    async def test_triggers_player_update_when_active(self) -> None:
-        """When a player is bound, surface the pause to MA's UI."""
-        provider = _make_provider()
-        provider._in_use_by_queue = "player1"
-
-        await provider._pause_playback()
-
-        provider.mass.players.trigger_player_update.assert_called_with("player1")
-
     async def test_no_active_player_is_a_noop(self) -> None:
         """Pause with no active player neither hard-stops nor errors."""
         provider = _make_provider()
@@ -1838,7 +1841,8 @@ class TestPausePlayback:
 
         assert not provider._stream_stop_event.is_set()
         provider.mass.players.cmd_stop.assert_not_called()
-        provider.mass.players.trigger_player_update.assert_not_called()
+        provider.mass.players.cmd_pause.assert_not_called()
+        assert provider._paused_at_player is False
 
 
 # ------------------------------------------------------------------
@@ -2208,6 +2212,60 @@ class TestActivatePlayback:
 
         assert provider._active_player_id == "player1"
         provider.mass.create_task.assert_called()  # type: ignore[unreachable]
+
+    async def test_unpause_edge_calls_cmd_play(self) -> None:
+        """Entering _activate_playback while `_paused_at_player` issues cmd_play."""
+        provider = _make_provider()
+        provider._paused_at_player = True
+        provider._active_player_id = "player1"
+
+        player = MagicMock()
+        player.player_id = "player1"
+        provider.mass.players.all_players.return_value = [player]
+        provider.mass.players.get_player.return_value = player
+
+        state = _make_ynison_state(progress_ms=0, paused=False)
+
+        await provider._activate_playback(state)
+
+        provider.mass.players.cmd_play.assert_awaited_once_with("player1")
+        assert provider._paused_at_player is False
+
+    async def test_unpause_edge_clears_flag_even_on_cmd_play_failure(self) -> None:
+        """A cmd_play exception must not strand `_paused_at_player`."""
+        provider = _make_provider()
+        provider._paused_at_player = True
+        provider._active_player_id = "player1"
+
+        player = MagicMock()
+        player.player_id = "player1"
+        provider.mass.players.all_players.return_value = [player]
+        provider.mass.players.get_player.return_value = player
+        provider.mass.players.cmd_play = AsyncMock(side_effect=RuntimeError("boom"))
+
+        state = _make_ynison_state(progress_ms=0, paused=False)
+
+        # Must not raise — failure swallowed; flag still cleared.
+        await provider._activate_playback(state)
+
+        assert provider._paused_at_player is False
+
+    async def test_active_playback_no_pause_flag_does_not_call_cmd_play(self) -> None:
+        """When we never paused at the player, cmd_play must not fire."""
+        provider = _make_provider()
+        provider._paused_at_player = False
+        provider._active_player_id = "player1"
+
+        player = MagicMock()
+        player.player_id = "player1"
+        provider.mass.players.all_players.return_value = [player]
+        provider.mass.players.get_player.return_value = player
+
+        state = _make_ynison_state(progress_ms=0, paused=False)
+
+        await provider._activate_playback(state)
+
+        provider.mass.players.cmd_play.assert_not_called()
 
     async def test_detects_track_change(self) -> None:
         """Detects track change and updates streaming track id."""
