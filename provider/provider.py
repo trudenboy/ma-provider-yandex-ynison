@@ -415,11 +415,24 @@ class YandexYnisonProvider(PluginProvider):
                 track_id = self._ynison.state.current_track_id
                 self._current_streaming_track_id = track_id
 
-                # Don't start streaming if Ynison reports paused — wait for resume.
-                # Poll every 1s because a same-track resume won't trigger
-                # _track_changed_event (it only fires on track change / seek).
+                # Silence keep-alive: when Ynison reports paused (whether at
+                # session start or after a mid-stream pause), yield PCM zeros
+                # at real-time rate so MA's outer buffer and the player
+                # connection stay alive. On unpause we transition straight
+                # into real audio without a play_media / preload / ffmpeg
+                # restart cycle — pause/resume from the Yandex Music app then
+                # feels near-instant instead of the 2-3 s preload tear-down
+                # the cmd_stop-based pause used to cost. The loop has no
+                # explicit deadline: as long as `_stream_stop_event` stays
+                # unset (`_clear_active_player` / `unload` are the only
+                # setters) and Ynison keeps reporting our track paused, we
+                # keep feeding silence.
                 if self._ynison.state.is_paused:
-                    pause_deadline = time.monotonic() + 30.0
+                    frame_size = (session_fmt.bit_depth // 8) * session_fmt.channels
+                    chunk_ms = 100
+                    samples_per_chunk = session_fmt.sample_rate * chunk_ms // 1000
+                    silence = b"\x00" * (samples_per_chunk * frame_size)
+                    chunk_timeout = chunk_ms / 1000
                     while (
                         not self._stream_stop_event.is_set()
                         and (
@@ -432,15 +445,32 @@ class YandexYnisonProvider(PluginProvider):
                         and self._ynison
                         and self._ynison.state.current_track_id == track_id
                         and self._ynison.state.is_paused
-                        and time.monotonic() < pause_deadline
                     ):
-                        remaining = pause_deadline - time.monotonic()
+                        yield silence
                         with suppress(TimeoutError):
                             await asyncio.wait_for(
                                 self._track_changed_event.wait(),
-                                timeout=min(1.0, remaining),
+                                timeout=chunk_timeout,
                             )
                         self._track_changed_event.clear()
+                    # Same-track unpause: seed `_seek_position_ms` from
+                    # Ynison's reported progress so the next iteration
+                    # streams from the correct offset. Also covers a
+                    # paused-state seek (user dragged the seek bar in the
+                    # Yandex Music app while paused). Track changes or
+                    # stop signals fall through without seeding — the
+                    # outer loop will re-evaluate and pick the new track.
+                    if (
+                        self._ynison
+                        and self._ynison.state.current_track_id == track_id
+                        and not self._ynison.state.is_paused
+                    ):
+                        # mypy narrows `is_paused` (a regular bool property)
+                        # to `Literal[True]` after the while-loop's truthy
+                        # exit chain — that's wrong, the property is read
+                        # afresh from `player_state`, so the line is
+                        # reachable on unpause.
+                        self._seek_position_ms = self._ynison.state.progress_ms  # type: ignore[unreachable]
                     continue
 
                 if not self._yandex_provider:
@@ -472,6 +502,11 @@ class YandexYnisonProvider(PluginProvider):
                     if (
                         self._track_changed_event.is_set()
                         or self._stream_stop_event.is_set()
+                        # Pause arrived mid-track: exit the inner stream so
+                        # the outer loop's silence keep-alive branch takes
+                        # over instead of continuing to pump real audio that
+                        # would just back-pressure MA's buffer.
+                        or (self._ynison is not None and self._ynison.state.is_paused)
                         or (
                             had_claim
                             and (
@@ -1050,26 +1085,27 @@ class YandexYnisonProvider(PluginProvider):
         )
 
     async def _pause_playback(self) -> None:
-        """Handle pause — stop streaming but keep player association for resume."""
-        paused_progress_ms = self._streaming_progress_ms
-        self._stream_stop_event.set()
-        # Preserve the last known position for same-track resume.
-        self._streaming_progress_ms = paused_progress_ms
-        # Don't pre-clear _in_use_by_queue here. Lock release is owned by the
-        # standard teardown path (the streaming generator's finally + the
-        # streams controller's on_source_unselected), which clears both the
-        # lock and the session id together under the session-id guard.
-        # Pre-clearing the lock while leaving the session id set is the
-        # double-write the session-id system was designed to prevent. Note:
-        # cmd_stop is not a guaranteed teardown trigger — if the generator
-        # is blocked on a long external poll the finally may take a while —
-        # but the worst outcome is a delayed release, not an incorrect one.
+        """Handle pause — switch the running stream to silence keep-alive.
+
+        Silence keep-alive (see ``get_audio_stream``) lets the stream stay
+        open during a pause: the generator yields PCM zeros at real-time rate
+        so MA's outer buffer and the player connection survive the pause
+        without a tear-down + ``play_media`` restart on resume. Without this,
+        every pause/resume from the Yandex Music app cost 2-3 s of preload +
+        ffmpeg start-up + player-buffer fill before audio became audible
+        again.
+
+        Therefore we no longer:
+        - set ``_stream_stop_event`` (would force-exit the generator),
+        - call ``mass.players.cmd_stop(player_id)`` (would drain the player).
+
+        ``_stream_stop_event`` stays the sole responsibility of "permanent"
+        teardown paths (``_clear_active_player``, ``unload``). The generator
+        notices ``self._ynison.state.is_paused`` directly and re-routes into
+        the silence loop.
+        """
         player_id = self._in_use_by_queue
         if player_id:
-            try:
-                await self.mass.players.cmd_stop(player_id)
-            except Exception:
-                self.logger.debug("Failed to stop player %s on pause", player_id)
             self.mass.players.trigger_player_update(player_id)
 
     # ------------------------------------------------------------------

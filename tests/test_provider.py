@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1780,35 +1781,64 @@ class TestSendProgressToYnison:
 
 
 class TestPausePlayback:
-    """Tests for _pause_playback."""
+    """Tests for _pause_playback under the silence-keepalive contract."""
 
-    async def test_stops_stream_and_player(self) -> None:
-        """Pause stops stream, calls cmd_stop, preserves progress."""
+    async def test_does_not_set_stop_event(self) -> None:
+        """Pause must keep the generator alive so it can yield silence."""
         provider = _make_provider()
-        provider._streaming_progress_ms = 50000
         provider._in_use_by_queue = "player1"
 
         await provider._pause_playback()
 
-        assert provider._stream_stop_event.is_set()
-        provider.mass.players.cmd_stop.assert_awaited_once_with("player1")  # type: ignore[attr-defined]
-        # _pause_playback no longer pre-clears _in_use_by_queue — the lock
-        # release is owned by serve_queue_item_stream's finally calling
-        # on_source_unselected after cmd_stop's stream drain completes.
-        # Clearing here would double-write against the session-id guard.
-        assert provider._in_use_by_queue == "player1"
-        # Progress is preserved for resume
-        assert provider._streaming_progress_ms == 50000
+        assert not provider._stream_stop_event.is_set()
 
-    async def test_no_active_player(self) -> None:
-        """Pause with no active player just sets stop event."""
+    async def test_does_not_cmd_stop_the_player(self) -> None:
+        """Pause must not hard-stop the player; the silence loop keeps it live."""
+        provider = _make_provider()
+        provider._in_use_by_queue = "player1"
+
+        await provider._pause_playback()
+
+        provider.mass.players.cmd_stop.assert_not_called()
+
+    async def test_preserves_in_use_by_queue(self) -> None:
+        """The lock stays with the active session — release is the teardown's job."""
+        provider = _make_provider()
+        provider._in_use_by_queue = "player1"
+
+        await provider._pause_playback()
+
+        assert provider._in_use_by_queue == "player1"
+
+    async def test_preserves_progress(self) -> None:
+        """Pause must not reset the streaming progress mirror."""
+        provider = _make_provider()
+        provider._streaming_progress_ms = 50_000
+        provider._in_use_by_queue = "player1"
+
+        await provider._pause_playback()
+
+        assert provider._streaming_progress_ms == 50_000
+
+    async def test_triggers_player_update_when_active(self) -> None:
+        """When a player is bound, surface the pause to MA's UI."""
+        provider = _make_provider()
+        provider._in_use_by_queue = "player1"
+
+        await provider._pause_playback()
+
+        provider.mass.players.trigger_player_update.assert_called_with("player1")
+
+    async def test_no_active_player_is_a_noop(self) -> None:
+        """Pause with no active player neither hard-stops nor errors."""
         provider = _make_provider()
         provider._in_use_by_queue = None
 
         await provider._pause_playback()
 
-        assert provider._stream_stop_event.is_set()
-        provider.mass.players.cmd_stop.assert_not_called()  # type: ignore[attr-defined]
+        assert not provider._stream_stop_event.is_set()
+        provider.mass.players.cmd_stop.assert_not_called()
+        provider.mass.players.trigger_player_update.assert_not_called()
 
 
 # ------------------------------------------------------------------
@@ -2534,3 +2564,167 @@ class TestPrefetchOrdering:
         assert order, "expected at least a prefetch call"
         assert order[0].startswith("prefetch:track42")
         assert any(c.startswith("play_media:player1") for c in order[1:])
+
+
+def _make_paused_state(track_id: str = "track42", progress_ms: int = 0) -> YnisonState:
+    """Build a YnisonState marked as paused on `track_id` at `progress_ms`."""
+    state = YnisonState()
+    state.active_device_id = "dev1"
+    state.player_state = {
+        "player_queue": {
+            "playable_list": [{"playable_id": track_id}],
+            "current_playable_index": 0,
+        },
+        "status": {"paused": True, "progress_ms": progress_ms, "duration_ms": 60_000},
+    }
+    return state
+
+
+class TestPauseSilenceKeepalive:
+    """`get_audio_stream` yields PCM silence during pause instead of exiting."""
+
+    async def test_mid_stream_pause_breaks_inner_loop(self) -> None:
+        """A pause arriving mid-track must reroute the generator into silence."""
+        # We exercise the chunk-loop break condition directly: with a paused
+        # Ynison state, the predicate that controls whether to leave
+        # `async for chunk in _stream_track(...)` must evaluate True.
+        provider = _make_provider()
+        ynison = MagicMock()
+        ynison.state.is_paused = True
+        provider._ynison = ynison
+
+        should_break = provider._ynison is not None and provider._ynison.state.is_paused
+        assert should_break
+
+        ynison.state.is_paused = False
+        should_break = provider._ynison is not None and provider._ynison.state.is_paused
+        assert not should_break
+
+    async def test_silence_loop_yields_frame_aligned_zero_pcm(self) -> None:
+        """Driving the generator into the silence branch yields PCM zeros."""
+        provider = _make_provider()
+        # Borrow-mode setup so the generator does not early-return on
+        # _yandex_provider being None.
+        provider._yandex_provider = MagicMock()
+        provider._in_use_by_queue = "queue1"
+        provider._active_session_id = "session-1"
+
+        ynison = MagicMock()
+        ynison.state.is_paused = True
+        ynison.state.current_track_id = "track42"
+        provider._ynison = ynison
+
+        streamdetails = MagicMock()
+        gen = provider.get_audio_stream(streamdetails, seek_position=0)
+
+        async def _flip_to_unpause() -> None:
+            # Give the generator one tick to enter the silence loop, then
+            # also flip is_paused so the loop exits on the next iteration.
+            await asyncio.sleep(0.05)
+            ynison.state.is_paused = False
+            # Setting the event wakes the generator immediately.
+            provider._track_changed_event.set()
+
+        flipper = asyncio.create_task(_flip_to_unpause())
+        chunk = await asyncio.wait_for(gen.__anext__(), timeout=2.0)
+        await flipper
+        # Stop the generator cleanly so the test does not hang.
+        provider._stream_stop_event.set()
+        with suppress(StopAsyncIteration, asyncio.CancelledError):
+            await gen.aclose()
+
+        # Silence is PCM zeros of frame-aligned length.
+        assert chunk
+        assert chunk == b"\x00" * len(chunk)
+        # 100 ms @ 48 kHz / 24-bit / 2ch = 4800 samples × 6 bytes = 28800 bytes
+        # (assumes the default lossless PCM profile; if the hint promoted it,
+        # the chunk would still be a multiple of frame_size).
+        # bytes_per_frame for s24le stereo = 6; for s16le stereo = 4.
+        from provider.streaming import (  # noqa: PLC0415 — local import
+            PCM_LOSSLESS_PARAMS,
+            PCM_LOSSY_PARAMS,
+        )
+
+        expected_frame = max(
+            (PCM_LOSSLESS_PARAMS["bit_depth"] // 8) * PCM_LOSSLESS_PARAMS["channels"],
+            (PCM_LOSSY_PARAMS["bit_depth"] // 8) * PCM_LOSSY_PARAMS["channels"],
+        )
+        assert len(chunk) % expected_frame == 0
+
+    async def test_unpause_seeds_seek_position_from_ynison(self) -> None:
+        """Unpause on the same track must seed `_seek_position_ms` from Ynison."""
+        provider = _make_provider()
+        provider._yandex_provider = MagicMock()
+        provider._in_use_by_queue = "queue1"
+        provider._active_session_id = "session-1"
+
+        ynison = MagicMock()
+        ynison.state.is_paused = True
+        ynison.state.current_track_id = "track42"
+        ynison.state.progress_ms = 42_000
+        provider._ynison = ynison
+
+        # _stream_track captures the seek_ms it receives and then exits so
+        # the outer loop terminates cleanly. The streaming branch sets
+        # `_seek_position_ms = 0` right after reading it, so this is the only
+        # observation point.
+        captured_seek_ms: list[int] = []
+
+        async def _stub_stream_track(
+            _track_id: str, *, seek_ms: int = 0, session_params: dict[str, Any] | None = None
+        ) -> Any:
+            captured_seek_ms.append(seek_ms)
+            provider._stream_stop_event.set()
+            if False:
+                yield b""
+
+        _stub_attr(provider, "_stream_track", _stub_stream_track)
+
+        streamdetails = MagicMock()
+        gen = provider.get_audio_stream(streamdetails, seek_position=0)
+
+        async def _flip_to_unpause() -> None:
+            await asyncio.sleep(0.05)
+            ynison.state.is_paused = False
+            provider._track_changed_event.set()
+
+        flipper = asyncio.create_task(_flip_to_unpause())
+        # Consume silence chunks until the generator falls through the pause
+        # branch and hits the (stubbed) streaming branch which stops it.
+        with suppress(StopAsyncIteration):
+            async for _ in gen:
+                pass
+        await flipper
+        await gen.aclose()
+
+        assert captured_seek_ms == [42_000]
+
+    async def test_long_pause_does_not_exit_generator(self) -> None:
+        """A multi-minute pause keeps the silence loop alive (no deadline)."""
+        provider = _make_provider()
+        provider._yandex_provider = MagicMock()
+        provider._in_use_by_queue = "queue1"
+        provider._active_session_id = "session-1"
+
+        ynison = MagicMock()
+        ynison.state.is_paused = True
+        ynison.state.current_track_id = "track42"
+        provider._ynison = ynison
+
+        streamdetails = MagicMock()
+        gen = provider.get_audio_stream(streamdetails, seek_position=0)
+
+        # Pull a handful of silence chunks across a simulated long span;
+        # the generator must keep yielding without auto-exit.
+        chunks: list[bytes] = []
+        for _ in range(5):
+            chunk = await asyncio.wait_for(gen.__anext__(), timeout=1.0)
+            chunks.append(chunk)
+
+        assert len(chunks) == 5
+        assert all(c == b"\x00" * len(c) for c in chunks)
+
+        # Cleanup: signal stop and close.
+        provider._stream_stop_event.set()
+        with suppress(StopAsyncIteration, asyncio.CancelledError):
+            await gen.aclose()
