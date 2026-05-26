@@ -928,20 +928,29 @@ class YandexYnisonProvider(PluginProvider):
 
         # Unpause edge: we are entering this method because Ynison reports
         # the device active AND not paused. If `_paused_at_player` is set,
-        # we previously drove the MA player into PAUSED via `cmd_pause` —
-        # release it via `cmd_play` so the player drains the silence
-        # back-fill that the keep-alive loop produced and resumes real
-        # audio. Clear the flag unconditionally so a failure to cmd_play
-        # does not strand us in a "paused at player but flag stuck" state.
+        # we previously drove the MA QUEUE into PAUSED via
+        # `mass.player_queues.pause(queue_id)` — release it via
+        # `player_queues.play(queue_id)` so the queue's playback_state
+        # flips back, the player resumes draining the silence back-fill
+        # the keep-alive loop produced, and real audio continues. The
+        # queue id is the one MA handed us in `on_source_selected`
+        # (`_in_use_by_queue`); MUST match the id we paused on, otherwise
+        # the queue stays paused. Clear the flag unconditionally so a
+        # failure does not strand us in a "queue paused but flag stuck"
+        # state.
         if self._paused_at_player:
             self._paused_at_player = False
-            self.logger.info("Unpause: cmd_play(%s)", target_player_id)
-            try:
-                await self.mass.players.cmd_play(target_player_id)
-            except Exception:
-                self.logger.warning(
-                    "cmd_play failed for %s during unpause", target_player_id, exc_info=True
-                )
+            queue_id = self._in_use_by_queue
+            if queue_id:
+                self.logger.info("Unpause: player_queues.play(%s)", queue_id)
+                try:
+                    await self.mass.player_queues.play(queue_id)
+                except Exception:
+                    self.logger.warning(
+                        "player_queues.play failed for %s during unpause",
+                        queue_id,
+                        exc_info=True,
+                    )
 
         # Detect resume after pause: stream was stopped but player still associated
         needs_reselect = self._stream_stop_event.is_set()
@@ -1176,29 +1185,30 @@ class YandexYnisonProvider(PluginProvider):
           a full ``play_media → preload → ffmpeg restart`` cycle on resume
           (the original 2-3 s pause-resume cost we are eliminating).
         """
-        # Use `_active_player_id` (the actual player consuming our stream),
-        # NOT `_in_use_by_queue`. The latter is a queue identifier set by
-        # `on_source_selected`; MA's player-queues and player controllers
-        # share an id convention IN PRINCIPLE, but bridge players (e.g.
-        # Local Audio Out → Sendspin protocol bridge, registered as
-        # `spb_*` wrapping the bare ALSA player UUID) break it. queue_id
-        # is the bare UUID, the bridge is the player that actually owns
-        # the stream. cmd_pause on the bare UUID gets routed to the bare
-        # device successfully (audio stops) but the bridge's state machine
-        # — which the MA UI consults — never flips to PAUSED, so the UI
-        # keeps saying "playing" with a ticking progress bar.
-        # `_active_player_id` is the bridge, set by `on_source_selected`
-        # from its `player_id` parameter, and matches what `cmd_play` uses
-        # in `_activate_playback` on the unpause edge.
-        player_id = self._active_player_id
-        if not player_id:
-            self.logger.info("Pause requested but no active player (_active_player_id is None)")
+        # Drive the QUEUE, not the player. MA's UI for an AudioSource item
+        # reads playback_state from the queue that owns it, not from the
+        # underlying player. `mass.players.cmd_pause(player_id)` is a thin
+        # redirect to `mass.player_queues.pause(queue_id)` — it looks up the
+        # queue that the player belongs to and forwards. When a protocol
+        # bridge is involved (Local Audio Out → Sendspin `spb_*` wrapping
+        # the bare ALSA UUID), our streaming player is the bridge while the
+        # queue we hold a claim on belongs to the bare UUID. `cmd_pause`
+        # against the bridge searches for a queue keyed by the bridge id
+        # and finds either nothing or the wrong queue — the stream
+        # eventually stops because the bridge tears down the audio path,
+        # but our queue's playback_state never flips and the UI keeps
+        # ticking. Address both halves at the source: call
+        # `player_queues.pause(_in_use_by_queue)` directly. `_in_use_by_queue`
+        # IS the queue_id MA handed us in `on_source_selected`.
+        queue_id = self._in_use_by_queue
+        if not queue_id:
+            self.logger.info("Pause requested but no active queue (_in_use_by_queue is None)")
             return
-        self.logger.info("Pause: cmd_pause(%s)", player_id)
+        self.logger.info("Pause: player_queues.pause(%s)", queue_id)
         try:
-            await self.mass.players.cmd_pause(player_id)
+            await self.mass.player_queues.pause(queue_id)
         except Exception:
-            self.logger.warning("cmd_pause failed for %s", player_id, exc_info=True)
+            self.logger.warning("player_queues.pause failed for %s", queue_id, exc_info=True)
         self._paused_at_player = True
 
     # ------------------------------------------------------------------

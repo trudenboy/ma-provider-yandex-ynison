@@ -107,8 +107,11 @@ def _make_mock_mass() -> MagicMock:
     mass.players.cmd_volume_set = AsyncMock()
     mass.players.trigger_player_update = MagicMock()
 
-    # Player queues — external triggers route through player_queues.play_media now
+    # Player queues — external triggers route through player_queues.play_media,
+    # pause/play go through queue-level commands (Ynison-driven pause flow).
     mass.player_queues.play_media = AsyncMock()
+    mass.player_queues.pause = AsyncMock()
+    mass.player_queues.play = AsyncMock()
 
     # Streams — live metadata updates flow through update_stream_metadata
     mass.streams.update_stream_metadata = MagicMock()
@@ -1809,21 +1812,23 @@ class TestPausePlayback:
 
         provider.mass.players.cmd_stop.assert_not_called()
 
-    async def test_calls_cmd_pause_with_active_player_id_not_queue_id(self) -> None:
-        """cmd_pause must target the bridge player (`_active_player_id`),
-        not the bare queue UUID. The bridge owns the stream and MA's UI
-        consults its state machine.
+    async def test_calls_queue_pause_with_queue_id(self) -> None:
+        """Pause must target the queue (`player_queues.pause(queue_id)`),
+        not the player. The queue owns the playback_state that MA's UI
+        reads — pausing the underlying player without flipping the queue
+        leaves the UI stuck in "playing".
         """
         provider = _make_provider()
         # Bridge wraps the bare ALSA player UUID; on_source_selected sets
         # `_active_player_id` to the bridge and `_in_use_by_queue` to the
-        # queue's underlying bare UUID — they differ when a bridge exists.
+        # queue id (bare UUID). The queue is what we drive.
         provider._active_player_id = "spb_bridge1"
         provider._in_use_by_queue = "player1"
 
         await provider._pause_playback()
 
-        provider.mass.players.cmd_pause.assert_awaited_once_with("spb_bridge1")
+        provider.mass.player_queues.pause.assert_awaited_once_with("player1")
+        provider.mass.players.cmd_pause.assert_not_called()
         assert provider._paused_at_player is True
 
     async def test_preserves_in_use_by_queue(self) -> None:
@@ -2229,14 +2234,18 @@ class TestActivatePlayback:
         assert provider._active_player_id == "player1"
         provider.mass.create_task.assert_called()  # type: ignore[unreachable]
 
-    async def test_unpause_edge_calls_cmd_play(self) -> None:
-        """Entering _activate_playback while `_paused_at_player` issues cmd_play."""
+    async def test_unpause_edge_calls_queue_play_with_queue_id(self) -> None:
+        """Entering _activate_playback while `_paused_at_player` issues
+        `player_queues.play(queue_id)` so the queue's playback_state flips
+        back to PLAYING.
+        """
         provider = _make_provider()
         provider._paused_at_player = True
-        provider._active_player_id = "player1"
+        provider._active_player_id = "spb_bridge1"
+        provider._in_use_by_queue = "player1"  # queue id
 
         player = MagicMock()
-        player.player_id = "player1"
+        player.player_id = "spb_bridge1"
         provider.mass.players.all_players.return_value = [player]
         provider.mass.players.get_player.return_value = player
 
@@ -2244,20 +2253,22 @@ class TestActivatePlayback:
 
         await provider._activate_playback(state)
 
-        provider.mass.players.cmd_play.assert_awaited_once_with("player1")
+        provider.mass.player_queues.play.assert_awaited_once_with("player1")
+        provider.mass.players.cmd_play.assert_not_called()
         assert provider._paused_at_player is False
 
-    async def test_unpause_edge_clears_flag_even_on_cmd_play_failure(self) -> None:
-        """A cmd_play exception must not strand `_paused_at_player`."""
+    async def test_unpause_edge_clears_flag_even_on_queue_play_failure(self) -> None:
+        """A queue.play exception must not strand `_paused_at_player`."""
         provider = _make_provider()
         provider._paused_at_player = True
-        provider._active_player_id = "player1"
+        provider._active_player_id = "spb_bridge1"
+        provider._in_use_by_queue = "player1"
 
         player = MagicMock()
-        player.player_id = "player1"
+        player.player_id = "spb_bridge1"
         provider.mass.players.all_players.return_value = [player]
         provider.mass.players.get_player.return_value = player
-        provider.mass.players.cmd_play = AsyncMock(side_effect=RuntimeError("boom"))
+        provider.mass.player_queues.play = AsyncMock(side_effect=RuntimeError("boom"))
 
         state = _make_ynison_state(progress_ms=0, paused=False)
 
@@ -2266,14 +2277,15 @@ class TestActivatePlayback:
 
         assert provider._paused_at_player is False
 
-    async def test_active_playback_no_pause_flag_does_not_call_cmd_play(self) -> None:
-        """When we never paused at the player, cmd_play must not fire."""
+    async def test_active_playback_no_pause_flag_does_not_call_queue_play(self) -> None:
+        """When we never paused, queue.play must not fire on activation."""
         provider = _make_provider()
         provider._paused_at_player = False
-        provider._active_player_id = "player1"
+        provider._active_player_id = "spb_bridge1"
+        provider._in_use_by_queue = "player1"
 
         player = MagicMock()
-        player.player_id = "player1"
+        player.player_id = "spb_bridge1"
         provider.mass.players.all_players.return_value = [player]
         provider.mass.players.get_player.return_value = player
 
@@ -2281,7 +2293,7 @@ class TestActivatePlayback:
 
         await provider._activate_playback(state)
 
-        provider.mass.players.cmd_play.assert_not_called()
+        provider.mass.player_queues.play.assert_not_called()
 
     async def test_detects_track_change(self) -> None:
         """Detects track change and updates streaming track id."""
