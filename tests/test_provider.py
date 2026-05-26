@@ -1812,24 +1812,28 @@ class TestPausePlayback:
 
         provider.mass.players.cmd_stop.assert_not_called()
 
-    async def test_calls_queue_pause_with_queue_id(self) -> None:
-        """Pause must target the queue (`player_queues.pause(queue_id)`),
-        not the player. The queue owns the playback_state that MA's UI
-        reads — pausing the underlying player without flipping the queue
-        leaves the UI stuck in "playing".
+    async def test_does_not_call_any_pause_command(self) -> None:
+        """`_pause_playback` must not call cmd_pause / queue.pause / cmd_stop.
+
+        MA's `_handle_cmd_pause` for AudioSource items short-circuits to
+        the plugin's own `on_source_control(PAUSE)` and returns without
+        touching player or queue state. Calling those APIs from us is a
+        no-op (in the best case) or an infinite redirect loop. The
+        user-visible pause is rendered by the silence-keepalive loop in
+        `get_audio_stream` freezing `_stream_metadata.elapsed_time` and
+        by the audio buffer draining into silence — matches the upstream
+        Spotify Connect provider's documented behaviour
+        (`spotify_connect/__init__.py:904-911`).
         """
         provider = _make_provider()
-        # Bridge wraps the bare ALSA player UUID; on_source_selected sets
-        # `_active_player_id` to the bridge and `_in_use_by_queue` to the
-        # queue id (bare UUID). The queue is what we drive.
         provider._active_player_id = "spb_bridge1"
         provider._in_use_by_queue = "player1"
 
         await provider._pause_playback()
 
-        provider.mass.player_queues.pause.assert_awaited_once_with("player1")
         provider.mass.players.cmd_pause.assert_not_called()
-        assert provider._paused_at_player is True
+        provider.mass.players.cmd_stop.assert_not_called()
+        provider.mass.player_queues.pause.assert_not_called()
 
     async def test_preserves_in_use_by_queue(self) -> None:
         """The lock stays with the active session — release is the teardown's job."""
@@ -2234,53 +2238,17 @@ class TestActivatePlayback:
         assert provider._active_player_id == "player1"
         provider.mass.create_task.assert_called()  # type: ignore[unreachable]
 
-    async def test_unpause_edge_calls_queue_play_with_queue_id(self) -> None:
-        """Entering _activate_playback while `_paused_at_player` issues
-        `player_queues.play(queue_id)` so the queue's playback_state flips
-        back to PLAYING.
+    async def test_unpause_edge_does_not_call_play_apis(self) -> None:
+        """Unpause must not invoke cmd_play / queue.play.
+
+        MA never thought we were paused (see TestPausePlayback) so there
+        is nothing to "unpause" on the MA player/queue side. The streaming
+        branch in `get_audio_stream` resumes real audio on its own when
+        `_ynison.state.is_paused` flips back to False. We only clear the
+        diagnostic `_paused_at_player` flag here.
         """
         provider = _make_provider()
         provider._paused_at_player = True
-        provider._active_player_id = "spb_bridge1"
-        provider._in_use_by_queue = "player1"  # queue id
-
-        player = MagicMock()
-        player.player_id = "spb_bridge1"
-        provider.mass.players.all_players.return_value = [player]
-        provider.mass.players.get_player.return_value = player
-
-        state = _make_ynison_state(progress_ms=0, paused=False)
-
-        await provider._activate_playback(state)
-
-        provider.mass.player_queues.play.assert_awaited_once_with("player1")
-        provider.mass.players.cmd_play.assert_not_called()
-        assert provider._paused_at_player is False
-
-    async def test_unpause_edge_clears_flag_even_on_queue_play_failure(self) -> None:
-        """A queue.play exception must not strand `_paused_at_player`."""
-        provider = _make_provider()
-        provider._paused_at_player = True
-        provider._active_player_id = "spb_bridge1"
-        provider._in_use_by_queue = "player1"
-
-        player = MagicMock()
-        player.player_id = "spb_bridge1"
-        provider.mass.players.all_players.return_value = [player]
-        provider.mass.players.get_player.return_value = player
-        provider.mass.player_queues.play = AsyncMock(side_effect=RuntimeError("boom"))
-
-        state = _make_ynison_state(progress_ms=0, paused=False)
-
-        # Must not raise — failure swallowed; flag still cleared.
-        await provider._activate_playback(state)
-
-        assert provider._paused_at_player is False
-
-    async def test_active_playback_no_pause_flag_does_not_call_queue_play(self) -> None:
-        """When we never paused, queue.play must not fire on activation."""
-        provider = _make_provider()
-        provider._paused_at_player = False
         provider._active_player_id = "spb_bridge1"
         provider._in_use_by_queue = "player1"
 
@@ -2294,6 +2262,8 @@ class TestActivatePlayback:
         await provider._activate_playback(state)
 
         provider.mass.player_queues.play.assert_not_called()
+        provider.mass.players.cmd_play.assert_not_called()
+        assert provider._paused_at_player is False
 
     async def test_detects_track_change(self) -> None:
         """Detects track change and updates streaming track id."""

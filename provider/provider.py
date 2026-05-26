@@ -436,12 +436,30 @@ class YandexYnisonProvider(PluginProvider):
                 # unset (`_clear_active_player` / `unload` are the only
                 # setters) and Ynison keeps reporting our track paused, we
                 # keep feeding silence.
+                #
+                # While paused, also freeze the UI seek bar by holding
+                # `_stream_metadata.elapsed_time` at the pause position and
+                # advancing `elapsed_time_last_updated` to "now" every
+                # iteration. MA computes `corrected_elapsed_time =
+                # elapsed_time + (now - elapsed_time_last_updated)`. By
+                # keeping the gap at zero we make the extrapolation a
+                # constant — the seek bar visually freezes. This is the
+                # only pause-state signal the AudioSource model exposes
+                # to a plugin (per upstream Spotify Connect's note in
+                # `__init__.py:904-911`); the player/queue PlaybackState
+                # itself stays PLAYING because MA short-circuits any pause
+                # we try to push back into `cmd_pause` / `queue.pause`.
                 if self._ynison.state.is_paused:
                     frame_size = (session_fmt.bit_depth // 8) * session_fmt.channels
                     chunk_ms = 100
                     samples_per_chunk = session_fmt.sample_rate * chunk_ms // 1000
                     silence = b"\x00" * (samples_per_chunk * frame_size)
                     chunk_timeout = chunk_ms / 1000
+                    frozen_elapsed_s = (
+                        self._ynison.state.progress_ms // 1000
+                        if self._ynison.state.progress_ms
+                        else self._streaming_progress_ms // 1000
+                    )
                     while (
                         not self._stream_stop_event.is_set()
                         and (
@@ -456,6 +474,9 @@ class YandexYnisonProvider(PluginProvider):
                         and self._ynison.state.is_paused
                     ):
                         yield silence
+                        # Freeze the metadata extrapolation each tick.
+                        self._stream_metadata.elapsed_time = frozen_elapsed_s
+                        self._stream_metadata.elapsed_time_last_updated = time.time()
                         with suppress(TimeoutError):
                             await asyncio.wait_for(
                                 self._track_changed_event.wait(),
@@ -926,31 +947,16 @@ class YandexYnisonProvider(PluginProvider):
             self.logger.warning("Ynison active on our device but no MA player available")
             return
 
-        # Unpause edge: we are entering this method because Ynison reports
-        # the device active AND not paused. If `_paused_at_player` is set,
-        # we previously drove the MA QUEUE into PAUSED via
-        # `mass.player_queues.pause(queue_id)` — release it via
-        # `player_queues.play(queue_id)` so the queue's playback_state
-        # flips back, the player resumes draining the silence back-fill
-        # the keep-alive loop produced, and real audio continues. The
-        # queue id is the one MA handed us in `on_source_selected`
-        # (`_in_use_by_queue`); MUST match the id we paused on, otherwise
-        # the queue stays paused. Clear the flag unconditionally so a
-        # failure does not strand us in a "queue paused but flag stuck"
-        # state.
-        if self._paused_at_player:
-            self._paused_at_player = False
-            queue_id = self._in_use_by_queue
-            if queue_id:
-                self.logger.info("Unpause: player_queues.play(%s)", queue_id)
-                try:
-                    await self.mass.player_queues.play(queue_id)
-                except Exception:
-                    self.logger.warning(
-                        "player_queues.play failed for %s during unpause",
-                        queue_id,
-                        exc_info=True,
-                    )
+        # Unpause edge: nothing to do at the MA player/queue level. We
+        # never paused MA (see `_pause_playback` — the AudioSource model
+        # short-circuits any cmd_pause / queue.pause we issue back to our
+        # own `on_source_control`, so MA's queue/player state never flipped
+        # in the first place). The silence keep-alive loop in
+        # `get_audio_stream` exits on `_ynison.state.is_paused == False`
+        # and the streaming branch resumes from the seeded position;
+        # MA never had a "paused" view to undo. The `_paused_at_player`
+        # flag stays around as a no-op marker for diagnostics.
+        self._paused_at_player = False
 
         # Detect resume after pause: stream was stopped but player still associated
         needs_reselect = self._stream_stop_event.is_set()
@@ -1185,31 +1191,25 @@ class YandexYnisonProvider(PluginProvider):
           a full ``play_media → preload → ffmpeg restart`` cycle on resume
           (the original 2-3 s pause-resume cost we are eliminating).
         """
-        # Drive the QUEUE, not the player. MA's UI for an AudioSource item
-        # reads playback_state from the queue that owns it, not from the
-        # underlying player. `mass.players.cmd_pause(player_id)` is a thin
-        # redirect to `mass.player_queues.pause(queue_id)` — it looks up the
-        # queue that the player belongs to and forwards. When a protocol
-        # bridge is involved (Local Audio Out → Sendspin `spb_*` wrapping
-        # the bare ALSA UUID), our streaming player is the bridge while the
-        # queue we hold a claim on belongs to the bare UUID. `cmd_pause`
-        # against the bridge searches for a queue keyed by the bridge id
-        # and finds either nothing or the wrong queue — the stream
-        # eventually stops because the bridge tears down the audio path,
-        # but our queue's playback_state never flips and the UI keeps
-        # ticking. Address both halves at the source: call
-        # `player_queues.pause(_in_use_by_queue)` directly. `_in_use_by_queue`
-        # IS the queue_id MA handed us in `on_source_selected`.
-        queue_id = self._in_use_by_queue
-        if not queue_id:
-            self.logger.info("Pause requested but no active queue (_in_use_by_queue is None)")
-            return
-        self.logger.info("Pause: player_queues.pause(%s)", queue_id)
-        try:
-            await self.mass.player_queues.pause(queue_id)
-        except Exception:
-            self.logger.warning("player_queues.pause failed for %s", queue_id, exc_info=True)
-        self._paused_at_player = True
+        # MA's AudioSource model has no first-class "paused" player-state
+        # for plugin-owned audio: `mass.players.cmd_pause` / `cmd_play` and
+        # `mass.player_queues.pause` / `play` short-circuit back to our
+        # `on_source_control(PAUSE)` (controller.py `_handle_cmd_pause` ->
+        # AudioSource branch -> plugin -> return without touching player or
+        # queue state). The upstream Spotify Connect provider documents
+        # this explicitly in its `__init__.py`:
+        #   "pause is rendered by the queue's seek bar freezing
+        #   (stream_metadata.elapsed_time stops advancing)"
+        # So all we do here is freeze metadata extrapolation. The silence
+        # keep-alive loop in `get_audio_stream` does the heavy lifting:
+        # it keeps yielding zero PCM and ticks `elapsed_time_last_updated`
+        # forward with `elapsed_time` held constant, so MA's
+        # `corrected_elapsed_time = elapsed_time + (now - last_updated)`
+        # comes out to the frozen value. We do not touch `cmd_pause` /
+        # `player_queues.pause` from here at all — those produce the
+        # infinite redirect loop described above and never flip any state.
+        if self._in_use_by_queue:
+            self.mass.players.trigger_player_update(self._in_use_by_queue)
 
     # ------------------------------------------------------------------
     # Player selection
