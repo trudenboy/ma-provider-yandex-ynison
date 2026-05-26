@@ -236,10 +236,8 @@ class YandexYnisonProvider(PluginProvider):
         # state-handler twice in quick succession.
         self._command_idempotency: dict[tuple[str, str | None], float] = {}
 
-        # Explicit "we paused via cmd_stop, expect resume" marker. The
-        # resume edge reads this alongside `_stream_stop_event`; an
-        # explicit flag survives if a future code path clears the
-        # event (e.g. a new generator session arming itself).
+        # "We paused via cmd_stop, expect resume" — survives a stray
+        # `_stream_stop_event` clear independent of the stop signal.
         self._paused: bool = False
 
     # ------------------------------------------------------------------
@@ -395,14 +393,9 @@ class YandexYnisonProvider(PluginProvider):
 
         try:
             while not self._stream_stop_event.is_set() and (
-                # Preload path: no claim was active at entry — drive the loop
-                # purely off Ynison state and the stop event. on_source_selected
-                # may fire later; it doesn't disqualify us mid-stream.
-                not had_claim
-                or (
-                    self._in_use_by_queue == player_id
-                    and self._active_session_id == captured_session_id
-                )
+                # Preload path: no claim was active at entry — drive the
+                # loop purely off Ynison state and the stop event.
+                not had_claim or not self._session_lost(player_id, captured_session_id)
             ):
                 if not self._ynison or not self._ynison.state.current_track_id:
                     # Wait for a track to appear
@@ -419,8 +412,7 @@ class YandexYnisonProvider(PluginProvider):
                 track_id = self._ynison.state.current_track_id
                 self._current_streaming_track_id = track_id
 
-                # `_pause_playback` already set the stop event and
-                # released the player; the generator exits.
+                # `_pause_playback` set the stop event; finalize.
                 if self._ynison.state.is_paused:
                     return
 
@@ -453,18 +445,8 @@ class YandexYnisonProvider(PluginProvider):
                     if (
                         self._track_changed_event.is_set()
                         or self._stream_stop_event.is_set()
-                        or (
-                            had_claim
-                            and (
-                                self._in_use_by_queue != player_id
-                                or self._active_session_id != captured_session_id
-                            )
-                        )
+                        or (had_claim and self._session_lost(player_id, captured_session_id))
                     ):
-                        # Note: external pause routes through `_pause_playback`
-                        # → `_stream_stop_event.set()` → this break fires via
-                        # the stop-event guard. No separate `is_paused` check
-                        # needed in the chunk loop.
                         break
 
                 # Align to PCM frame boundary — prevents misalignment in MA's
@@ -488,9 +470,8 @@ class YandexYnisonProvider(PluginProvider):
                 # interrupted track makes Yandex auto-advance the queue —
                 # surfaces as an unwanted skip on pause / handoff.
                 broke_for_pause = self._ynison is not None and self._ynison.state.is_paused
-                broke_for_session_change = had_claim and (
-                    self._in_use_by_queue != player_id
-                    or self._active_session_id != captured_session_id
+                broke_for_session_change = had_claim and self._session_lost(
+                    player_id, captured_session_id
                 )
                 natural_end = (
                     not self._track_changed_event.is_set()
@@ -516,11 +497,7 @@ class YandexYnisonProvider(PluginProvider):
             # generator's teardown would otherwise clobber the new session's
             # claim. `had_claim` keeps the preload path from touching the lock
             # at all (no claim ever existed to release).
-            if (
-                had_claim
-                and self._in_use_by_queue == player_id
-                and self._active_session_id == captured_session_id
-            ):
+            if had_claim and not self._session_lost(player_id, captured_session_id):
                 self._in_use_by_queue = None
             self._current_streaming_track_id = None
 
@@ -571,16 +548,10 @@ class YandexYnisonProvider(PluginProvider):
         ``get_audio_stream()`` session.  Falls back to the current
         ``_normalized_params`` when called outside a session.
         """
-        # Mark this fetch as in-flight to yandex_music: the user has
-        # explicitly tried to start (or just continue) a track via Ynison
-        # and we are inside the audio generator that owes them PCM. If a
-        # captcha cooldown is engaged on the "default" kind from some
-        # unrelated past 429, dropping the stream is strictly worse than
-        # risking another captcha trip — same trade-off yandex_music's own
-        # `BYPASS_THROTTLER` path makes for stream-URL refreshes mid-track.
-        # The prefetch path (`_prefetch_format_for_track`) is intentionally
-        # NOT bypassed: it has a 2.5 s timeout and skipping it on cooldown
-        # only costs a missed auto-rate hint, not the whole playback.
+        # In-flight stream fetch outranks unrelated 429 cooldowns:
+        # dropping a stream the user is actively trying to play is
+        # worse than risking another captcha. Prefetch deliberately
+        # stays throttled (see `_prefetch_format_for_track`).
         bypass_token = BYPASS_THROTTLER.set(True)
         try:
             stream_details = await self._get_stream_details_with_retry(track_id)
@@ -884,9 +855,8 @@ class YandexYnisonProvider(PluginProvider):
             # the cached format is still correct for that case.
             upcoming = state.current_track_id
             switching_player = self._active_player_id != target_player_id
-            new_for_us = upcoming and upcoming != self._current_streaming_track_id
             self._active_player_id = target_player_id
-            if upcoming and (switching_player or new_for_us):
+            if upcoming and (switching_player or upcoming != self._current_streaming_track_id):
                 await self._prefetch_format_for_track(upcoming)
             self.mass.create_task(
                 self.mass.player_queues.play_media(target_player_id, str(self._audio_source.uri))
@@ -1083,7 +1053,10 @@ class YandexYnisonProvider(PluginProvider):
         to IDLE for an AudioSource queue item; ``cmd_pause`` and
         ``queue.pause`` both short-circuit back to ``on_source_control``
         and leave MA's state untouched. Pattern matches upstream
-        ``AriaCastReceiver._handle_playback_state_update``.
+        ``AriaCastReceiver._handle_playback_state_update``. Resume
+        re-runs ``play_media`` (preload + ffmpeg startup) so it costs
+        a few seconds — the alternative kept resume instant but left
+        MA's UI stuck on PLAYING.
         """
         target = self._in_use_by_queue
         if not target:
@@ -1221,6 +1194,14 @@ class YandexYnisonProvider(PluginProvider):
         self._active_session_id = None
         if self._in_use_by_queue == queue_id:
             self._in_use_by_queue = None
+
+    def _session_lost(self, player_id: str, session_id: str | None) -> bool:
+        """Return ``True`` when our claim no longer matches the live session.
+
+        :param player_id: Queue id captured at generator entry.
+        :param session_id: ``_active_session_id`` captured at generator entry.
+        """
+        return self._in_use_by_queue != player_id or self._active_session_id != session_id
 
     def _idempotent(self, action: str, key: str | None) -> bool:
         """Return ``True`` if ``(action, key)`` was not seen within the TTL window.
