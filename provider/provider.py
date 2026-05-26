@@ -114,12 +114,10 @@ _VALID_BIT_DEPTHS: frozenset[str] = frozenset({"16", "24"})
 class YandexYnisonProvider(PluginProvider):
     """Implementation of the Yandex Music Connect (Ynison) Plugin."""
 
-    # Upstream MA's audio_analysis providers (Loudness Analysis, Smart Fades)
-    # branch on `provider.is_streaming_provider` to decide whether to run an
-    # analysis pass. The `PluginProvider` base class does not declare the
-    # attribute, so without this class-level default the analysers raise
-    # `AttributeError` once per track. We're a live source — analysing each
-    # transient track buys nothing — so opt out explicitly.
+    # PluginProvider base does not declare `is_streaming_provider`; MA's
+    # audio-analysis path raises AttributeError for live sources without
+    # an explicit opt-out. Analysing transient external-source tracks
+    # buys nothing.
     is_streaming_provider: bool = False
 
     @property
@@ -237,6 +235,12 @@ class YandexYnisonProvider(PluginProvider):
         # against echo-storms where the same Ynison broadcast lands on our
         # state-handler twice in quick succession.
         self._command_idempotency: dict[tuple[str, str | None], float] = {}
+
+        # Explicit "we paused via cmd_stop, expect resume" marker. The
+        # resume edge reads this alongside `_stream_stop_event`; an
+        # explicit flag survives if a future code path clears the
+        # event (e.g. a new generator session arming itself).
+        self._paused: bool = False
 
     # ------------------------------------------------------------------
     # Provider lifecycle
@@ -415,12 +419,8 @@ class YandexYnisonProvider(PluginProvider):
                 track_id = self._ynison.state.current_track_id
                 self._current_streaming_track_id = track_id
 
-                # External pause has already been routed through
-                # `_pause_playback`, which set `_stream_stop_event` and
-                # called `cmd_stop`. The outer-loop guard above notices
-                # the stop event on the next iteration and ends the
-                # generator cleanly. AriaCast pattern — see
-                # `_pause_playback` docstring for the trade-off.
+                # `_pause_playback` already set the stop event and
+                # released the player; the generator exits.
                 if self._ynison.state.is_paused:
                     return
 
@@ -484,12 +484,9 @@ class YandexYnisonProvider(PluginProvider):
                     break
 
                 # Differentiate "track finished naturally" from "inner loop
-                # broke out early". The inner chunk loop's break conditions
-                # cover: track change, stop event, pause, and same-queue
-                # reconnect/session supersede. If ANY of those triggered, we
-                # must NOT signal completion — doing so would tell Ynison the
-                # old track ended and Yandex would advance the queue,
-                # producing the "press pause, next track starts" bug.
+                # broke out early". Signalling completion on an
+                # interrupted track makes Yandex auto-advance the queue —
+                # surfaces as an unwanted skip on pause / handoff.
                 broke_for_pause = self._ynison is not None and self._ynison.state.is_paused
                 broke_for_session_change = had_claim and (
                     self._in_use_by_queue != player_id
@@ -867,13 +864,13 @@ class YandexYnisonProvider(PluginProvider):
             self.logger.warning("Ynison active on our device but no MA player available")
             return
 
-        # Detect resume after pause / fresh start: `_pause_playback` set
-        # `_stream_stop_event` on the previous external pause, so the
-        # `needs_reselect` branch below will fire `play_media` again and
-        # MA will spin up a fresh stream (the AriaCast pattern's resume
-        # cost: ~2-3 s preload + ffmpeg start-up).
-        needs_reselect = self._stream_stop_event.is_set()
+        # Resume after pause / fresh start: either signal triggers
+        # play_media below. `_paused` survives a stray stop-event
+        # clear; the stop event covers non-pause stop reasons
+        # (`_stream_track` warning branch, `_clear_active_player`).
+        needs_reselect = self._stream_stop_event.is_set() or self._paused
         self._stream_stop_event.clear()
+        self._paused = False
 
         # Start playback via the standard play_media flow if not already active.
         # Guard on _active_player_id (set immediately) rather than in_use_by_queue
@@ -1080,63 +1077,41 @@ class YandexYnisonProvider(PluginProvider):
         )
 
     async def _pause_playback(self) -> None:
-        """Handle external pause — release the player so MA's UI is honest.
+        """Release the active player on external pause.
 
-        Follows the AriaCast Receiver pattern from upstream
-        (``music_assistant/providers/ariacast_receiver/__init__.py:481-490``):
-        on a pause that originates outside MA, call ``cmd_stop`` on the
-        active queue. That:
-
-        - Flips ``player.state.playback_state`` to IDLE (the only
-          player-state mechanism the AudioSource model exposes — any
-          ``cmd_pause`` / ``queue.pause`` short-circuits back to our
-          ``on_source_control(PAUSE)`` and never touches MA state).
-        - Tears down the ``get_audio_stream`` generator cleanly via the
-          stream_stop_event the streams controller observes.
-        - Triggers ``on_source_unselected`` so ``_in_use_by_queue`` and
-          ``_active_session_id`` clear correctly.
-
-        The trade-off — accepted explicitly: a resume from the Yandex
-        Music app then has to redo ``play_media → preload → ffmpeg
-        restart → buffer fill``, costing roughly 2-3 s of inaudible time
-        before audio resumes. The alternative (silence keep-alive) kept
-        resume instant but left MA's player/queue PlaybackState stuck on
-        PLAYING with a ticking progress bar — a UX failure mode the user
-        explicitly rejected over the latency. Spotify Connect upstream
-        documents the same dilemma; AriaCast picks correctness, we match.
-
-        ``_active_player_id`` is preserved so the resume edge in
-        ``_activate_playback`` reclaims the same player via
-        ``play_media`` without re-running the auto-select heuristic
-        (``needs_reselect`` becomes True because we set the stream-stop
-        event here).
+        ``cmd_stop`` is the only mechanism that flips ``PlaybackState``
+        to IDLE for an AudioSource queue item; ``cmd_pause`` and
+        ``queue.pause`` both short-circuit back to ``on_source_control``
+        and leave MA's state untouched. Pattern matches upstream
+        ``AriaCastReceiver._handle_playback_state_update``.
         """
         target = self._in_use_by_queue
         if not target:
             self.logger.info("Pause requested but no active queue (_in_use_by_queue is None)")
             return
-        # Rewrite `_active_player_id` to the queue id BEFORE cmd_stop.
-        # `on_source_selected` had stamped `_active_player_id` with the
-        # player MA hands stream-bytes to (the Sendspin bridge `spb_*`
-        # when Local Audio Out wraps the bare ALSA UUID). MA's
-        # `player_queues.play_media` requires a queue_id, and queues live
-        # on the BARE UUID — they don't exist for `spb_*` wrappers. Once
-        # `on_source_unselected` clears `_in_use_by_queue`, the only
-        # surviving id pointer is `_active_player_id`; if it still points
-        # at the bridge, the resume edge in `_activate_playback` calls
-        # `play_media("spb_*", ...)` and MA raises
-        # `PlayerUnavailableError: Queue spb_... is not available`.
-        # Mirror AriaCast (`ariacast_receiver/__init__.py:485`).
-        self._active_player_id = target
-        self.logger.info("Pause: cmd_stop(%s) — release player so MA UI flips to IDLE", target)
-        # Exit the audio generator promptly. The while-loop guard at the
-        # top of get_audio_stream notices and ends; the finally clause
-        # runs and on_source_unselected clears the lock.
+        self.logger.info("Pause: cmd_stop(%s)", target)
+        # stop event ends the audio generator; finally clears the lock.
         self._stream_stop_event.set()
         try:
             await self.mass.players.cmd_stop(target)
         except Exception:
-            self.logger.debug("cmd_stop failed for %s on pause", target, exc_info=True)
+            # cmd_stop is the only mechanism that flips MA's PlaybackState
+            # to IDLE for an AudioSource. A silent failure here resurrects
+            # the very UX bug this code path exists to fix.
+            self.logger.warning(
+                "cmd_stop(%s) failed during external pause — MA UI may stay PLAYING",
+                target,
+                exc_info=True,
+            )
+            return
+        # Demote `_active_player_id` from the bridge MA streams to
+        # (e.g. `spb_*`) back to the queue id; queues live on the bare
+        # UUID. Without this, resume's `play_media(_active_player_id,
+        # …)` would target the bridge and raise
+        # `PlayerUnavailableError`. Post-success only so a failure
+        # path keeps the bridge id intact for the next attempt.
+        self._active_player_id = target
+        self._paused = True
 
     # ------------------------------------------------------------------
     # Player selection
@@ -1352,6 +1327,7 @@ class YandexYnisonProvider(PluginProvider):
         self._streaming_progress_ms = 0
         self._prefetched_list = None
         self._command_idempotency.clear()
+        self._paused = False
         if self._prefetch_task and not self._prefetch_task.done():
             self._prefetch_task.cancel()
 

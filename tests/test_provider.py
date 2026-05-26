@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -106,8 +107,7 @@ def _make_mock_mass() -> MagicMock:
     mass.players.cmd_volume_set = AsyncMock()
     mass.players.trigger_player_update = MagicMock()
 
-    # Player queues — external triggers route through player_queues.play_media,
-    # pause/play go through queue-level commands (Ynison-driven pause flow).
+    # Player queues
     mass.player_queues.play_media = AsyncMock()
     mass.player_queues.pause = AsyncMock()
     mass.player_queues.play = AsyncMock()
@@ -1789,16 +1789,10 @@ class TestSendProgressToYnison:
 
 
 class TestPausePlayback:
-    """Tests for _pause_playback under the AriaCast cmd_stop contract."""
+    """Tests for `_pause_playback` — external pause releases the player."""
 
     async def test_sets_stop_event_and_cmd_stops_queue(self) -> None:
-        """External pause must release the player via cmd_stop on the queue id.
-
-        Mirrors upstream AriaCast Receiver
-        (`ariacast_receiver/__init__.py:481-490`). The stop event ends
-        the audio generator; cmd_stop flips MA's player/queue state to
-        IDLE so the UI reflects the pause honestly.
-        """
+        """External pause sets the stop event and calls cmd_stop on the queue id."""
         provider = _make_provider()
         provider._active_player_id = "spb_bridge1"
         provider._in_use_by_queue = "player1"
@@ -1808,26 +1802,61 @@ class TestPausePlayback:
         assert provider._stream_stop_event.is_set()
         provider.mass.players.cmd_stop.assert_awaited_once_with("player1")
 
-    async def test_rewrites_active_player_id_to_queue_id_before_stop(self) -> None:
-        """Pause must rewrite `_active_player_id` to the queue id (bare UUID).
+    async def test_rewrites_active_player_id_after_successful_cmd_stop(self) -> None:
+        """On a successful cmd_stop, `_active_player_id` demotes to the queue id.
 
-        on_source_selected stamps `_active_player_id` with the player MA
-        actually streams to — for Local Audio Out + Sendspin that is the
-        bridge wrapper (`spb_*`). MA's `player_queues.play_media`
-        requires a queue_id, and queues live on the bare UUID, not on
-        the bridge. If `_active_player_id` stays pointing at the bridge
-        after on_source_unselected clears `_in_use_by_queue`, the resume
-        edge in `_activate_playback` calls `play_media("spb_*", ...)`
-        which raises PlayerUnavailableError. Mirror AriaCast's fix
-        (`ariacast_receiver/__init__.py:485`).
+        Queues live on the bare ALSA UUID; bridge wrappers (`spb_*`) do
+        not own one. Resume's `play_media(_active_player_id, ...)`
+        must target the queue id — otherwise MA raises
+        `PlayerUnavailableError`. The demotion happens AFTER cmd_stop
+        so a failure path leaves the bridge id intact for next attempt.
         """
         provider = _make_provider()
-        provider._active_player_id = "spb_bridge1"  # bridge from on_source_selected
-        provider._in_use_by_queue = "player1"  # queue id (bare UUID)
+        provider._active_player_id = "spb_bridge1"
+        provider._in_use_by_queue = "player1"
+
+        # capture _active_player_id at the moment cmd_stop is invoked —
+        # must still be the bridge id (rewrite is post-success).
+        captured: dict[str, str | None] = {}
+
+        async def _capture_stop(player_id: str) -> None:
+            captured["active_player_id_at_call"] = provider._active_player_id
+
+        provider.mass.players.cmd_stop = AsyncMock(side_effect=_capture_stop)
 
         await provider._pause_playback()
 
+        assert captured["active_player_id_at_call"] == "spb_bridge1"
         assert provider._active_player_id == "player1"
+        # _paused flag set so the resume edge in _activate_playback can
+        # detect us even if _stream_stop_event has been cleared by some
+        # other code path.
+        assert provider._paused is True
+
+    async def test_cmd_stop_failure_keeps_bridge_id_intact(self) -> None:
+        """A cmd_stop failure must not demote `_active_player_id`.
+
+        If we demoted to the queue id but cmd_stop never reached MA,
+        the next `_activate_playback` would try `play_media(bare_uuid)`
+        without MA ever having released the bridge — wedges the bridge
+        in an inconsistent state. Better to keep the bridge id pinned
+        and let the next pause attempt redo the cycle.
+        """
+        provider = _make_provider()
+        provider._active_player_id = "spb_bridge1"
+        provider._in_use_by_queue = "player1"
+        provider.mass.players.cmd_stop = AsyncMock(side_effect=RuntimeError("boom"))
+
+        await provider._pause_playback()
+
+        assert provider._active_player_id == "spb_bridge1"
+        # Stream stop event still set — generator must exit even if MA
+        # never confirmed; otherwise we'd serve real audio against a
+        # player MA thinks is detached.
+        assert provider._stream_stop_event.is_set()
+        # _paused stays False on the failure path — we're not in a
+        # "successfully paused, expecting resume" state.
+        assert provider._paused is False
 
     async def test_no_active_player_is_a_noop(self) -> None:
         """Pause with no active queue does not call cmd_stop or set the stop event."""
@@ -2210,40 +2239,87 @@ class TestActivatePlayback:
         provider.mass.create_task.assert_called()  # type: ignore[unreachable]
 
     async def test_unpause_after_external_pause_fires_play_media(self) -> None:
-        """Resume after AriaCast-style cmd_stop fires play_media via needs_reselect.
+        """Resume after pause schedules play_media for the (queue-id) player.
 
-        `_pause_playback` sets `_stream_stop_event` and calls `cmd_stop`;
-        the generator exits, `on_source_unselected` clears the lock.
-        When Ynison reports playing again, `_activate_playback` reads
-        `needs_reselect = _stream_stop_event.is_set()` (still True
-        because `_clear_active_player` did NOT run — pause kept the
-        association) and re-issues `play_media`.
+        Simulates the post-`_pause_playback` state: `_stream_stop_event`
+        set, `_active_player_id` already demoted to the queue id (the
+        pause path's post-cmd_stop rewrite), `_in_use_by_queue` cleared
+        by `on_source_unselected`. `_activate_playback` should fire
+        `play_media(queue_id, audio_source.uri)` and clear the stop
+        event so the next session is free to run.
         """
         provider = _make_provider()
-        # Simulate the post-pause state: stream-stop set, _active_player_id
-        # preserved, _in_use_by_queue cleared by on_source_unselected.
+        # Post-pause state: AriaCast path demoted _active_player_id to
+        # the queue id (bare UUID) after cmd_stop succeeded.
         provider._stream_stop_event.set()
-        provider._active_player_id = "spb_bridge1"
+        provider._active_player_id = "player1"
         provider._in_use_by_queue = None
 
         player = MagicMock()
-        player.player_id = "spb_bridge1"
+        player.player_id = "player1"
         provider.mass.players.all_players.return_value = [player]
         provider.mass.players.get_player.return_value = player
+
+        # Replace play_media with a recorder, and make create_task actually
+        # run the coro inline so the call is observable on the recorder.
+        play_media_calls: list[tuple[str, str]] = []
+
+        async def _record_play_media(target_id: str, uri: str) -> None:
+            play_media_calls.append((target_id, uri))
+
+        provider.mass.player_queues.play_media = _record_play_media
+        provider.mass.create_task = MagicMock(
+            side_effect=lambda coro, *_a, **_kw: asyncio.get_event_loop().create_task(coro)
+        )
 
         state = _make_ynison_state(progress_ms=10_000, paused=False)
 
         await provider._activate_playback(state)
+        await asyncio.sleep(0)  # let the scheduled play_media coro run
 
-        # `_activate_playback` schedules `play_media` via `mass.create_task`;
-        # the mass mock's create_task is a MagicMock that does not actually
-        # run the coro. Asserting the scheduling itself is sufficient —
-        # for end-to-end execution see TestPrefetchOrdering which installs
-        # a custom create_task that does run the coro.
-        provider.mass.create_task.assert_called()
-        # Stop event cleared so the next get_audio_stream session runs
-        # normally.
+        assert len(play_media_calls) == 1, (
+            f"expected exactly one play_media, got {play_media_calls}"
+        )
+        target_id, uri = play_media_calls[0]
+        # The target must be the (queue id) bare player, NOT the bridge.
+        # The bridge id would point at no queue and raise PlayerUnavailableError.
+        assert target_id == "player1"
+        assert uri == str(provider._audio_source.uri)
         assert not provider._stream_stop_event.is_set()
+
+    async def test_resume_via_paused_flag_alone(self) -> None:
+        """Resume must fire play_media even if stream_stop_event was cleared.
+
+        Pins the explicit `_paused` flag as a second resume signal —
+        guards against a stray code path clearing the stop event
+        between `_pause_playback` and `_activate_playback`.
+        """
+        provider = _make_provider()
+        provider._stream_stop_event.clear()  # event NOT set
+        provider._paused = True  # only the explicit flag
+        provider._active_player_id = "player1"
+        provider._in_use_by_queue = None
+
+        player = MagicMock()
+        player.player_id = "player1"
+        provider.mass.players.all_players.return_value = [player]
+        provider.mass.players.get_player.return_value = player
+
+        play_media_calls: list[tuple[str, str]] = []
+
+        async def _record_play_media(target_id: str, uri: str) -> None:
+            play_media_calls.append((target_id, uri))
+
+        provider.mass.player_queues.play_media = _record_play_media
+        provider.mass.create_task = MagicMock(
+            side_effect=lambda coro, *_a, **_kw: asyncio.get_event_loop().create_task(coro)
+        )
+
+        await provider._activate_playback(_make_ynison_state(progress_ms=10_000, paused=False))
+        await asyncio.sleep(0)
+
+        assert play_media_calls, "play_media must fire even without stop event"
+        assert provider._paused is False  # cleared by _activate_playback
 
     async def test_detects_track_change(self) -> None:
         """Detects track change and updates streaming track id."""
@@ -2600,3 +2676,265 @@ class TestPrefetchOrdering:
         assert order, "expected at least a prefetch call"
         assert order[0].startswith("prefetch:track42")
         assert any(c.startswith("play_media:player1") for c in order[1:])
+
+
+class TestAudioStreamPausedReturn:
+    """`get_audio_stream` exits immediately when Ynison reports paused."""
+
+    async def test_paused_state_exits_generator_without_yielding(self) -> None:
+        """A paused-at-entry session yields zero chunks and the generator ends.
+
+        This pins the AriaCast-pattern invariant: pause is handled by
+        `_pause_playback` (cmd_stop + stream_stop_event); the audio
+        generator's own contract on `is_paused` is to bail. Any
+        regression that reintroduces a silence loop or a wait for
+        unpause would fail this test.
+        """
+        provider = _make_provider()
+        provider._yandex_provider = MagicMock()
+        provider._in_use_by_queue = "player1"
+        provider._active_session_id = "session-1"
+
+        ynison = MagicMock()
+        ynison.state.is_paused = True
+        ynison.state.current_track_id = "track42"
+        provider._ynison = ynison
+
+        streamdetails = MagicMock()
+        gen = provider.get_audio_stream(streamdetails, seek_position=0)
+
+        chunks: list[bytes] = []
+        with suppress(StopAsyncIteration):
+            async for chunk in gen:
+                chunks.append(chunk)
+
+        assert chunks == []
+
+
+class TestNaturalEndDifferentiation:
+    """`_signal_track_completion` fires ONLY on clean iterator exhaustion."""
+
+    async def _drive_one_track(
+        self,
+        provider: YandexYnisonProvider,
+        *,
+        set_track_change: bool = False,
+        set_stop: bool = False,
+        set_paused: bool = False,
+        set_session_change: bool = False,
+    ) -> int:
+        """Drive the generator for one chunk and trigger the requested exit.
+
+        Returns the number of times `_signal_track_completion` ran.
+        """
+        signal_calls = 0
+
+        async def _spy_signal() -> None:
+            nonlocal signal_calls
+            signal_calls += 1
+
+        _stub_attr(provider, "_signal_track_completion", _spy_signal)
+
+        # Stub `_wait_for_track_change` so the signal path doesn't block.
+        async def _wait_stub(_old: str, timeout: float = 30.0) -> bool:  # noqa: ARG001
+            return True
+
+        _stub_attr(provider, "_wait_for_track_change", _wait_stub)
+
+        async def _stub_stream_track(
+            _track_id: str, *, seek_ms: int = 0, session_params: dict[str, Any] | None = None
+        ) -> Any:
+            # Mid-chunk: arm the requested exit condition.
+            if set_track_change:
+                provider._track_changed_event.set()
+            if set_stop:
+                provider._stream_stop_event.set()
+            if set_paused:
+                # is_paused on YnisonState is a property derived from
+                # player_state['status']['paused']. Flip via the state dict.
+                assert provider._ynison is not None
+                provider._ynison.state.player_state["status"]["paused"] = True
+            if set_session_change:
+                provider._active_session_id = "different-session"
+            yield b"\x00\x00\x00\x00"
+
+        _stub_attr(provider, "_stream_track", _stub_stream_track)
+
+        # `_wait_for_track_change` returns True so the outer loop will iterate;
+        # break it out after one iteration by setting stop on second pass.
+        # The exit conditions above already cover that.
+        streamdetails = MagicMock()
+        gen = provider.get_audio_stream(streamdetails, seek_position=0)
+        with suppress(StopAsyncIteration):
+            for _ in range(3):  # drain a few iterations max
+                await asyncio.wait_for(gen.__anext__(), timeout=1.0)
+                # Force stop on next outer iteration so the test terminates.
+                provider._stream_stop_event.set()
+        with suppress(StopAsyncIteration, asyncio.CancelledError):
+            await gen.aclose()
+        return signal_calls
+
+    def _build(self) -> YandexYnisonProvider:
+        provider = _make_provider()
+        provider._yandex_provider = MagicMock()
+        provider._in_use_by_queue = "player1"
+        provider._active_session_id = "session-1"
+        ynison = MagicMock()
+        ynison.connected = True
+        ynison.state.is_paused = False
+        ynison.state.current_track_id = "track42"
+        ynison.state.player_state = {"status": {"paused": False}}
+        ynison.update_playing_status = AsyncMock()
+        provider._ynison = ynison
+        return provider
+
+    async def test_track_change_does_not_signal_completion(self) -> None:
+        """`_track_changed_event` set inside chunk loop → no completion signal."""
+        provider = self._build()
+        calls = await self._drive_one_track(provider, set_track_change=True)
+        assert calls == 0
+
+    async def test_pause_does_not_signal_completion(self) -> None:
+        """is_paused flipped True inside chunk loop → no completion signal."""
+        provider = self._build()
+        calls = await self._drive_one_track(provider, set_paused=True)
+        assert calls == 0
+
+    async def test_session_change_does_not_signal_completion(self) -> None:
+        """`_active_session_id` rotated mid-stream → no completion signal."""
+        provider = self._build()
+        calls = await self._drive_one_track(provider, set_session_change=True)
+        assert calls == 0
+
+    async def test_clean_exhaustion_signals_completion(self) -> None:
+        """`_stream_track` exhausting naturally (no break flags) → completion fires."""
+        provider = self._build()
+        signal_calls = 0
+
+        async def _spy_signal() -> None:
+            nonlocal signal_calls
+            signal_calls += 1
+
+        _stub_attr(provider, "_signal_track_completion", _spy_signal)
+
+        async def _wait_stub(_old: str, timeout: float = 30.0) -> bool:  # noqa: ARG001
+            # After signalling, stop the outer loop.
+            provider._stream_stop_event.set()
+            return False
+
+        _stub_attr(provider, "_wait_for_track_change", _wait_stub)
+
+        async def _natural_end_stream(
+            _track_id: str, *, seek_ms: int = 0, session_params: dict[str, Any] | None = None
+        ) -> Any:
+            yield b"\x00\x00\x00\x00"
+            # No break flags set — generator simply exhausts.
+
+        _stub_attr(provider, "_stream_track", _natural_end_stream)
+
+        streamdetails = MagicMock()
+        gen = provider.get_audio_stream(streamdetails, seek_position=0)
+        with suppress(StopAsyncIteration):
+            async for _ in gen:
+                pass
+        with suppress(StopAsyncIteration, asyncio.CancelledError):
+            await gen.aclose()
+
+        assert signal_calls == 1
+
+
+class TestBypassThrottlerScope:
+    """`BYPASS_THROTTLER` is set inside `_stream_track`, NOT inside prefetch."""
+
+    async def test_bypass_active_during_in_flight_stream_fetch(self) -> None:
+        """The in-flight stream-details fetch runs with BYPASS_THROTTLER=True."""
+        from music_assistant.helpers.throttle_retry import (  # noqa: PLC0415 — local import
+            BYPASS_THROTTLER,
+        )
+
+        provider = _make_provider()
+        observed: list[bool] = []
+        mock_yandex = MagicMock()
+
+        async def _fake_get_stream_details(_track_id: str, _media_type: Any) -> Any:
+            observed.append(BYPASS_THROTTLER.get())
+            sd = MagicMock()
+            sd.expiration = 0
+            sd.duration = 1
+            sd.audio_format = MagicMock()
+            return sd
+
+        mock_yandex.get_stream_details = AsyncMock(side_effect=_fake_get_stream_details)
+
+        async def _fake_audio(_details: object) -> Any:
+            yield b"x"
+
+        mock_yandex.get_audio_stream = _fake_audio
+        provider._yandex_provider = mock_yandex
+
+        mock_ynison = MagicMock()
+        mock_ynison.update_playing_status = AsyncMock()
+        mock_ynison.state.is_paused = False
+        provider._ynison = mock_ynison
+
+        async def _fake_ffmpeg(**_kwargs: object) -> Any:
+            yield b"pcm"
+
+        with patch("provider.provider.get_ffmpeg_stream", side_effect=_fake_ffmpeg):
+            async for _ in provider._stream_track("track1"):
+                break
+
+        assert observed == [True], (
+            f"BYPASS_THROTTLER should be True inside _stream_track, got {observed}"
+        )
+        # Token reset cleanly back to False at the surrounding context.
+        assert BYPASS_THROTTLER.get() is False
+
+    async def test_bypass_not_active_during_prefetch(self) -> None:
+        """The prefetch path is intentionally NOT bypassed — opportunistic only."""
+        from music_assistant.helpers.throttle_retry import (  # noqa: PLC0415
+            BYPASS_THROTTLER,
+        )
+
+        provider = _make_provider()
+        observed: list[bool] = []
+        mock_yandex = MagicMock()
+
+        async def _fake_get_stream_details(_track_id: str, _media_type: Any) -> Any:
+            observed.append(BYPASS_THROTTLER.get())
+            sd = MagicMock()
+            sd.expiration = 0
+            sd.audio_format = MagicMock()
+            sd.audio_format.sample_rate = 44100
+            sd.audio_format.bit_depth = 16
+            return sd
+
+        mock_yandex.get_stream_details = AsyncMock(side_effect=_fake_get_stream_details)
+        provider._yandex_provider = mock_yandex
+
+        await provider._prefetch_format_for_track("track1")
+
+        assert observed == [False], (
+            f"BYPASS_THROTTLER must NOT be set during prefetch, got {observed}"
+        )
+
+    async def test_bypass_resets_on_exception(self) -> None:
+        """A raise inside the bypassed call must still reset the context-var."""
+        from music_assistant.helpers.throttle_retry import (  # noqa: PLC0415
+            BYPASS_THROTTLER,
+        )
+
+        provider = _make_provider()
+        mock_yandex = MagicMock()
+        mock_yandex.get_stream_details = AsyncMock(side_effect=RuntimeError("boom"))
+        provider._yandex_provider = mock_yandex
+
+        mock_ynison = MagicMock()
+        mock_ynison.state.is_paused = False
+        provider._ynison = mock_ynison
+
+        # _stream_track swallows the exception, sets the stop event, returns.
+        async for _ in provider._stream_track("track1"):
+            pass
+
+        assert BYPASS_THROTTLER.get() is False
