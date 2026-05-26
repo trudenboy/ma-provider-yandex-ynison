@@ -1115,6 +1115,19 @@ class YandexYnisonProvider(PluginProvider):
         if not target:
             self.logger.info("Pause requested but no active queue (_in_use_by_queue is None)")
             return
+        # Rewrite `_active_player_id` to the queue id BEFORE cmd_stop.
+        # `on_source_selected` had stamped `_active_player_id` with the
+        # player MA hands stream-bytes to (the Sendspin bridge `spb_*`
+        # when Local Audio Out wraps the bare ALSA UUID). MA's
+        # `player_queues.play_media` requires a queue_id, and queues live
+        # on the BARE UUID — they don't exist for `spb_*` wrappers. Once
+        # `on_source_unselected` clears `_in_use_by_queue`, the only
+        # surviving id pointer is `_active_player_id`; if it still points
+        # at the bridge, the resume edge in `_activate_playback` calls
+        # `play_media("spb_*", ...)` and MA raises
+        # `PlayerUnavailableError: Queue spb_... is not available`.
+        # Mirror AriaCast (`ariacast_receiver/__init__.py:485`).
+        self._active_player_id = target
         self.logger.info("Pause: cmd_stop(%s) — release player so MA UI flips to IDLE", target)
         # Exit the audio generator promptly. The while-loop guard at the
         # top of get_audio_stream notices and ends; the finally clause

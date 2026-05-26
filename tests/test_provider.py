@@ -1808,15 +1808,26 @@ class TestPausePlayback:
         assert provider._stream_stop_event.is_set()
         provider.mass.players.cmd_stop.assert_awaited_once_with("player1")
 
-    async def test_preserves_active_player_id_for_resume(self) -> None:
-        """`_active_player_id` survives pause so resume can reclaim the same player."""
+    async def test_rewrites_active_player_id_to_queue_id_before_stop(self) -> None:
+        """Pause must rewrite `_active_player_id` to the queue id (bare UUID).
+
+        on_source_selected stamps `_active_player_id` with the player MA
+        actually streams to — for Local Audio Out + Sendspin that is the
+        bridge wrapper (`spb_*`). MA's `player_queues.play_media`
+        requires a queue_id, and queues live on the bare UUID, not on
+        the bridge. If `_active_player_id` stays pointing at the bridge
+        after on_source_unselected clears `_in_use_by_queue`, the resume
+        edge in `_activate_playback` calls `play_media("spb_*", ...)`
+        which raises PlayerUnavailableError. Mirror AriaCast's fix
+        (`ariacast_receiver/__init__.py:485`).
+        """
         provider = _make_provider()
-        provider._active_player_id = "spb_bridge1"
-        provider._in_use_by_queue = "player1"
+        provider._active_player_id = "spb_bridge1"  # bridge from on_source_selected
+        provider._in_use_by_queue = "player1"  # queue id (bare UUID)
 
         await provider._pause_playback()
 
-        assert provider._active_player_id == "spb_bridge1"
+        assert provider._active_player_id == "player1"
 
     async def test_no_active_player_is_a_noop(self) -> None:
         """Pause with no active queue does not call cmd_stop or set the stop event."""
