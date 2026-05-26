@@ -1835,7 +1835,7 @@ class TestPausePlayback:
         # must still be the bridge id (rewrite is post-success).
         captured: dict[str, str | None] = {}
 
-        async def _capture_stop(player_id: str) -> None:
+        async def _capture_stop(_player_id: str) -> None:
             captured["active_player_id_at_call"] = provider._active_player_id
 
         provider.mass.players.cmd_stop = AsyncMock(side_effect=_capture_stop)
@@ -2690,7 +2690,6 @@ class TestPrefetchFlowsThroughToStreamDetails:
         provider = _make_provider()
         # Default before prefetch: lossy PCM (16-bit / 44.1 kHz auto base).
         default_rate = provider._normalized_params["sample_rate"]
-        default_depth = provider._normalized_params["bit_depth"]
         assert default_rate != 96_000  # sanity: ensure we'll see a change
 
         mock_yandex = MagicMock()
@@ -2849,6 +2848,7 @@ class TestNaturalEndDifferentiation:
         async def _natural_end(
             _track_id: str, *, seek_ms: int = 0, session_params: dict[str, Any] | None = None
         ) -> Any:
+            del seek_ms, session_params  # signature-compat with _stream_track
             yield b"\x00\x00\x00\x00"
             # generator exhausts cleanly — no break flag set
 
@@ -2875,6 +2875,7 @@ class TestNaturalEndDifferentiation:
         async def _two_pass_stream(
             _track_id: str, *, seek_ms: int = 0, session_params: dict[str, Any] | None = None
         ) -> Any:
+            del seek_ms, session_params  # signature-compat with _stream_track
             nonlocal invocation_count
             invocation_count += 1
             yield b"\x00\x00\x00\x00"
@@ -2908,6 +2909,7 @@ class TestNaturalEndDifferentiation:
         async def _yield_then_rotate_session(
             _track_id: str, *, seek_ms: int = 0, session_params: dict[str, Any] | None = None
         ) -> Any:
+            del seek_ms, session_params  # signature-compat with _stream_track
             yield b"\x00\x00\x00\x00"
             provider._active_session_id = "different-session"
 
