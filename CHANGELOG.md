@@ -10,11 +10,16 @@ All notable changes to this project will be documented in this file.
 - Lock model rewritten around per-queue ownership plus a per-request session id; same-queue reconnects no longer race the previous stream's teardown.
 - `get_stream_details` is now side-effect-free so preload paths can fetch stream metadata without claiming the source.
 - Lossless PCM auto-mode default sample rate is 48 kHz instead of 44.1 kHz when no source hint is available; the format pre-fetch still lifts auto-mode to the real source rate (e.g. 96 kHz for Hi-Res) before playback starts.
+- Bumped `ya-passport-auth` to 1.4.1. The QR-login flow used by own-mode authentication now talks to Yandex Passport's current `/pwl-yandex` BFF endpoints; the legacy registration-validations path that 1.3.0 still depended on is gone. Empty `magic/code/status` bodies (returned by the BFF while the QR is unscanned) are correctly treated as pending instead of raising an immediate auth error.
 
 ### Removed
 
 - The experimental `playback_mode = handoff` option and the related `handoff_heartbeat_interval` setting. Configurations carrying these values lose them silently on upgrade and the plugin always runs in the (formerly "stream") AudioSource path.
 - The experimental `enable_ui_integration` toggle. The new `AudioSource` flow renders a real queue card without any workaround, so the previous fake-queue mechanism — and the multi-user `player_filter` limitation documented in 2.2.9 — are gone.
+
+### Security
+
+- Closed CVE-2026-45409 (moderate) in transitive `idna` (3.11 → 3.16), pulled in via the `ya-passport-auth` 1.4.1 bump.
 
 ## [2.2.9] - 2026-05-13
 
