@@ -460,6 +460,17 @@ class YandexYnisonProvider(PluginProvider):
                         if self._ynison.state.progress_ms
                         else self._streaming_progress_ms // 1000
                     )
+                    # Push the frozen metadata to the queue's snapshot every
+                    # second. Mutating `_stream_metadata` in-place is not
+                    # enough — MA reads `current_item.streamdetails.stream_metadata`
+                    # which is a *copy* captured at stream-start time. Without
+                    # this explicit republish, the bare ALSA player's
+                    # heartbeat report (which keeps reporting elapsed_time
+                    # ticking forward because we are still yielding bytes
+                    # into its buffer) wins in `on_player_elapsed_time_corrected`
+                    # → `player_queues._handle_player_elapsed_time` overwrites
+                    # `queue.elapsed_time` and the UI seek bar keeps moving.
+                    last_metadata_push = 0.0
                     while (
                         not self._stream_stop_event.is_set()
                         and (
@@ -476,7 +487,26 @@ class YandexYnisonProvider(PluginProvider):
                         yield silence
                         # Freeze the metadata extrapolation each tick.
                         self._stream_metadata.elapsed_time = frozen_elapsed_s
-                        self._stream_metadata.elapsed_time_last_updated = time.time()
+                        now_t = time.time()
+                        self._stream_metadata.elapsed_time_last_updated = now_t
+                        # Republish to the queue's streamdetails snapshot at
+                        # most once per second — frequent enough to overwrite
+                        # the player's heartbeat tick, cheap enough not to
+                        # spam the websocket.
+                        if self._in_use_by_queue and now_t - last_metadata_push >= 1.0:
+                            try:
+                                self.mass.streams.update_stream_metadata(
+                                    self._in_use_by_queue,
+                                    AUDIO_SOURCE_ID,
+                                    self.instance_id,
+                                    self._stream_metadata,
+                                )
+                            except Exception:
+                                self.logger.debug(
+                                    "update_stream_metadata failed during pause",
+                                    exc_info=True,
+                                )
+                            last_metadata_push = now_t
                         with suppress(TimeoutError):
                             await asyncio.wait_for(
                                 self._track_changed_event.wait(),
