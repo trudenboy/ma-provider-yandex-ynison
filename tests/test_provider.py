@@ -16,7 +16,7 @@ from music_assistant_models.enums import (
     ProviderType,
 )
 from music_assistant_models.errors import LoginFailed, UnsupportedFeaturedException
-from music_assistant_models.media_items import AudioSource
+from music_assistant_models.media_items import AudioFormat, AudioSource
 from ya_passport_auth import SecretStr
 
 from music_assistant.helpers.throttle_retry import BYPASS_THROTTLER
@@ -2667,6 +2667,85 @@ class TestPrefetchOrdering:
         assert order, "expected at least a prefetch call"
         assert order[0].startswith("prefetch:track42")
         assert any(c.startswith("play_media:player1") for c in order[1:])
+
+
+class TestPrefetchFlowsThroughToStreamDetails:
+    """`get_stream_details` returns the *prefetched* AudioFormat.
+
+    Pins the contract that MA's upstream passthrough path (#3969,
+    `_select_audio_source_pcm_format`) honors: MA reads
+    ``streamdetails.audio_format`` and only invokes ffmpeg when it
+    cannot match the player's supported rates. A regression that
+    decouples ``_prefetch_format_for_track`` from
+    ``self._normalized_params`` (or that returns a stale snapshot in
+    ``get_stream_details``) would silently downgrade hi-res passthrough
+    to a forced ffmpeg resample with no functional indicator beyond
+    log entropy.
+    """
+
+    async def test_prefetch_updates_streamdetails_audio_format(self) -> None:
+        """Prefetched source rate/bit-depth must reach `get_stream_details`."""
+        from music_assistant_models.enums import MediaType  # noqa: PLC0415
+
+        provider = _make_provider()
+        # Default before prefetch: lossy PCM (16-bit / 44.1 kHz auto base).
+        default_rate = provider._normalized_params["sample_rate"]
+        default_depth = provider._normalized_params["bit_depth"]
+        assert default_rate != 96_000  # sanity: ensure we'll see a change
+
+        mock_yandex = MagicMock()
+
+        async def _fake_get_stream_details(_track_id: str, _media_type: MediaType) -> Any:
+            sd = MagicMock()
+            sd.expiration = 60
+            sd.duration = 200
+            sd.data = None
+            sd.audio_format = AudioFormat(
+                content_type=ContentType.FLAC,
+                sample_rate=96_000,
+                bit_depth=24,
+                channels=2,
+            )
+            sd.to_dict = MagicMock(return_value={})
+            return sd
+
+        mock_yandex.get_stream_details = AsyncMock(side_effect=_fake_get_stream_details)
+        provider._yandex_provider = mock_yandex
+        # Set explicit AUTO so prefetch hint is allowed to promote both axes.
+        provider._cfg_sample_rate = OUTPUT_AUTO
+        provider._cfg_bit_depth = OUTPUT_AUTO
+
+        await provider._prefetch_format_for_track("track42")
+
+        # `_normalized_params` lifted to source rate/bit-depth.
+        assert provider._normalized_params["sample_rate"] == 96_000
+        assert provider._normalized_params["bit_depth"] == 24
+        # And get_stream_details now reflects that — MA's
+        # `_select_audio_source_pcm_format` consumes this.
+        sd = await provider.get_stream_details("main", "queue1")
+        assert sd.media_type == MediaType.AUDIO_SOURCE
+        assert sd.audio_format.sample_rate == 96_000
+        assert sd.audio_format.bit_depth == 24
+        assert sd.audio_format.channels == 2
+
+    async def test_streamdetails_audio_format_is_fresh_copy_per_call(self) -> None:
+        """Each `get_stream_details` returns a fresh AudioFormat instance.
+
+        `AudioFormat` is mutable (MA's outer ffmpeg sets `codec_type` in
+        place). A shared instance across `get_stream_details` calls
+        would let one consumer's mutation poison the next one's
+        snapshot — which #3969's passthrough specifically depends on
+        for the format-match comparison.
+        """
+        from music_assistant_models.enums import MediaType  # noqa: PLC0415
+
+        provider = _make_provider()
+        sd1 = await provider.get_stream_details("main", "queue1")
+        sd2 = await provider.get_stream_details("main", "queue1")
+
+        assert sd1.media_type == MediaType.AUDIO_SOURCE
+        assert sd1.audio_format == sd2.audio_format  # value-equal
+        assert sd1.audio_format is not sd2.audio_format  # not the same instance
 
 
 class TestAudioStreamPausedReturn:
