@@ -518,6 +518,10 @@ class TestYnisonStateHandling:
     async def test_duration_updated_from_stream_details(self) -> None:
         """Duration is updated from stream_details and pushed to Ynison."""
         provider = _make_provider()
+        # trigger_player_update needs the actual player id (bridge), not the
+        # queue id — bridge players (`spb_*`) wrap the bare ALSA UUID and the
+        # MA UI's state machine lives on the bridge.
+        provider._active_player_id = "spb_bridge1"
         provider._in_use_by_queue = "player1"
         mock_ynison = MagicMock()
         mock_ynison.update_playing_status = AsyncMock()
@@ -536,7 +540,7 @@ class TestYnisonStateHandling:
         assert meta.elapsed_time == 30  # 30000ms → 30s
         assert provider._actual_duration_ms == 185000
         provider.mass.players.trigger_player_update.assert_called_once_with(  # type: ignore[attr-defined]
-            "player1", force_update=True
+            "spb_bridge1", force_update=True
         )
         # Real duration pushed to Ynison
         mock_ynison.update_playing_status.assert_awaited_once_with(
@@ -1788,6 +1792,7 @@ class TestPausePlayback:
     async def test_does_not_set_stop_event(self) -> None:
         """Pause must keep the generator alive so it can yield silence."""
         provider = _make_provider()
+        provider._active_player_id = "spb_bridge1"
         provider._in_use_by_queue = "player1"
 
         await provider._pause_playback()
@@ -1797,25 +1802,34 @@ class TestPausePlayback:
     async def test_does_not_cmd_stop_the_player(self) -> None:
         """Pause must not hard-stop the player; the silence loop keeps it live."""
         provider = _make_provider()
+        provider._active_player_id = "spb_bridge1"
         provider._in_use_by_queue = "player1"
 
         await provider._pause_playback()
 
         provider.mass.players.cmd_stop.assert_not_called()
 
-    async def test_calls_cmd_pause_to_drive_player_state(self) -> None:
-        """Pause must signal cmd_pause so MA's player state machine flips."""
+    async def test_calls_cmd_pause_with_active_player_id_not_queue_id(self) -> None:
+        """cmd_pause must target the bridge player (`_active_player_id`),
+        not the bare queue UUID. The bridge owns the stream and MA's UI
+        consults its state machine.
+        """
         provider = _make_provider()
+        # Bridge wraps the bare ALSA player UUID; on_source_selected sets
+        # `_active_player_id` to the bridge and `_in_use_by_queue` to the
+        # queue's underlying bare UUID — they differ when a bridge exists.
+        provider._active_player_id = "spb_bridge1"
         provider._in_use_by_queue = "player1"
 
         await provider._pause_playback()
 
-        provider.mass.players.cmd_pause.assert_awaited_once_with("player1")
+        provider.mass.players.cmd_pause.assert_awaited_once_with("spb_bridge1")
         assert provider._paused_at_player is True
 
     async def test_preserves_in_use_by_queue(self) -> None:
         """The lock stays with the active session — release is the teardown's job."""
         provider = _make_provider()
+        provider._active_player_id = "spb_bridge1"
         provider._in_use_by_queue = "player1"
 
         await provider._pause_playback()
@@ -1826,6 +1840,7 @@ class TestPausePlayback:
         """Pause must not reset the streaming progress mirror."""
         provider = _make_provider()
         provider._streaming_progress_ms = 50_000
+        provider._active_player_id = "spb_bridge1"
         provider._in_use_by_queue = "player1"
 
         await provider._pause_playback()
@@ -1835,6 +1850,7 @@ class TestPausePlayback:
     async def test_no_active_player_is_a_noop(self) -> None:
         """Pause with no active player neither hard-stops nor errors."""
         provider = _make_provider()
+        provider._active_player_id = None
         provider._in_use_by_queue = None
 
         await provider._pause_playback()

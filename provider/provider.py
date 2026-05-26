@@ -1089,8 +1089,12 @@ class YandexYnisonProvider(PluginProvider):
                 )
         meta.elapsed_time = seek_ms // 1000 if seek_ms else 0
         meta.elapsed_time_last_updated = time.time()
-        if self._in_use_by_queue:
-            self.mass.players.trigger_player_update(self._in_use_by_queue, force_update=True)
+        # `trigger_player_update` expects a player_id; `_in_use_by_queue` is
+        # a queue identifier which only happens to coincide with player_id
+        # when there is no protocol bridge. Use `_active_player_id` — the
+        # real player wrapping our stream (bridge if any).
+        if self._active_player_id:
+            self.mass.players.trigger_player_update(self._active_player_id, force_update=True)
 
     async def _send_progress_to_ynison(
         self, progress_ms: int, duration_ms: int, paused: bool
@@ -1172,9 +1176,23 @@ class YandexYnisonProvider(PluginProvider):
           a full ``play_media → preload → ffmpeg restart`` cycle on resume
           (the original 2-3 s pause-resume cost we are eliminating).
         """
-        player_id = self._in_use_by_queue
+        # Use `_active_player_id` (the actual player consuming our stream),
+        # NOT `_in_use_by_queue`. The latter is a queue identifier set by
+        # `on_source_selected`; MA's player-queues and player controllers
+        # share an id convention IN PRINCIPLE, but bridge players (e.g.
+        # Local Audio Out → Sendspin protocol bridge, registered as
+        # `spb_*` wrapping the bare ALSA player UUID) break it. queue_id
+        # is the bare UUID, the bridge is the player that actually owns
+        # the stream. cmd_pause on the bare UUID gets routed to the bare
+        # device successfully (audio stops) but the bridge's state machine
+        # — which the MA UI consults — never flips to PAUSED, so the UI
+        # keeps saying "playing" with a ticking progress bar.
+        # `_active_player_id` is the bridge, set by `on_source_selected`
+        # from its `player_id` parameter, and matches what `cmd_play` uses
+        # in `_activate_playback` on the unpause edge.
+        player_id = self._active_player_id
         if not player_id:
-            self.logger.info("Pause requested but no active player (_in_use_by_queue is None)")
+            self.logger.info("Pause requested but no active player (_active_player_id is None)")
             return
         self.logger.info("Pause: cmd_pause(%s)", player_id)
         try:
