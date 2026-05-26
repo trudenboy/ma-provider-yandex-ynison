@@ -30,7 +30,7 @@ from music_assistant_models.streamdetails import StreamDetails, StreamMetadata
 from ya_passport_auth import SecretStr
 
 from music_assistant.helpers.ffmpeg import get_ffmpeg_stream
-from music_assistant.helpers.throttle_retry import ThrottlerManager
+from music_assistant.helpers.throttle_retry import BYPASS_THROTTLER, ThrottlerManager
 from music_assistant.models.plugin import PluginProvider
 
 from .auth import refresh_music_token
@@ -633,12 +633,25 @@ class YandexYnisonProvider(PluginProvider):
         ``get_audio_stream()`` session.  Falls back to the current
         ``_normalized_params`` when called outside a session.
         """
+        # Mark this fetch as in-flight to yandex_music: the user has
+        # explicitly tried to start (or just continue) a track via Ynison
+        # and we are inside the audio generator that owes them PCM. If a
+        # captcha cooldown is engaged on the "default" kind from some
+        # unrelated past 429, dropping the stream is strictly worse than
+        # risking another captcha trip — same trade-off yandex_music's own
+        # `BYPASS_THROTTLER` path makes for stream-URL refreshes mid-track.
+        # The prefetch path (`_prefetch_format_for_track`) is intentionally
+        # NOT bypassed: it has a 2.5 s timeout and skipping it on cooldown
+        # only costs a missed auto-rate hint, not the whole playback.
+        bypass_token = BYPASS_THROTTLER.set(True)
         try:
             stream_details = await self._get_stream_details_with_retry(track_id)
         except Exception:
             self.logger.exception("Failed to get stream details for track %s", track_id)
             self._stream_stop_event.set()
             return
+        finally:
+            BYPASS_THROTTLER.reset(bypass_token)
 
         # Re-capture the provider after the above await: _yandex_provider may
         # have flipped to None while we were fetching stream details.  Using
@@ -888,14 +901,22 @@ class YandexYnisonProvider(PluginProvider):
             return
 
         if is_our_device and not state.is_paused:
+            self.logger.info(
+                "Ynison → playing (track=%s progress=%dms)", track_id, state.progress_ms
+            )
             # Pre-fetch next batch when playing second-to-last track
             self._maybe_prefetch(current_index, playable_list, entity_id, entity_type)
             await self._activate_playback(state)
         elif is_our_device and state.is_paused:
-            # Our device but paused — stop player, keep association
+            self.logger.info(
+                "Ynison → paused (track=%s progress=%dms)", track_id, state.progress_ms
+            )
             await self._pause_playback()
         elif self._in_use_by_queue:
-            # Active device switched away — fully release player
+            self.logger.info(
+                "Ynison → other device active (was=%s), clearing",
+                state.active_device_id,
+            )
             self._clear_active_player()
 
     async def _activate_playback(self, state: YnisonState) -> None:  # noqa: PLR0915
@@ -914,10 +935,11 @@ class YandexYnisonProvider(PluginProvider):
         # does not strand us in a "paused at player but flag stuck" state.
         if self._paused_at_player:
             self._paused_at_player = False
+            self.logger.info("Unpause: cmd_play(%s)", target_player_id)
             try:
                 await self.mass.players.cmd_play(target_player_id)
             except Exception:
-                self.logger.debug(
+                self.logger.warning(
                     "cmd_play failed for %s during unpause", target_player_id, exc_info=True
                 )
 
@@ -1152,11 +1174,13 @@ class YandexYnisonProvider(PluginProvider):
         """
         player_id = self._in_use_by_queue
         if not player_id:
+            self.logger.info("Pause requested but no active player (_in_use_by_queue is None)")
             return
+        self.logger.info("Pause: cmd_pause(%s)", player_id)
         try:
             await self.mass.players.cmd_pause(player_id)
         except Exception:
-            self.logger.debug("cmd_pause failed for %s", player_id, exc_info=True)
+            self.logger.warning("cmd_pause failed for %s", player_id, exc_info=True)
         self._paused_at_player = True
 
     # ------------------------------------------------------------------
