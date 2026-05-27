@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.2.0] - 2026-05-27
+
+### Fixed
+
+- Ynison transport failures during user commands (play / pause / seek) now surface as a `PlayerCommandFailed` toast in the MA UI instead of silently accepting the command while the Yandex Music app keeps the old state. Previously, a half-closed WebSocket would log a warning, schedule a reconnect, and return success.
+- End-of-track signalling and queue-advance after a natural track end now log a clear warning when the underlying send is dropped (rather than silently disappearing, which left the YM app stalled on the just-finished track until the reconnect-broadcast caught up).
+
+### Changed
+
+- `YnisonClient._send`, `update_playing_status`, and `update_player_state` gained an opt-in `strict: bool = False` parameter. Default behaviour is preserved for heartbeat-style callers (`_sync_progress`, `_update_metadata_from_stream`, `_update_queue_list`). A new `YnisonSendError(ConnectionError)` is raised when `strict=True` and the underlying transport fails.
+- Reconnect-task scheduling is consolidated into a single `_schedule_reconnect()` helper. Only one reconnect task is in flight at any time, regardless of which code path observes the disconnect.
+
 ## [3.1.0] - 2026-05-27
 
 ### Changed

@@ -66,6 +66,7 @@ from .streaming import (
 from .ynison_client import (
     YnisonClient,
     YnisonDeviceInfo,
+    YnisonSendError,
     YnisonState,
     generate_device_id,
     make_version_block,
@@ -1093,7 +1094,12 @@ class YandexYnisonProvider(PluginProvider):
             self.mass.players.trigger_player_update(self._active_player_id, force_update=True)
 
     async def _send_progress_to_ynison(
-        self, progress_ms: int, duration_ms: int, paused: bool
+        self,
+        progress_ms: int,
+        duration_ms: int,
+        paused: bool,
+        *,
+        strict: bool = False,
     ) -> None:
         """Send progress to Ynison.
 
@@ -1103,17 +1109,27 @@ class YandexYnisonProvider(PluginProvider):
 
         Echo detection is done upstream via YnisonState.last_update_is_echo,
         which is set when Ynison rebroadcasts an update we authored.
+
+        :param progress_ms: Current playback position in milliseconds.
+        :param duration_ms: Current track duration in milliseconds.
+        :param paused: Whether playback is paused.
+        :param strict: When ``True``, propagate transport failures as
+            :class:`provider.ynison_client.YnisonSendError`. Used by user-command
+            and end-of-track callers. Heartbeat callers leave the default.
         """
         if duration_ms <= 0:
             # Ynison rejects progress > duration; skip until duration is known.
             return
         if not self._ynison or not self._ynison.connected:
+            if strict:
+                raise YnisonSendError("Ynison not connected")
             return
         progress_ms = min(progress_ms, duration_ms)
         await self._ynison.update_playing_status(
             progress_ms=progress_ms,
             duration_ms=duration_ms,
             paused=paused,
+            strict=strict,
         )
 
     def _bytes_to_ms(self, byte_count: int, fmt: AudioFormat | None = None) -> int:
@@ -1636,11 +1652,15 @@ class YandexYnisonProvider(PluginProvider):
         if not self._idempotent("on_play", None):
             return
         state = self._ynison.state
-        await self._send_progress_to_ynison(
-            progress_ms=state.progress_ms,
-            duration_ms=self._best_duration_ms(),
-            paused=False,
-        )
+        try:
+            await self._send_progress_to_ynison(
+                progress_ms=state.progress_ms,
+                duration_ms=self._best_duration_ms(),
+                paused=False,
+                strict=True,
+            )
+        except YnisonSendError as exc:
+            raise PlayerCommandFailed("Ynison send failed") from exc
 
     async def _on_pause(self) -> None:
         """Handle pause command — send pause to Ynison."""
@@ -1651,11 +1671,15 @@ class YandexYnisonProvider(PluginProvider):
         if not self._idempotent("on_pause", None):
             return
         state = self._ynison.state
-        await self._send_progress_to_ynison(
-            progress_ms=state.progress_ms,
-            duration_ms=self._best_duration_ms(),
-            paused=True,
-        )
+        try:
+            await self._send_progress_to_ynison(
+                progress_ms=state.progress_ms,
+                duration_ms=self._best_duration_ms(),
+                paused=True,
+                strict=True,
+            )
+        except YnisonSendError as exc:
+            raise PlayerCommandFailed("Ynison send failed") from exc
 
     # Entity types that use server-side "radio" queue replenishment.
     # Currently only RADIO (personal wave, genre stations).
@@ -1737,9 +1761,21 @@ class YandexYnisonProvider(PluginProvider):
 
         # 1. Report that playback reached the end.
         # Echo tracking is handled by _send_progress_to_ynison.
-        await self._send_progress_to_ynison(
-            progress_ms=duration, duration_ms=duration, paused=False
-        )
+        # `strict=True`: a dropped end-of-track signal stalls the YM app on
+        # the just-finished track. We log and continue — the reconnect is
+        # already scheduled and the queue-advance below sees the same WS state
+        # — but we don't reraise (this is end-of-stream, there's no command to
+        # fail back to the user).
+        try:
+            await self._send_progress_to_ynison(
+                progress_ms=duration, duration_ms=duration, paused=False, strict=True
+            )
+        except YnisonSendError:
+            self.logger.warning(
+                "Track-completion signal dropped (Ynison transport failure); "
+                "queue advance will retry once the WS reconnects",
+                exc_info=True,
+            )
 
         if next_index < len(playable_list):
             # 2a. Queue has room — advance immediately.
@@ -1899,7 +1935,17 @@ class YandexYnisonProvider(PluginProvider):
         new_state["status"]["duration_ms"] = "0"
         new_state["status"]["paused"] = False
         new_state["status"]["version"] = make_version_block(device_id)
-        await self._ynison.update_player_state(player_state=new_state)
+        # `strict=True`: a dropped queue-advance leaves `_wait_for_track_change`
+        # spinning for its full 30 s timeout. Log and return — the next
+        # reconnect-broadcast picks up our authored version block and resyncs.
+        try:
+            await self._ynison.update_player_state(player_state=new_state, strict=True)
+        except YnisonSendError:
+            self.logger.warning(
+                "Queue-advance dropped (Ynison transport failure); "
+                "stream will stall until reconnect-broadcast resyncs",
+                exc_info=True,
+            )
 
     async def _update_queue_list(self, expanded_list: list[dict[str, Any]]) -> None:
         """Push an expanded playable_list to Ynison without changing index or progress.
@@ -1949,11 +1995,17 @@ class YandexYnisonProvider(PluginProvider):
             raise PlayerCommandFailed("Ynison WebSocket disconnected")
         seek_ms = position * 1000
         state = self._ynison.state
-        await self._send_progress_to_ynison(
-            progress_ms=seek_ms,
-            duration_ms=self._best_duration_ms(),
-            paused=state.is_paused,
-        )
+        try:
+            await self._send_progress_to_ynison(
+                progress_ms=seek_ms,
+                duration_ms=self._best_duration_ms(),
+                paused=state.is_paused,
+                strict=True,
+            )
+        except YnisonSendError as exc:
+            # Do not mutate `_seek_position_ms` / `_seek_grace_until` on failure
+            # — local stream state must not drift past a send that never landed.
+            raise PlayerCommandFailed("Ynison send failed") from exc
         # Also trigger local stream restart so seek takes effect
         # immediately without waiting for the Ynison echo.
         self._seek_position_ms = seek_ms
