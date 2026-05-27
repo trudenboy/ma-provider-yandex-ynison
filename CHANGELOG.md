@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.0.2] - 2026-05-27
+
+### Documentation
+
+- Corrected the auto-detection sentence in `CLAUDE.local.md` to match the implemented behaviour: the no-hint lossless default is **24-bit/48kHz** (not 44.1 kHz). The 3.0.0 changelog already recorded this code change; the per-repo doc had not caught up. A new doc-pinning test now fails on future drift.
+
 ## [3.0.1] - 2026-05-26
 
 ## [3.0.0] - 2026-05-26
