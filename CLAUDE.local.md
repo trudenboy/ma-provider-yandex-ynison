@@ -88,7 +88,7 @@ Three reachable auth states:
 - **Own + x_token** — `ym_instance == __own__`, `x_token` set; reactive 401 refresh works.
 - **Own + token only** — `ym_instance == __own__`, `x_token` empty (manual paste, or QR with Remember session off); expiry needs re-paste/re-QR.
 
-Auto-detection (no hint): `superb`/`lossless` → 24-bit/44.1kHz, else → 16-bit/44.1kHz. With hint from real `stream_details.audio_format` (pre-fetched on `_activate_playback` before `select_source`), auto mode lifts to actual rate (e.g. 96 kHz for Hi-Res). Explicit `output_sample_rate` / `output_bit_depth` always win over the hint.
+Auto-detection (no hint): `superb`/`lossless` → 24-bit/48kHz, else → 16-bit/44.1kHz. With hint from real `stream_details.audio_format` (pre-fetched on `_activate_playback` before `select_source`), auto mode lifts to the actual source rate — so a 44.1 kHz CD-rate FLAC or a 96 kHz Hi-Res track is preserved instead of the 48 kHz no-hint base. Explicit `output_sample_rate` / `output_bit_depth` always win over the hint.
 
 ### Playback modes
 
