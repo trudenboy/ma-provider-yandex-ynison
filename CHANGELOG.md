@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.2.1] - 2026-05-27
+
+### Changed
+
+- Extracted the duplicated `if not _ynison / not _ynison.connected` guard at the top of `_on_play` / `_on_pause` / `_on_next` / `_on_previous` / `_on_seek` into a single `_require_connected_ynison()` helper. Existing exception messages and types (`UnsupportedFeaturedException`, `PlayerCommandFailed`) are preserved verbatim — no observable change for callers.
+- Renamed internal field `_paused` to `_externally_paused` to make its semantics explicit: it tracks the "Ynison paused us externally; expect a resume that needs `play_media` re-issuance" state, not the general playback flag (`state.is_paused` lives on the Ynison state object).
+- Corrected the `_classify_drift` docstring (`"drift below threshold_ms"` → `"drift at or below threshold_ms"`) to match the `<=` check in the implementation.
+
 ## [3.2.0] - 2026-05-27
 
 ### Fixed
