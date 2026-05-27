@@ -1290,7 +1290,7 @@ class TestMessageLoop:
 
         async def _aiter(_self: Any) -> Any:
             raise asyncio.CancelledError
-            yield  # type: ignore[unreachable]
+            yield
 
         mock_ws = MagicMock()
         mock_ws.__aiter__ = _aiter
