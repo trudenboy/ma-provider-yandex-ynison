@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import random
 import time
 from collections.abc import AsyncGenerator, Callable
 from contextlib import suppress
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from music_assistant_models.enums import (
@@ -104,11 +106,40 @@ _API_MAX_BACKOFF = 30.0
 # Cache TTL for stream details (seconds)
 _STREAM_DETAILS_CACHE_TTL = 300  # 5 minutes
 
+# In-memory music-token cache TTL (seconds). Yandex music tokens live ~60 min;
+# 50 min leaves 10 min headroom before the server would reject them. Tied to
+# the borrow-mode-with-only-x_token + 401-storm path described in spec 0004.
+_MUSIC_TOKEN_TTL_S = 50 * 60
+
+# Maximum number of distinct x_token entries kept in the music-token cache.
+# 4 covers borrow + own simultaneously with one rotation in flight.
+_MUSIC_TOKEN_CACHE_MAX = 4
+
 # Accepted non-auto values for output format overrides; mirrors the options
 # offered in CONF_OUTPUT_SAMPLE_RATE / CONF_OUTPUT_BIT_DEPTH config entries.
 # Used defensively to reject stale/tampered values without raising.
 _VALID_SAMPLE_RATES: frozenset[str] = frozenset({"44100", "48000", "96000"})
 _VALID_BIT_DEPTHS: frozenset[str] = frozenset({"16", "24"})
+
+
+@dataclass(frozen=True)
+class _CachedToken:
+    """Music token entry in the in-memory cache.
+
+    `expires_monotonic` is compared against the provider's `_now()` seam.
+    """
+
+    token: SecretStr
+    expires_monotonic: float
+
+
+def _hash_x_token(x_token: str) -> str:
+    """Return the SHA-256 hex digest of an x_token, used as cache key.
+
+    The raw x_token is never stored in dict keys (defence-in-depth against
+    accidental log / dump leakage of the cache structure).
+    """
+    return hashlib.sha256(x_token.encode("utf-8")).hexdigest()
 
 
 class YandexYnisonProvider(PluginProvider):
@@ -239,6 +270,14 @@ class YandexYnisonProvider(PluginProvider):
         # "We paused via cmd_stop, expect resume" — survives a stray
         # `_stream_stop_event` clear independent of the stop signal.
         self._paused: bool = False
+
+        # In-memory music-token cache keyed by SHA-256(x_token). 50-min TTL,
+        # 4-entry LRU. Coalesces concurrent refresh attempts via a single
+        # asyncio.Lock so a reconnect storm makes at most one Passport call.
+        # `_now` is a seam for tests to advance the clock.
+        self._token_cache: dict[str, _CachedToken] = {}
+        self._token_refresh_lock = asyncio.Lock()
+        self._now: Callable[[], float] = time.monotonic
 
     # ------------------------------------------------------------------
     # Provider lifecycle
@@ -708,15 +747,71 @@ class YandexYnisonProvider(PluginProvider):
         x_token = cast("str | None", ym_provider.config.get_value(YANDEX_MUSIC_CONF_X_TOKEN))
         return (token, x_token)
 
+    async def _refresh_via_x_token(self, x_token: str) -> SecretStr:
+        """Refresh the music token from an x_token, caching the result.
+
+        Within :data:`_MUSIC_TOKEN_TTL_S` of a successful refresh, subsequent
+        calls for the same x_token return the cached :class:`SecretStr`
+        without hitting Yandex Passport. Concurrent callers coalesce via
+        :attr:`_token_refresh_lock`.
+
+        :param x_token: Long-lived session token to exchange for a music
+            token. Hashed before use as a cache key; the raw value is
+            never stored in dict keys or logs.
+        :returns: Fresh or cached music-scoped :class:`SecretStr`.
+        :raises LoginFailed: When the underlying refresh fails (propagated
+            from :func:`provider.auth.refresh_music_token`).
+        """
+        cache_key = _hash_x_token(x_token)
+        cached = self._token_cache.get(cache_key)
+        now = self._now()
+        if cached is not None and cached.expires_monotonic > now:
+            return cached.token
+
+        async with self._token_refresh_lock:
+            # Double-check inside the lock — a peer caller may have refreshed
+            # while we were waiting for the lock, in which case we reuse
+            # their fresh entry instead of issuing a duplicate Passport call.
+            cached = self._token_cache.get(cache_key)
+            now = self._now()
+            if cached is not None and cached.expires_monotonic > now:
+                return cached.token
+
+            token = await refresh_music_token(SecretStr(x_token))
+            self._store_cached_token(cache_key, token)
+            return token
+
+    def _store_cached_token(self, cache_key: str, token: SecretStr) -> None:
+        """Insert a cache entry, enforcing the LRU bound.
+
+        Refreshing an existing key bumps its position to most-recent. When
+        a new key would push the cache over :data:`_MUSIC_TOKEN_CACHE_MAX`,
+        the oldest entry is evicted first.
+        """
+        # Reordering: pop-then-set positions the (possibly-new) key as
+        # most-recent in Python's insertion-ordered dict.
+        self._token_cache.pop(cache_key, None)
+        while len(self._token_cache) >= _MUSIC_TOKEN_CACHE_MAX:
+            oldest = next(iter(self._token_cache))
+            self._token_cache.pop(oldest)
+        self._token_cache[cache_key] = _CachedToken(
+            token=token,
+            expires_monotonic=self._now() + _MUSIC_TOKEN_TTL_S,
+        )
+
+    def _invalidate_cached_token(self, x_token: str) -> None:
+        """Drop the cache entry for an x_token (e.g. after a 401)."""
+        self._token_cache.pop(_hash_x_token(x_token), None)
+
     async def _resolve_token(self) -> SecretStr:
         """Resolve the Yandex Music OAuth token for the Ynison connection.
 
         In borrow mode: read from the linked yandex_music provider's config.
-        If only x_token is present (YM hasn't refreshed yet), do a one-shot
+        If only x_token is present (YM hasn't refreshed yet), do a cached
         in-memory refresh without writing back — YM owns token persistence.
 
         In own mode: return CONF_TOKEN if set; otherwise, when CONF_X_TOKEN
-        is present (QR-with-Remember-session path), refresh in-memory.
+        is present (QR-with-Remember-session path), cached in-memory refresh.
         """
         if self._ym_instance_id is not None:
             token, x_token = self._read_ym_tokens()
@@ -724,7 +819,7 @@ class YandexYnisonProvider(PluginProvider):
                 return SecretStr(token)
             if x_token:
                 self.logger.debug("YM token not yet refreshed — refreshing in-memory")
-                return await refresh_music_token(SecretStr(x_token))
+                return await self._refresh_via_x_token(x_token)
             raise LoginFailed(f"Yandex Music instance '{self._ym_instance_id}' has no credentials")
 
         token = cast("str | None", self.config.get_value(CONF_TOKEN))
@@ -733,7 +828,7 @@ class YandexYnisonProvider(PluginProvider):
         x_token = cast("str | None", self.config.get_value(CONF_X_TOKEN))
         if x_token:
             self.logger.debug("Own-mode token not present — refreshing from stored x_token")
-            return await refresh_music_token(SecretStr(x_token))
+            return await self._refresh_via_x_token(x_token)
         raise LoginFailed("No Yandex Music token configured")
 
     async def _refresh_ynison_token(self) -> SecretStr:
@@ -747,18 +842,24 @@ class YandexYnisonProvider(PluginProvider):
         In own mode: refresh from stored CONF_X_TOKEN when present (QR with
         "Remember session" enabled). When absent (manual token paste only),
         surface LoginFailed so the user knows to paste a new token.
+
+        The cached token entry for the current x_token is invalidated up
+        front — this method is reached only on a server-rejected token, so
+        the cached value is provably stale.
         """
         if self._ym_instance_id is not None:
             _, x_token = self._read_ym_tokens()
             if not x_token:
                 raise LoginFailed("Cannot refresh: linked Yandex Music instance has no x_token")
+            self._invalidate_cached_token(x_token)
             self.logger.info("Refreshing Yandex Music token for Ynison reconnect (borrow mode)")
-            return await refresh_music_token(SecretStr(x_token))
+            return await self._refresh_via_x_token(x_token)
 
         x_token = cast("str | None", self.config.get_value(CONF_X_TOKEN))
         if x_token:
+            self._invalidate_cached_token(x_token)
             self.logger.info("Refreshing Yandex Music token for Ynison reconnect (own mode)")
-            return await refresh_music_token(SecretStr(x_token))
+            return await self._refresh_via_x_token(x_token)
 
         raise LoginFailed(
             "Token expired and no stored x_token to refresh from. Re-authenticate "

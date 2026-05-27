@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.1.0] - 2026-05-27
+
+### Changed
+
+- The plugin now caches in-memory the music token refreshed from an x_token (borrow mode with x_token-only YM, or own mode after a QR login with "Remember session"). Within a 50-minute window, repeated plugin reloads and Ynison reconnects reuse the cached token instead of hitting Yandex Passport every time, which reduces the risk of tripping Passport rate limits during reconnect storms. A 401 from Ynison still bypasses and invalidates the cache so a rejected token is never re-served.
+
 ## [3.0.2] - 2026-05-27
 
 ### Documentation
