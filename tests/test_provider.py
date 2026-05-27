@@ -3019,3 +3019,167 @@ class TestBypassThrottlerScope:
                 pass
 
         assert BYPASS_THROTTLER.get() is False
+
+
+# ------------------------------------------------------------------
+# Music-token cache (spec 0004)
+# ------------------------------------------------------------------
+
+
+class TestMusicTokenCache:
+    """Tests for the in-memory cache around `refresh_music_token`."""
+
+    @staticmethod
+    def _own_provider_with_x_token(x_token: str = "xtok-1") -> YandexYnisonProvider:  # noqa: S107 — test fixture value
+        """Construct an own-mode provider whose x_token drives refresh."""
+        provider = _make_provider()
+        provider._ym_instance_id = None
+        provider.config = _make_mock_config(
+            {CONF_TOKEN: None, CONF_X_TOKEN: x_token, CONF_YM_INSTANCE: YM_INSTANCE_OWN}
+        )
+        return provider
+
+    async def test_resolve_token_caches_x_token_refresh(self) -> None:
+        """Second `_resolve_token` call within TTL is a cache hit."""
+        provider = self._own_provider_with_x_token("xtok-1")
+
+        with patch(
+            "provider.provider.refresh_music_token",
+            new_callable=AsyncMock,
+            return_value=SecretStr("music-tok"),
+        ) as mock_refresh:
+            t1 = await provider._resolve_token()
+            t2 = await provider._resolve_token()
+
+        assert t1.get_secret() == "music-tok"
+        assert t2.get_secret() == "music-tok"
+        assert mock_refresh.await_count == 1
+
+    async def test_resolve_token_refreshes_after_ttl_expires(self) -> None:
+        """Time advancing past the TTL forces a fresh refresh."""
+        provider = self._own_provider_with_x_token("xtok-1")
+
+        clock = {"now": 1000.0}
+        provider._now = lambda: clock["now"]
+
+        with patch(
+            "provider.provider.refresh_music_token",
+            new_callable=AsyncMock,
+            return_value=SecretStr("music-tok"),
+        ) as mock_refresh:
+            await provider._resolve_token()  # cold miss
+            clock["now"] += 60 * 60  # +60 min, past 50-min TTL
+            await provider._resolve_token()  # must refresh
+
+        assert mock_refresh.await_count == 2
+
+    async def test_refresh_ynison_token_invalidates_cache(self) -> None:
+        """A 401-driven refresh must bypass + drop the cached entry."""
+        provider = self._own_provider_with_x_token("xtok-1")
+
+        with patch(
+            "provider.provider.refresh_music_token",
+            new_callable=AsyncMock,
+            return_value=SecretStr("music-tok"),
+        ) as mock_refresh:
+            # Warm the cache.
+            await provider._resolve_token()
+            assert mock_refresh.await_count == 1
+
+            # A 401 reconnect triggers the refresh path. The previously
+            # cached token is provably stale and must be bypassed.
+            mock_refresh.return_value = SecretStr("music-tok-2")
+            result = await provider._refresh_ynison_token()
+
+        assert result.get_secret() == "music-tok-2"
+        assert mock_refresh.await_count == 2
+
+        # The follow-up resolve uses the new cached value, not a third refresh.
+        with patch(
+            "provider.provider.refresh_music_token",
+            new_callable=AsyncMock,
+        ) as mock_refresh_after:
+            after = await provider._resolve_token()
+            assert after.get_secret() == "music-tok-2"
+            mock_refresh_after.assert_not_called()
+
+    async def test_concurrent_resolve_token_calls_refresh_once(self) -> None:
+        """Two concurrent `_resolve_token` calls coalesce into one refresh."""
+        provider = self._own_provider_with_x_token("xtok-1")
+
+        refresh_started = asyncio.Event()
+        refresh_release = asyncio.Event()
+
+        async def slow_refresh(_x_token: SecretStr) -> SecretStr:
+            refresh_started.set()
+            await refresh_release.wait()
+            return SecretStr("music-tok")
+
+        with patch(
+            "provider.provider.refresh_music_token", side_effect=slow_refresh
+        ) as mock_refresh:
+            task_a = asyncio.create_task(provider._resolve_token())
+            task_b = asyncio.create_task(provider._resolve_token())
+            await refresh_started.wait()
+            refresh_release.set()
+            r_a, r_b = await asyncio.gather(task_a, task_b)
+
+        assert r_a.get_secret() == "music-tok"
+        assert r_b.get_secret() == "music-tok"
+        assert mock_refresh.await_count == 1
+
+    async def test_cache_lru_evicts_oldest_after_four_x_tokens(self) -> None:
+        """When a 5th distinct x_token arrives, the oldest entry is evicted."""
+        provider = self._own_provider_with_x_token("xtok-1")
+
+        async def fake_refresh(x_token: SecretStr) -> SecretStr:
+            return SecretStr(f"music-for-{x_token.get_secret()}")
+
+        with patch("provider.provider.refresh_music_token", side_effect=fake_refresh):
+            for i in range(1, 6):
+                provider.config = _make_mock_config(
+                    {
+                        CONF_TOKEN: None,
+                        CONF_X_TOKEN: f"xtok-{i}",
+                        CONF_YM_INSTANCE: YM_INSTANCE_OWN,
+                    }
+                )
+                await provider._resolve_token()
+
+        import hashlib  # noqa: PLC0415 — test-local
+
+        # 4-entry LRU after 5 distinct keys → oldest evicted, newest retained.
+        assert len(provider._token_cache) == 4
+        gone = hashlib.sha256(b"xtok-1").hexdigest()
+        still_here = hashlib.sha256(b"xtok-5").hexdigest()
+        assert gone not in provider._token_cache
+        assert still_here in provider._token_cache
+
+    async def test_cache_does_not_log_secrets_or_hashes(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """No log record may contain the x_token, the music token, or its hash."""
+        provider = self._own_provider_with_x_token("xtok-secret")
+
+        with (
+            caplog.at_level("DEBUG"),
+            patch(
+                "provider.provider.refresh_music_token",
+                new_callable=AsyncMock,
+                return_value=SecretStr("music-secret"),
+            ),
+        ):
+            await provider._resolve_token()
+            await provider._refresh_ynison_token()
+
+        import hashlib  # noqa: PLC0415 — test-local
+
+        forbidden = (
+            "xtok-secret",
+            "music-secret",
+            hashlib.sha256(b"xtok-secret").hexdigest(),
+        )
+        for record in caplog.records:
+            blob = record.getMessage()
+            for needle in forbidden:
+                assert needle not in blob, f"Credential leaked: {needle!r} in {blob!r}"
