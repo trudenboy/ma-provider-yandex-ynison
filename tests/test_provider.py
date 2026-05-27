@@ -15,7 +15,11 @@ from music_assistant_models.enums import (
     ProviderFeature,
     ProviderType,
 )
-from music_assistant_models.errors import LoginFailed, UnsupportedFeaturedException
+from music_assistant_models.errors import (
+    LoginFailed,
+    PlayerCommandFailed,
+    UnsupportedFeaturedException,
+)
 from music_assistant_models.media_items import AudioFormat, AudioSource
 from ya_passport_auth import SecretStr
 
@@ -45,7 +49,7 @@ from provider.streaming import (
     PCM_LOSSY_PARAMS,
     make_pcm_format,
 )
-from provider.ynison_client import YnisonState
+from provider.ynison_client import YnisonSendError, YnisonState
 
 
 def _arm_play_media_recorder(provider: YandexYnisonProvider) -> list[tuple[str, str]]:
@@ -560,9 +564,9 @@ class TestYnisonStateHandling:
         provider.mass.players.trigger_player_update.assert_called_once_with(  # type: ignore[attr-defined]
             "spb_bridge1", force_update=True
         )
-        # Real duration pushed to Ynison
+        # Real duration pushed to Ynison (heartbeat — no `strict`).
         mock_ynison.update_playing_status.assert_awaited_once_with(
-            progress_ms=30000, duration_ms=185000, paused=False
+            progress_ms=30000, duration_ms=185000, paused=False, strict=False
         )
 
     async def test_signal_track_completion_advances_index(self) -> None:
@@ -587,9 +591,9 @@ class TestYnisonStateHandling:
 
         await provider._signal_track_completion()
 
-        # 1. Reports progress=duration
+        # 1. Reports progress=duration (`strict=True` — end-of-track signal).
         mock_ynison.update_playing_status.assert_awaited_once_with(
-            progress_ms=200000, duration_ms=200000, paused=False
+            progress_ms=200000, duration_ms=200000, paused=False, strict=True
         )
         # 2. Advances current_playable_index by 1
         call_args = mock_ynison.update_player_state.call_args
@@ -647,7 +651,7 @@ class TestYnisonStateHandling:
         await provider._signal_track_completion()
 
         mock_ynison.update_playing_status.assert_awaited_once_with(
-            progress_ms=300000, duration_ms=300000, paused=False
+            progress_ms=300000, duration_ms=300000, paused=False, strict=True
         )
 
     async def test_signal_track_completion_radio_replenishes_queue(self) -> None:
@@ -1631,7 +1635,7 @@ class TestPlaybackControls:
         await provider._on_play()
 
         mock_yn.update_playing_status.assert_awaited_once_with(
-            progress_ms=5000, duration_ms=120000, paused=False
+            progress_ms=5000, duration_ms=120000, paused=False, strict=True
         )
 
     async def test_on_play_no_ynison_raises(self) -> None:
@@ -1653,7 +1657,7 @@ class TestPlaybackControls:
         await provider._on_pause()
 
         mock_yn.update_playing_status.assert_awaited_once_with(
-            progress_ms=5000, duration_ms=120000, paused=True
+            progress_ms=5000, duration_ms=120000, paused=True, strict=True
         )
 
     async def test_on_pause_no_ynison_raises(self) -> None:
@@ -1741,7 +1745,7 @@ class TestPlaybackControls:
         assert provider._seek_position_ms == 30000
         assert provider._track_changed_event.is_set()
         mock_yn.update_playing_status.assert_awaited_once_with(
-            progress_ms=30000, duration_ms=200000, paused=False
+            progress_ms=30000, duration_ms=200000, paused=False, strict=True
         )
 
     async def test_on_seek_no_ynison_raises(self) -> None:
@@ -1769,7 +1773,7 @@ class TestSendProgressToYnison:
         await provider._send_progress_to_ynison(150000, 100000, False)
 
         provider._ynison.update_playing_status.assert_awaited_once_with(
-            progress_ms=100000, duration_ms=100000, paused=False
+            progress_ms=100000, duration_ms=100000, paused=False, strict=False
         )
 
     async def test_zero_duration_no_send(self) -> None:
@@ -3183,3 +3187,140 @@ class TestMusicTokenCache:
             blob = record.getMessage()
             for needle in forbidden:
                 assert needle not in blob, f"Credential leaked: {needle!r} in {blob!r}"
+
+
+# ------------------------------------------------------------------
+# Strict-mode delivery signalling (spec 0003)
+# ------------------------------------------------------------------
+
+
+class TestStrictModeDeliverySignal:
+    """Tests for `_send`/`update_*` strict-mode propagation in `provider.py`."""
+
+    async def test_on_play_raises_player_command_failed_when_send_fails(self) -> None:
+        """`_on_play` translates `YnisonSendError` into `PlayerCommandFailed`."""
+        provider = _make_provider()
+        provider._actual_duration_ms = 120000
+        state = _make_ynison_state(progress_ms=5000, duration_ms=120000, paused=True)
+        mock_yn = _mock_ynison(state)
+        mock_yn.update_playing_status = AsyncMock(side_effect=YnisonSendError("ws down"))
+        provider._ynison = mock_yn
+
+        with pytest.raises(PlayerCommandFailed):
+            await provider._on_play()
+
+    async def test_on_pause_raises_player_command_failed_when_send_fails(self) -> None:
+        """`_on_pause` translates `YnisonSendError` into `PlayerCommandFailed`."""
+        provider = _make_provider()
+        provider._actual_duration_ms = 120000
+        state = _make_ynison_state(progress_ms=5000, duration_ms=120000, paused=False)
+        mock_yn = _mock_ynison(state)
+        mock_yn.update_playing_status = AsyncMock(side_effect=YnisonSendError("ws down"))
+        provider._ynison = mock_yn
+
+        with pytest.raises(PlayerCommandFailed):
+            await provider._on_pause()
+
+    async def test_on_seek_raises_player_command_failed_when_send_fails(self) -> None:
+        """`_on_seek` raises `PlayerCommandFailed` and leaves local seek state untouched."""
+        provider = _make_provider()
+        provider._actual_duration_ms = 200000
+        provider._seek_position_ms = 0
+        provider._track_changed_event.clear()
+        state = _make_ynison_state(progress_ms=5000, duration_ms=200000, paused=False)
+        mock_yn = _mock_ynison(state)
+        mock_yn.update_playing_status = AsyncMock(side_effect=YnisonSendError("ws down"))
+        provider._ynison = mock_yn
+
+        with pytest.raises(PlayerCommandFailed):
+            await provider._on_seek(30)  # 30 seconds
+
+        # Local seek state must NOT be advanced past a send that never landed.
+        assert provider._seek_position_ms == 0
+        assert not provider._track_changed_event.is_set()
+
+    async def test_signal_track_completion_logs_on_send_failure(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """`_signal_track_completion` swallows `YnisonSendError` and logs a warning."""
+        provider = _make_provider()
+        state = YnisonState(
+            active_device_id=provider._device_id,
+            player_state={
+                "status": {"paused": False, "progress_ms": 180000, "duration_ms": 200000},
+                "player_queue": {
+                    "current_playable_index": 0,
+                    "playable_list": [{"playable_id": "t1"}, {"playable_id": "t2"}],
+                    "entity_type": "PLAYLIST",
+                },
+            },
+        )
+        mock_ynison = MagicMock()
+        mock_ynison.state = state
+        mock_ynison.connected = True
+        mock_ynison.device_id = provider._device_id
+        mock_ynison.update_playing_status = AsyncMock(side_effect=YnisonSendError("ws down"))
+        mock_ynison.update_player_state = AsyncMock()
+        provider._ynison = mock_ynison
+
+        # Must not raise — end-of-track has no command to fail back to.
+        with caplog.at_level("WARNING"):
+            await provider._signal_track_completion()
+        assert any("Track-completion signal dropped" in r.message for r in caplog.records)
+
+    async def test_advance_queue_index_returns_on_send_failure(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """`_advance_queue_index` swallows `YnisonSendError` and logs a warning."""
+        provider = _make_provider()
+        state = _make_ynison_state(
+            current_playable_index=0,
+            playable_list=[{"playable_id": "t1"}, {"playable_id": "t2"}],
+        )
+        mock_yn = _mock_ynison(state)
+        mock_yn.update_player_state = AsyncMock(side_effect=YnisonSendError("ws down"))
+        provider._ynison = mock_yn
+
+        with caplog.at_level("WARNING"):
+            await provider._advance_queue_index(1)
+        assert any("Queue-advance dropped" in r.message for r in caplog.records)
+
+    async def test_sync_progress_uses_non_strict_send(self) -> None:
+        """`_sync_progress` heartbeat must call into the non-strict send path.
+
+        Regression guard: heartbeats stay fire-and-forget so a single bad
+        send tick does not crash the streaming generator. We verify the
+        forwarded `strict=False` kwarg rather than the bubble-up
+        behaviour (which is the contract of the underlying `_send`
+        already covered in `tests/test_ynison_client.py`).
+        """
+        provider = _make_provider()
+        provider._actual_duration_ms = 200000
+        provider._stream_metadata.duration = 200
+        state = _make_ynison_state(progress_ms=5000, duration_ms=200000, paused=False)
+        mock_yn = _mock_ynison(state)
+        provider._ynison = mock_yn
+
+        await provider._sync_progress(seek_ms=0, bytes_yielded=0, player_id=None)
+
+        mock_yn.update_playing_status.assert_awaited_once()
+        _args, kwargs = mock_yn.update_playing_status.call_args
+        assert kwargs.get("strict", False) is False
+
+    async def test_send_progress_strict_raises_when_not_connected(self) -> None:
+        """`_send_progress_to_ynison(strict=True)` raises when Ynison is disconnected."""
+        provider = _make_provider()
+        provider._ynison = _mock_ynison(connected=False)
+
+        with pytest.raises(YnisonSendError):
+            await provider._send_progress_to_ynison(
+                progress_ms=1000, duration_ms=2000, paused=False, strict=True
+            )
+
+    async def test_send_progress_non_strict_silent_when_not_connected(self) -> None:
+        """`_send_progress_to_ynison` default behaviour stays silent when disconnected."""
+        provider = _make_provider()
+        provider._ynison = _mock_ynison(connected=False)
+
+        # Must not raise
+        await provider._send_progress_to_ynison(progress_ms=1000, duration_ms=2000, paused=False)
