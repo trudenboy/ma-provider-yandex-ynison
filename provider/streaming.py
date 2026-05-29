@@ -1,6 +1,6 @@
 """PCM normalization helpers for Yandex Music audio streams.
 
-Contains format profiles, the AudioFormat factory, and pacing-args builder.
+Contains format profiles, the AudioFormat factory, and ffmpeg probe args.
 """
 
 from __future__ import annotations

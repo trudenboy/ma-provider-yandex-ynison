@@ -1484,14 +1484,16 @@ class YandexYnisonProvider(PluginProvider):
     def _snap_rate_to_player(self, rate: int) -> int:
         """Snap *rate* down to the nearest sample rate the target player accepts.
 
-        Mirrors MA's ``_select_audio_source_pcm_format`` so the declared PCM
-        format equals what the AudioSource passthrough fast path would pick —
-        keeping MA off its second resampling ffmpeg. Best-effort: returns
-        *rate* unchanged when no target player or supported-rate set can be
-        resolved, and never raises.
+        Best-effort: returns *rate* unchanged when no target player or
+        supported-rate set can be resolved, and never raises.
 
         :param rate: The sample rate the hint / floor logic chose.
+        :return: A rate the target player can play (``rate`` itself when it is
+            already supported or no player is resolvable).
         """
+        # Mirror MA's _select_audio_source_pcm_format so the declared format
+        # equals what the AudioSource passthrough picks — keeping MA off its
+        # second resampling ffmpeg.
         try:
             player_id = self._get_target_player_id()
             if not player_id:
@@ -1518,9 +1520,11 @@ class YandexYnisonProvider(PluginProvider):
         auto-detection from YM quality. The hint is fed by
         ``_prefetch_format_for_track`` when ``CONF_OUTPUT_SAMPLE_RATE`` is
         ``auto`` so the AudioSource ``provider_mapping.audio_format`` matches
-        the actual source rate of the upcoming track before MA's outer
-        ffmpeg captures it. Without a hint, falls back to YM-quality-based
-        detection (superb/lossless → 24bit/48kHz, else → 16bit/44.1kHz).
+        the actual source rate of the upcoming track. Without a hint, falls
+        back to YM-quality-based detection (superb/lossless → 24bit/44.1kHz,
+        else → 16bit/44.1kHz). The resulting auto/hint rate is then snapped
+        down to the nearest rate the target player supports; a valid explicit
+        override is delivered verbatim and never snapped.
 
         Creates fresh AudioFormat instances each time to prevent mutation by
         MA's FFMpeg._log_reader_task (which sets input_format.codec_type
