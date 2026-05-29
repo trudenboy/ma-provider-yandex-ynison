@@ -17,7 +17,9 @@ def test_claude_local_md_documents_lossless_profile_correctly() -> None:
     rather than silently rotting.
     """
     bit_depth = PCM_LOSSLESS_PARAMS["bit_depth"]
-    sample_rate_khz = PCM_LOSSLESS_PARAMS["sample_rate"] // 1000
+    # `:g` renders 44100 → "44.1" and 48000 → "48" (no trailing ".0"), so the
+    # pinned substring reads naturally regardless of the constant's value.
+    sample_rate_khz = f"{PCM_LOSSLESS_PARAMS['sample_rate'] / 1000:g}"
     expected = f"{bit_depth}-bit/{sample_rate_khz}kHz"
 
     text = (_REPO_ROOT / "CLAUDE.local.md").read_text(encoding="utf-8")

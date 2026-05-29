@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.3.0] - 2026-05-29
+
+### Changed
+
+- Lossless tracks now fall back to their native CD sample rate (44.1 kHz) when the per-track format probe does not return in time, instead of resampling to 48 kHz. With Music Assistant's realtime passthrough this audio is delivered to the player untouched, so CD-rate lossless is preserved end-to-end on the fallback path.
+- The output sample rate is now snapped to the nearest rate the target player actually supports, so a Hi-Res source playing on a player that tops out lower is converted once instead of twice — lower CPU and less local bandwidth, with no change to what you hear.
+- Playback over an unstable network connection is smoother: the per-track decode no longer throttles itself to realtime, letting a small read-ahead buffer absorb source hiccups while Music Assistant continues to pace delivery to the player.
+- Per-track playback logs now show the output sample rate and bit depth, making it easy to confirm whether a track is delivered untouched or resampled.
+
 ## [3.2.2] - 2026-05-27
 
 ## [3.2.1] - 2026-05-27

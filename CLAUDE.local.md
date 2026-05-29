@@ -88,7 +88,9 @@ Three reachable auth states:
 - **Own + x_token** — `ym_instance == __own__`, `x_token` set; reactive 401 refresh works.
 - **Own + token only** — `ym_instance == __own__`, `x_token` empty (manual paste, or QR with Remember session off); expiry needs re-paste/re-QR.
 
-Auto-detection (no hint): `superb`/`lossless` → 24-bit/48kHz, else → 16-bit/44.1kHz. With hint from real `stream_details.audio_format` (pre-fetched on `_activate_playback` before `select_source`), auto mode lifts to the actual source rate — so a 44.1 kHz CD-rate FLAC or a 96 kHz Hi-Res track is preserved instead of the 48 kHz no-hint base. Explicit `output_sample_rate` / `output_bit_depth` always win over the hint.
+Auto-detection (no hint): `superb`/`lossless` → 24-bit/44.1kHz, else → 16-bit/44.1kHz. With hint from real `stream_details.audio_format` (pre-fetched on `_activate_playback` before `select_source`), auto mode lifts to the actual source rate — so a 96 kHz Hi-Res track is preserved instead of the 44.1 kHz no-hint base. Explicit `output_sample_rate` / `output_bit_depth` always win over the hint.
+
+The auto/hint rate is then snapped down to the nearest rate the target player supports (`_snap_rate_to_player`, mirroring MA's `_select_audio_source_pcm_format`) so the declared PCM format matches what MA's AudioSource passthrough picks — avoiding a second resampling ffmpeg in MA. Precedence: explicit `output_sample_rate` > player-snap > hint > no-hint floor. The snap is best-effort: with no resolvable target player it is skipped. Bit depth is never snapped (24-bit padding of a 16-bit source is lossless; the reverse is not).
 
 ### Playback modes
 
