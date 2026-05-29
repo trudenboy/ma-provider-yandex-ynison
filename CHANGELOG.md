@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.3.1] - 2026-05-29
+
+### Fixed
+
+- When the plugin is locked to a single player and playback is routed through a bridged or grouped device, selecting the source no longer floods the log with audio errors or leaves the player stuck in a "play action in progress" state. The redirect that keeps playback on the configured player is now issued at most once per attempt instead of repeating several times a second.
+
 ## [3.3.0] - 2026-05-29
 
 ### Changed
