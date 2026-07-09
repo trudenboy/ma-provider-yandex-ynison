@@ -706,18 +706,6 @@ wheels = [
 ]
 
 [[package]]
-name = "hass-client"
-version = "1.2.3"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "aiohttp" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/7a/60/7da4ec1f6657ea3db6ac44c867be6a99d73ea63f68bb6931698cb4b70ee3/hass_client-1.2.3.tar.gz", hash = "sha256:b4bf8ef6757d64857ade829a3bda2bab8b797ffc5ee8fecdd0a6fd4f526736b0", size = 15607, upload-time = "2026-04-02T16:46:24.447Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/ad/79/6f199f824c151b1b04270e4b117658676e033f4cf1fece1ae481b07774b6/hass_client-1.2.3-py3-none-any.whl", hash = "sha256:cc9f55daced223370bcda7e8dc4c9aa923ded1d0ac96733c1e74cd072e1f4099", size = 15345, upload-time = "2026-04-02T16:46:23.532Z" },
-]
-
-[[package]]
 name = "httpcore"
 version = "1.0.9"
 source = { registry = "https://pypi.org/simple" }
@@ -903,7 +891,6 @@ wheels = [
 name = "ma-provider-yandex-ynison"
 source = { editable = "." }
 dependencies = [
-    { name = "music-assistant-models" },
     { name = "ya-passport-auth" },
 ]
 
@@ -911,9 +898,7 @@ dependencies = [
 test = [
     { name = "aiohttp" },
     { name = "codespell" },
-    { name = "hass-client" },
     { name = "music-assistant" },
-    { name = "music-assistant-models" },
     { name = "mypy" },
     { name = "pre-commit" },
     { name = "pre-commit-hooks" },
@@ -929,10 +914,7 @@ test = [
 requires-dist = [
     { name = "aiohttp", marker = "extra == 'test'", specifier = ">=3.9.0" },
     { name = "codespell", marker = "extra == 'test'", specifier = ">=2.4" },
-    { name = "hass-client", marker = "extra == 'test'", specifier = ">=1.2" },
     { name = "music-assistant", marker = "extra == 'test'", git = "https://github.com/music-assistant/server.git?rev=dev" },
-    { name = "music-assistant-models", specifier = ">=1.1.120" },
-    { name = "music-assistant-models", marker = "extra == 'test'", specifier = ">=1.1.120" },
     { name = "mypy", marker = "extra == 'test'", specifier = ">=1.19" },
     { name = "pre-commit", marker = "extra == 'test'", specifier = ">=4.5" },
     { name = "pre-commit-hooks", marker = "extra == 'test'", specifier = ">=6.0" },
@@ -940,7 +922,7 @@ requires-dist = [
     { name = "pytest-aiohttp", marker = "extra == 'test'", specifier = ">=1.1" },
     { name = "pytest-asyncio", marker = "extra == 'test'", specifier = ">=0.24" },
     { name = "pytest-cov", marker = "extra == 'test'", specifier = ">=7.0" },
-    { name = "ruff", marker = "extra == 'test'", specifier = ">=0.14" },
+    { name = "ruff", marker = "extra == 'test'", specifier = ">=0.14,<0.15" },
     { name = "syrupy", marker = "extra == 'test'", specifier = ">=5.0" },
     { name = "ya-passport-auth", specifier = ">=1.4.1" },
 ]
@@ -2130,15 +2112,15 @@ wheels = [
 
 [[package]]
 name = "ya-passport-auth"
-version = "1.4.1"
+version = "1.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
     { name = "yarl" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ea/b6/9f3cd1707b77ea0e85c9f8acc8b0b760243cd8986e618b5158b15fff9207/ya_passport_auth-1.4.1.tar.gz", hash = "sha256:4264feb59bf92ee9dac9b6af3db341b1dc47dbe5897741ec8b405d27156d5739", size = 58051, upload-time = "2026-05-26T09:21:13.935Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/fd/1a/22a1dab06db72a3688a1dba15fd514ccdf75903adec1c243f0ee7c3d5bd3/ya_passport_auth-1.5.0.tar.gz", hash = "sha256:551d64febfae04b97e64621e91e82fe09250d378b92e97b537949472bdcfe90c", size = 60310, upload-time = "2026-05-27T14:33:21.005Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/63/74/8c91d4f9040f2d9a6d0d8943dab4ff0a9dacf973f2640ad9b444e8db9a22/ya_passport_auth-1.4.1-py3-none-any.whl", hash = "sha256:a212489df44b7e32e8e2af36daf6c77f50fd6a25e2af3ea1f263f7195452f0f2", size = 39778, upload-time = "2026-05-26T09:21:12.502Z" },
+    { url = "https://files.pythonhosted.org/packages/e1/99/3ff3147917d6a93e4387c765566a9e5f0b8941d4f9526491c46442cf3eb7/ya_passport_auth-1.5.0-py3-none-any.whl", hash = "sha256:3aa60b658e061b1fb48b51daf2adf72025232855214fa4112e160342651debf6", size = 41689, upload-time = "2026-05-27T14:33:19.426Z" },
 ]
 
 [[package]]
