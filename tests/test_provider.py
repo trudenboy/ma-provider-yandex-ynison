@@ -18,13 +18,14 @@ from music_assistant_models.enums import (
 from music_assistant_models.errors import (
     LoginFailed,
     PlayerCommandFailed,
+    ResourceTemporarilyUnavailable,
     UnsupportedFeaturedException,
 )
 from music_assistant_models.media_items import AudioFormat, AudioSource
 from ya_passport_auth import SecretStr
+from ya_passport_auth.ma import BorrowedCredentialSource, list_yandex_music_instances
 
 from music_assistant.helpers.throttle_retry import BYPASS_THROTTLER
-from provider.config_helpers import list_yandex_music_instances
 from provider.constants import (
     CONF_ALLOW_PLAYER_SWITCH,
     CONF_DEVICE_ID,
@@ -1451,6 +1452,7 @@ class TestResolveTokenBorrowMode:
         """Returns the music token from the linked YM instance config."""
         provider = _make_provider()
         provider._ym_instance_id = "ym-inst"
+        provider._borrow_source = BorrowedCredentialSource(provider.mass, "ym-inst")
         ym = _make_ym_provider_stub(token="ym-music-token")
         _stub_attr(provider.mass, "get_provider", MagicMock(return_value=ym))
 
@@ -1462,11 +1464,12 @@ class TestResolveTokenBorrowMode:
         """Falls back to in-memory refresh via x_token; does not write config."""
         provider = _make_provider()
         provider._ym_instance_id = "ym-inst"
+        provider._borrow_source = BorrowedCredentialSource(provider.mass, "ym-inst")
         ym = _make_ym_provider_stub(token=None, x_token="ym-x-token")
         _stub_attr(provider.mass, "get_provider", MagicMock(return_value=ym))
 
         with patch(
-            "provider.provider.refresh_music_token",
+            "ya_passport_auth.ma.borrow.refresh_music_token",
             new_callable=AsyncMock,
             return_value=SecretStr("fresh-token"),
         ) as mock_refresh:
@@ -1479,6 +1482,7 @@ class TestResolveTokenBorrowMode:
         """Raises LoginFailed when YM instance config has neither token nor x_token."""
         provider = _make_provider()
         provider._ym_instance_id = "ym-inst"
+        provider._borrow_source = BorrowedCredentialSource(provider.mass, "ym-inst")
         ym = _make_ym_provider_stub(token=None, x_token=None)
         _stub_attr(provider.mass, "get_provider", MagicMock(return_value=ym))
 
@@ -1486,18 +1490,20 @@ class TestResolveTokenBorrowMode:
             await provider._resolve_token()
 
     async def test_raises_when_ym_instance_unavailable(self) -> None:
-        """Raises LoginFailed with a distinct 'not loaded' message when YM is missing."""
+        """A missing YM instance is a startup-ordering condition — transient error."""
         provider = _make_provider()
         provider._ym_instance_id = "ym-inst"
+        provider._borrow_source = BorrowedCredentialSource(provider.mass, "ym-inst")
         _stub_attr(provider.mass, "get_provider", MagicMock(return_value=None))
 
-        with pytest.raises(LoginFailed, match="not loaded"):
+        with pytest.raises(ResourceTemporarilyUnavailable, match="not loaded"):
             await provider._resolve_token()
 
     async def test_raises_when_linked_provider_is_not_yandex_music(self) -> None:
         """Stale/edited instance id pointing at a non-YM provider yields a clear error."""
         provider = _make_provider()
         provider._ym_instance_id = "some-other-id"
+        provider._borrow_source = BorrowedCredentialSource(provider.mass, "some-other-id")
         wrong = _make_ym_provider_stub()
         wrong.domain = "spotify"  # not yandex_music
         _stub_attr(provider.mass, "get_provider", MagicMock(return_value=wrong))
@@ -1548,6 +1554,7 @@ class TestRefreshYnisonToken:
         """Reads x_token from linked YM and refreshes in-memory only."""
         provider = _make_provider()
         provider._ym_instance_id = "ym-inst"
+        provider._borrow_source = BorrowedCredentialSource(provider.mass, "ym-inst")
         ym = _make_ym_provider_stub(token="stale", x_token="ym-x-token")
         _stub_attr(provider.mass, "get_provider", MagicMock(return_value=ym))
         # Ensure config writes are not invoked
@@ -1555,7 +1562,7 @@ class TestRefreshYnisonToken:
         _stub_attr(provider, "_update_config_value", mock_update_config)
 
         with patch(
-            "provider.provider.refresh_music_token",
+            "ya_passport_auth.ma.borrow.refresh_music_token",
             new_callable=AsyncMock,
             return_value=SecretStr("fresh-token"),
         ) as mock_refresh:
@@ -1569,6 +1576,7 @@ class TestRefreshYnisonToken:
         """Raises LoginFailed when YM has no x_token for refresh."""
         provider = _make_provider()
         provider._ym_instance_id = "ym-inst"
+        provider._borrow_source = BorrowedCredentialSource(provider.mass, "ym-inst")
         ym = _make_ym_provider_stub(token="only-token", x_token=None)
         _stub_attr(provider.mass, "get_provider", MagicMock(return_value=ym))
 
@@ -1576,12 +1584,13 @@ class TestRefreshYnisonToken:
             await provider._refresh_ynison_token()
 
     async def test_borrow_mode_raises_when_ym_not_loaded(self) -> None:
-        """Raises LoginFailed with a distinct 'not loaded' message on reactive refresh."""
+        """A missing YM instance is transient on reactive refresh too."""
         provider = _make_provider()
         provider._ym_instance_id = "ym-inst"
+        provider._borrow_source = BorrowedCredentialSource(provider.mass, "ym-inst")
         _stub_attr(provider.mass, "get_provider", MagicMock(return_value=None))
 
-        with pytest.raises(LoginFailed, match="not loaded"):
+        with pytest.raises(ResourceTemporarilyUnavailable, match="not loaded"):
             await provider._refresh_ynison_token()
 
 
