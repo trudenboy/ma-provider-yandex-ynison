@@ -140,9 +140,9 @@ async def get_config_entries(  # noqa: PLR0915 — flow naturally returns ~12 Co
 
     # Build dropdown options: one per YM instance + "Use own credentials" sentinel
     source_options = [
-        ConfigValueOption(f"Yandex Music: {name}", inst_id) for inst_id, name in ym_instances
+        ConfigValueOption(inst_id, f"Yandex Music: {name}") for inst_id, name in ym_instances
     ]
-    source_options.append(ConfigValueOption("Use own credentials (QR or token)", YM_INSTANCE_OWN))
+    source_options.append(ConfigValueOption(YM_INSTANCE_OWN, "Use own credentials (QR or token)"))
 
     # `selected` is normalized above, so it is always either a known instance
     # id (borrowing) or YM_INSTANCE_OWN — safe to use directly as the default.
@@ -244,9 +244,9 @@ async def get_config_entries(  # noqa: PLR0915 — flow naturally returns ~12 Co
             "Set to 'Auto' to automatically select a currently playing player.",
             default_value=PLAYER_ID_AUTO,
             options=[
-                ConfigValueOption("Auto (prefer playing player)", PLAYER_ID_AUTO),
+                ConfigValueOption(PLAYER_ID_AUTO, "Auto (prefer playing player)"),
                 *(
-                    ConfigValueOption(x.display_name, x.player_id)
+                    ConfigValueOption(x.player_id, x.display_name)
                     for x in sorted(
                         mass.players.all_players(False, False),
                         key=lambda p: p.display_name.lower(),
@@ -272,10 +272,10 @@ async def get_config_entries(  # noqa: PLR0915 — flow naturally returns ~12 Co
             "'Auto' selects 44.1 kHz for lossy or 48 kHz for lossless sources.",
             default_value=OUTPUT_AUTO,
             options=[
-                ConfigValueOption("Auto (from source quality)", OUTPUT_AUTO),
-                ConfigValueOption("44100 Hz (CD)", "44100"),
-                ConfigValueOption("48000 Hz", "48000"),
-                ConfigValueOption("96000 Hz (Hi-Res)", "96000"),
+                ConfigValueOption(OUTPUT_AUTO, "Auto (from source quality)"),
+                ConfigValueOption("44100", "44100 Hz (CD)"),
+                ConfigValueOption("48000", "48000 Hz"),
+                ConfigValueOption("96000", "96000 Hz (Hi-Res)"),
             ],
             advanced=True,
         ),
@@ -287,9 +287,9 @@ async def get_config_entries(  # noqa: PLR0915 — flow naturally returns ~12 Co
             "'Auto' selects 16-bit for lossy or 24-bit for lossless sources.",
             default_value=OUTPUT_AUTO,
             options=[
-                ConfigValueOption("Auto (from source quality)", OUTPUT_AUTO),
-                ConfigValueOption("16-bit", "16"),
-                ConfigValueOption("24-bit", "24"),
+                ConfigValueOption(OUTPUT_AUTO, "Auto (from source quality)"),
+                ConfigValueOption("16", "16-bit"),
+                ConfigValueOption("24", "24-bit"),
             ],
             advanced=True,
         ),

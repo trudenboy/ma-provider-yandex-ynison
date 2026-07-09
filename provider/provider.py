@@ -770,8 +770,11 @@ class YandexYnisonProvider(PluginProvider):
             token. Hashed before use as a cache key; the raw value is
             never stored in dict keys or logs.
         :returns: Fresh or cached music-scoped :class:`SecretStr`.
-        :raises LoginFailed: When the underlying refresh fails (propagated
-            from :func:`provider.auth.refresh_music_token`).
+        :raises LoginFailed: When Yandex explicitly rejects the x_token
+            (propagated from :func:`provider.auth.refresh_music_token`).
+        :raises ResourceTemporarilyUnavailable: On transient Passport
+            failures (network, rate limit) — retry later, credentials
+            are still good.
         """
         cache_key = _hash_x_token(x_token)
         cached = self._token_cache.get(cache_key)
