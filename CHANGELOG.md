@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.3.3] - 2026-07-09
+
+### Changed
+
+- Borrow mode (linked Yandex Music account) now runs on the shared `ya-passport-auth[ma]` credential source used across the Music Assistant yandex providers — same behavior, one implementation to receive fixes.
+
+### Fixed
+
+- A linked Yandex Music instance that has not loaded yet (start-up ordering) is now treated as a temporary condition instead of a login failure, so the plugin retries once the instance comes up.
+- After Yandex rejects the linked account's stored music token, the plugin no longer re-serves that same token — it is remembered as rejected and a fresh one is minted from the session token until Yandex Music rotates it.
+
 ## [3.3.2] - 2026-07-09
 
 ### Changed

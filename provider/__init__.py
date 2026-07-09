@@ -7,9 +7,9 @@ from typing import TYPE_CHECKING, cast
 from music_assistant_models.config_entries import ConfigEntry, ConfigValueOption
 from music_assistant_models.enums import ConfigEntryType, ProviderFeature
 from music_assistant_models.errors import LoginFailed
+from ya_passport_auth.ma import list_yandex_music_instances
 
 from .auth import perform_qr_auth
-from .config_helpers import list_yandex_music_instances
 from .constants import (
     CONF_ACCOUNT_LOGIN,
     CONF_ACTION_AUTH_QR,
