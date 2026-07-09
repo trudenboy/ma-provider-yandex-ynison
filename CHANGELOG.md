@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.3.2] - 2026-07-09
+
+### Changed
+
+- The QR login flow and music-token refresh now come from the shared `ya-passport-auth[ma]` layer used by all Music Assistant yandex providers — one implementation to receive fixes.
+
+### Fixed
+
+- Transient Yandex Passport failures (network, rate limiting) during a token refresh no longer read as a login failure — they surface as "temporarily unavailable" so the plugin retries later instead of asking for a new login.
+- Configuration dropdowns (Yandex Music source, target player, output format) stored display names instead of values after a Music Assistant models update, breaking selection persistence.
+
 ## [3.3.1] - 2026-05-29
 
 ### Fixed
