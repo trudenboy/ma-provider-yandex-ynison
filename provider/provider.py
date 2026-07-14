@@ -552,6 +552,88 @@ class YandexYnisonProvider(PluginProvider):
                 self._in_use_by_queue = None
             self._current_streaming_track_id = None
 
+    async def on_source_selected(
+        self,
+        source_id: str,
+        player_id: str,
+        queue_id: str,
+        stream_session_id: str,
+    ) -> None:
+        """Handle callback when this AudioSource has been selected/started on a player."""
+        if source_id != AUDIO_SOURCE_ID or not player_id:
+            return
+
+        # Check if manual player switching is allowed
+        if not self._allow_player_switch:
+            current_target = self._get_target_player_id()
+            if player_id != current_target and current_target:
+                # Redirect to the configured target, but only once per
+                # idempotency window. The target may be a sendspin bridge /
+                # sync-group whose stream is consumed under a player id that
+                # never equals `current_target`, so each redirect re-triggers
+                # selection here. Re-issuing `play_media` on every rejection
+                # turns that into an unbounded AudioError storm; the raise
+                # below still aborts every wrong-player stream regardless.
+                if self._idempotent("source_redirect", current_target):
+                    self.logger.debug(
+                        "Player switching disabled, redirecting selection from %s to %s",
+                        player_id,
+                        current_target,
+                    )
+                    await self.mass.player_queues.play_media(
+                        current_target, str(self._audio_source.uri)
+                    )
+                msg = f"Player switching is disabled; source must remain on {current_target}"
+                raise RuntimeError(msg)
+
+        # Stop previous player if switching. The lock claim a few lines below
+        # replaces the previous queue's claim; the previous stream loop notices
+        # the queue change and exits cleanly.
+        if self._active_player_id and self._active_player_id != player_id:
+            prev_player_id = self._active_player_id
+            self.logger.info(
+                "Source selected on %s, stopping %s",
+                player_id,
+                prev_player_id,
+            )
+            try:
+                await self.mass.players.cmd_stop(prev_player_id)
+            except Exception as err:
+                self.logger.debug(
+                    "Failed to stop previous player %s: %s",
+                    prev_player_id,
+                    err,
+                )
+
+        # Claim ownership for this queue. The lock lives here (not in
+        # get_stream_details) so preload paths can fetch streamdetails without
+        # accidentally blocking a subsequent cross-queue handoff at the actual
+        # stream request.
+        self._in_use_by_queue = queue_id
+        # Record this request's session id so a later on_source_unselected can
+        # tell whether it is the live teardown or a stale callback from a
+        # superseded same-queue request.
+        self._active_session_id = stream_session_id
+        self._active_player_id = player_id
+        self.logger.debug("Active player set to: %s", player_id)
+
+    async def on_source_unselected(
+        self, source_id: str, queue_id: str, stream_session_id: str
+    ) -> None:
+        """Release the queue-scoped exclusive claim when MA tears down the stream."""
+        if source_id != AUDIO_SOURCE_ID:
+            return
+        # Reject stale callbacks: only release if this is still the active
+        # session. A queue_id check alone is not sufficient — same-queue
+        # reconnects (player drops + reopens the same stream URL before the
+        # original request's finally fires) would otherwise let the old
+        # request's late callback clear the live claim of the new stream.
+        if self._active_session_id != stream_session_id:
+            return
+        self._active_session_id = None
+        if self._in_use_by_queue == queue_id:
+            self._in_use_by_queue = None
+
     async def _wait_for_track_change(self, old_track_id: str, timeout: float = 30.0) -> bool:
         """Wait for Ynison to report a different track, ignoring echoes.
 
@@ -838,15 +920,15 @@ class YandexYnisonProvider(PluginProvider):
         the cached value is provably stale.
         """
         if self._borrow_source is not None:
-            music_token, x_token = self._borrow_source.read_tokens()
-            if x_token is None:
+            ym_music_token, ym_x_token = self._borrow_source.read_tokens()
+            if ym_x_token is None:
                 raise LoginFailed("Cannot refresh: linked Yandex Music instance has no x_token")
             # Both the minted entry AND the owner's persisted token may be the
             # value the server just rejected — invalidate both so the source
             # can't re-serve either; it will mint fresh from x_token.
-            if music_token is not None:
-                self._borrow_source.invalidate(music_token)
-            self._borrow_source.invalidate(x_token)
+            if ym_music_token is not None:
+                self._borrow_source.invalidate(ym_music_token)
+            self._borrow_source.invalidate(ym_x_token)
             self.logger.info("Refreshing Yandex Music token for Ynison reconnect (borrow mode)")
             return await self._borrow_source.resolve_music_token()
 
@@ -1231,88 +1313,6 @@ class YandexYnisonProvider(PluginProvider):
             self._default_player_id,
         )
         return None
-
-    async def on_source_selected(
-        self,
-        source_id: str,
-        player_id: str,
-        queue_id: str,
-        stream_session_id: str,
-    ) -> None:
-        """Handle callback when this AudioSource has been selected/started on a player."""
-        if source_id != AUDIO_SOURCE_ID or not player_id:
-            return
-
-        # Check if manual player switching is allowed
-        if not self._allow_player_switch:
-            current_target = self._get_target_player_id()
-            if player_id != current_target and current_target:
-                # Redirect to the configured target, but only once per
-                # idempotency window. The target may be a sendspin bridge /
-                # sync-group whose stream is consumed under a player id that
-                # never equals `current_target`, so each redirect re-triggers
-                # selection here. Re-issuing `play_media` on every rejection
-                # turns that into an unbounded AudioError storm; the raise
-                # below still aborts every wrong-player stream regardless.
-                if self._idempotent("source_redirect", current_target):
-                    self.logger.debug(
-                        "Player switching disabled, redirecting selection from %s to %s",
-                        player_id,
-                        current_target,
-                    )
-                    await self.mass.player_queues.play_media(
-                        current_target, str(self._audio_source.uri)
-                    )
-                msg = f"Player switching is disabled; source must remain on {current_target}"
-                raise RuntimeError(msg)
-
-        # Stop previous player if switching. The lock claim a few lines below
-        # replaces the previous queue's claim; the previous stream loop notices
-        # the queue change and exits cleanly.
-        if self._active_player_id and self._active_player_id != player_id:
-            prev_player_id = self._active_player_id
-            self.logger.info(
-                "Source selected on %s, stopping %s",
-                player_id,
-                prev_player_id,
-            )
-            try:
-                await self.mass.players.cmd_stop(prev_player_id)
-            except Exception as err:
-                self.logger.debug(
-                    "Failed to stop previous player %s: %s",
-                    prev_player_id,
-                    err,
-                )
-
-        # Claim ownership for this queue. The lock lives here (not in
-        # get_stream_details) so preload paths can fetch streamdetails without
-        # accidentally blocking a subsequent cross-queue handoff at the actual
-        # stream request.
-        self._in_use_by_queue = queue_id
-        # Record this request's session id so a later on_source_unselected can
-        # tell whether it is the live teardown or a stale callback from a
-        # superseded same-queue request.
-        self._active_session_id = stream_session_id
-        self._active_player_id = player_id
-        self.logger.debug("Active player set to: %s", player_id)
-
-    async def on_source_unselected(
-        self, source_id: str, queue_id: str, stream_session_id: str
-    ) -> None:
-        """Release the queue-scoped exclusive claim when MA tears down the stream."""
-        if source_id != AUDIO_SOURCE_ID:
-            return
-        # Reject stale callbacks: only release if this is still the active
-        # session. A queue_id check alone is not sufficient — same-queue
-        # reconnects (player drops + reopens the same stream URL before the
-        # original request's finally fires) would otherwise let the old
-        # request's late callback clear the live claim of the new stream.
-        if self._active_session_id != stream_session_id:
-            return
-        self._active_session_id = None
-        if self._in_use_by_queue == queue_id:
-            self._in_use_by_queue = None
 
     def _session_lost(self, player_id: str, session_id: str | None) -> bool:
         """Return ``True`` when our claim no longer matches the live session.
