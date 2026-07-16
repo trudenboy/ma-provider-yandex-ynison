@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from music_assistant_models.enums import ContentType
 from music_assistant_models.media_items import AudioFormat
-
 from provider.streaming import (
     PCM_LOSSLESS_PARAMS,
     PCM_LOSSY_PARAMS,

@@ -8,7 +8,6 @@ from unittest.mock import MagicMock
 
 import pytest
 from music_assistant_models.errors import LoginFailed
-
 from provider import get_config_entries
 from provider.constants import (
     CONF_ACCOUNT_LOGIN,

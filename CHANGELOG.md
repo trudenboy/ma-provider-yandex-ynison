@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.4.2] - 2026-07-16
+
+- feat: reverse-port the unported upstream edits flagged by the P0 sync guard: provider-local `config_helpers.list_yandex_music_instances` (replacing the `ya_passport_auth.ma` import), keyword `title=` for dynamic `ConfigValueOption`s, common-string references and the `manifest` section in `strings.json`, and the stable-stage manifest promotion.
+
 ## [3.4.1] - 2026-07-16
 
 - refactor(config): move every `ConfigEntry` label/description/action_label and all static `ConfigValueOption` titles into `provider/strings.json` (upstream `check_config_entries` compliance); `ConfigValueOption` calls are now value-only.

@@ -22,10 +22,6 @@ from music_assistant_models.errors import (
     UnsupportedFeaturedException,
 )
 from music_assistant_models.media_items import AudioFormat, AudioSource
-from ya_passport_auth import SecretStr
-from ya_passport_auth.ma import BorrowedCredentialSource, list_yandex_music_instances
-
-from music_assistant.helpers.throttle_retry import BYPASS_THROTTLER
 from provider.constants import (
     CONF_ALLOW_PLAYER_SWITCH,
     CONF_DEVICE_ID,
@@ -51,6 +47,10 @@ from provider.streaming import (
     make_pcm_format,
 )
 from provider.ynison_client import YnisonSendError, YnisonState
+from ya_passport_auth import SecretStr
+from ya_passport_auth.ma import BorrowedCredentialSource, list_yandex_music_instances
+
+from music_assistant.helpers.throttle_retry import BYPASS_THROTTLER
 
 
 def _arm_play_media_recorder(provider: YandexYnisonProvider) -> list[tuple[str, str]]:
@@ -937,10 +937,10 @@ class TestYnisonStateHandling:
             )
             provider._track_changed_event.set()
 
-        echo_task = asyncio.create_task(simulate_echo_then_change())
+        task = asyncio.create_task(simulate_echo_then_change())
         result = await provider._wait_for_track_change("old_track", timeout=5.0)
         assert result is True
-        await echo_task
+        await task
 
     async def test_wait_for_track_change_returns_immediately_if_already_advanced(
         self,

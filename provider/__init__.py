@@ -7,9 +7,9 @@ from typing import TYPE_CHECKING, cast
 from music_assistant_models.config_entries import ConfigEntry, ConfigValueOption
 from music_assistant_models.enums import ConfigEntryType, ProviderFeature
 from music_assistant_models.errors import LoginFailed
-from ya_passport_auth.ma import list_yandex_music_instances
 
 from .auth import perform_qr_auth
+from .config_helpers import list_yandex_music_instances
 from .constants import (
     CONF_ACCOUNT_LOGIN,
     CONF_ACTION_AUTH_QR,
@@ -140,7 +140,7 @@ async def get_config_entries(  # noqa: PLR0915 — flow naturally returns ~12 Co
 
     # Build dropdown options: one per YM instance + "Use own credentials" sentinel
     source_options = [
-        ConfigValueOption(inst_id, f"Yandex Music: {name}") for inst_id, name in ym_instances
+        ConfigValueOption(inst_id, title=f"Yandex Music: {name}") for inst_id, name in ym_instances
     ]
     source_options.append(ConfigValueOption(YM_INSTANCE_OWN))
 
@@ -218,7 +218,7 @@ async def get_config_entries(  # noqa: PLR0915 — flow naturally returns ~12 Co
             options=[
                 ConfigValueOption(PLAYER_ID_AUTO),
                 *(
-                    ConfigValueOption(x.player_id, x.display_name)
+                    ConfigValueOption(x.player_id, title=x.display_name)
                     for x in sorted(
                         mass.players.all_players(False, False),
                         key=lambda p: p.display_name.lower(),

@@ -12,8 +12,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import aiohttp
 import pytest
 from music_assistant_models.errors import LoginFailed
-from ya_passport_auth import SecretStr
-
 from provider.constants import (
     DEFAULT_APP_NAME,
     DEVICE_TYPE_WEB,
@@ -27,6 +25,7 @@ from provider.ynison_client import (
     generate_device_id,
     make_version_block,
 )
+from ya_passport_auth import SecretStr
 
 
 @pytest.fixture
