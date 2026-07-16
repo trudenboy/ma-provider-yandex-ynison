@@ -10,7 +10,8 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def test_claude_local_md_documents_lossless_profile_correctly() -> None:
-    """`CLAUDE.local.md` auto-detection sentence must match the code constants.
+    """
+    `CLAUDE.local.md` auto-detection sentence must match the code constants.
 
     Derives the expected substring from `PCM_LOSSLESS_PARAMS` so a future
     constant change either flows through to the doc or fails this test
