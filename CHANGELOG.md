@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+- refactor(config): move every `ConfigEntry` label/description/action_label and all static `ConfigValueOption` titles into `provider/strings.json` (upstream `check_config_entries` compliance); `ConfigValueOption` calls are now value-only.
+- fix(lint): annotate `_RADIO_ENTITY_TYPES` as `ClassVar` (RUF012) and await the echo-simulation task in `test_provider.py` (RUF006), per the upstream dev ruff rules.
+- style: ruff 0.15 safe autofixes matching the upstream dev lint rules.
+
 ## [3.3.3] - 2026-07-09
 
 ### Changed
