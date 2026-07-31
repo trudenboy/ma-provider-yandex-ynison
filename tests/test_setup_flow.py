@@ -71,7 +71,7 @@ async def test_single_yandex_music_instance_is_preselected_and_persisted() -> No
         },
     )
 
-    await run_setup(session)  # type: ignore[arg-type]
+    await run_setup(session)
 
     source = _entry(session, CONF_YM_INSTANCE)
     assert source.default_value == "ym-main"
@@ -100,7 +100,7 @@ async def test_multiple_accounts_without_valid_prefill_require_explicit_selectio
         setup_data={CONF_YM_INSTANCE: "__own__"},
     )
 
-    await run_setup(session)  # type: ignore[arg-type]
+    await run_setup(session)
 
     source = _entry(session, CONF_YM_INSTANCE)
     assert source.default_value is None
@@ -135,7 +135,7 @@ async def test_reconfigure_preserves_valid_identity_and_nulls_legacy_secrets() -
     player.display_name = "Living room"
     session.mass.players.all_players.return_value = [player]
 
-    await run_setup(session)  # type: ignore[arg-type]
+    await run_setup(session)
 
     assert _entry(session, CONF_YM_INSTANCE).value == "ym-main"
     assert _entry(session, CONF_MASS_PLAYER_ID).value == "living-room"
@@ -156,7 +156,7 @@ async def test_new_setup_does_not_persist_legacy_auth_keys() -> None:
         },
     )
 
-    await run_setup(session)  # type: ignore[arg-type]
+    await run_setup(session)
 
     assert session.finished is not None
     assert not {"token", "x_token", "account_login", "remember_session"} & session.finished.keys()
@@ -174,7 +174,7 @@ async def test_no_yandex_music_instance_aborts_as_missing_dependency() -> None:
     )
 
     with pytest.raises(AbortFlow) as err:
-        await run_setup(session)  # type: ignore[arg-type]
+        await run_setup(session)
 
     assert err.value.reason == "missing_dependency"
 
@@ -201,7 +201,7 @@ async def test_disabled_yandex_music_instances_are_not_linkable() -> None:
         },
     )
 
-    await run_setup(session)  # type: ignore[arg-type]
+    await run_setup(session)
 
     source = _entry(session, CONF_YM_INSTANCE)
     assert [option.value for option in source.options] == ["ym-enabled"]
@@ -216,7 +216,7 @@ async def test_only_disabled_yandex_music_instances_abort_setup() -> None:
     )
 
     with pytest.raises(AbortFlow) as err:
-        await run_setup(session)  # type: ignore[arg-type]
+        await run_setup(session)
 
     assert err.value.reason == "missing_dependency"
 
@@ -242,7 +242,7 @@ async def test_finish_error_reopens_form_with_preserved_values() -> None:
         },
     )
 
-    await run_setup(session)  # type: ignore[arg-type]
+    await run_setup(session)
 
     assert session.attempts == 2
     assert session.shown_errors == [None, {"base": "invalid_auth"}]
@@ -266,7 +266,7 @@ async def test_legacy_player_and_display_name_are_preserved() -> None:
     player.display_name = "Kitchen"
     session.mass.players.all_players.return_value = [player]
 
-    await run_setup(session)  # type: ignore[arg-type]
+    await run_setup(session)
 
     assert _entry(session, CONF_MASS_PLAYER_ID).value == "kitchen"
     assert _entry(session, CONF_PUBLISH_NAME).value == "Old kitchen"
