@@ -96,13 +96,15 @@ nearing the end of the queue, then pushing the expanded list to Ynison via
 
 | File | Purpose |
 |------|---------|
-| `provider/__init__.py` | Setup function, config entries, `SUPPORTED_FEATURES` |
+| `provider/__init__.py` | Setup function and `SUPPORTED_FEATURES` |
 | `provider/provider.py` | `YandexYnisonProvider(PluginProvider)` — main plugin class |
+| `provider/setup_flow.py` | Native setup/reconfigure flow for account and device identity |
+| `provider/credential_source.py` | Read-only access to linked Yandex Music setup credentials |
 | `provider/ynison_client.py` | `YnisonClient` — WebSocket client for Ynison protocol |
 | `provider/streaming.py` | PCM normalization profiles, ffmpeg pacing args |
 | `provider/protocols.py` | `YandexMusicProviderLike` — structural Protocol for yandex_music dependency |
-| `provider/yandex_auth.py` | QR authentication and token refresh via `ya-passport-auth` |
-| `provider/config_helpers.py` | Sibling instance token discovery |
+| `provider/auth.py` | Temporary music-token refresh via `ya-passport-auth` |
+| `provider/config_helpers.py` | Configured Yandex Music instance discovery |
 | `provider/constants.py` | URLs, config keys, defaults, timeouts |
 | `provider/manifest.json` | Plugin metadata (`multi_instance: true`, `depends_on: yandex_music`) |
 
@@ -110,36 +112,21 @@ nearing the end of the queue, then pushing the expanded list to Ynison via
 
 ### Authentication
 
-The plugin supports two top-level auth modes, picked via the **Yandex Music
-source** dropdown:
-
-* **Borrow** (default when a `yandex_music` MusicProvider exists) — read
-  OAuth credentials from a linked `yandex_music` instance. Token storage and
-  scheduled refresh stay with that provider; this plugin only does
-  in-memory refresh on 401.
-* **Own credentials** — populate this instance's own credentials. Two ways
-  to fill them:
-  * **Login with QR code** — opens a QR popup; scan with the Yandex app and
-    the music token + session token are stored automatically.
-  * **Manual paste** — enter a Yandex Music OAuth token by hand (escape
-    hatch for headless setups).
-
-Use *Own credentials* with QR to bind separate MA players to separate
-Yandex accounts (one plugin instance per player) without spinning up
-multiple `yandex_music` providers.
+Every Ynison instance links to one configured `yandex_music` provider.
+Yandex Music is the only persistent owner of OAuth credentials; Ynison reads
+its current `token` and `x_token` from encrypted setup data. When only an
+`x_token` is available, Ynison may mint a temporary in-memory music token at
+startup; it also refreshes that token after an authentication rejection. To use
+another Yandex account, configure another Yandex Music provider instance and
+link Ynison to it.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| **Yandex Music source** | Dropdown | Borrow from a configured `yandex_music` instance, or use this instance's own credentials |
-| **Login with QR code** | Action | Own mode only. Opens a QR popup; scan with the Yandex app to populate the token automatically |
-| **Remember session** | Boolean (default: `true`) | Own mode only. When enabled, stores a long-lived `x_token` so the plugin can refresh the music token on 401. Disable to keep only the short-lived music token (re-QR on expiry) |
-| **Reset authentication** | Action | Own mode only. Clears the music token, session token, and stored login |
-| **Yandex Music Token** | Secure string | Own mode only. Auto-populated by QR; can also be filled manually |
+| **Yandex Music account** | Dropdown | Required configured `yandex_music` provider instance whose account Ynison uses |
 
-Tokens are `SecretStr` throughout the codebase; `get_secret()` is only
-called at two sites: `perform_qr_auth` (extracting plain strings from the
-Passport response for MA config storage) and `YnisonClient._build_headers`
-(building the `Authorization: OAuth …` header for the WebSocket handshake).
+Ynison never persists or rotates linked credentials. Secret values are unwrapped
+only within the local authentication path, including the bounded in-memory
+refresh cache and Ynison authorization header construction.
 
 ### Playback
 

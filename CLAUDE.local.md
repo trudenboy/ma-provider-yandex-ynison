@@ -55,13 +55,15 @@ PluginSource → MA Player (Chromecast / DLNA / AirPlay / etc.)
 
 | File | Purpose |
 |------|---------|
-| `provider/__init__.py` | Setup function, config entries, `SUPPORTED_FEATURES` |
+| `provider/__init__.py` | Setup function and `SUPPORTED_FEATURES` |
 | `provider/provider.py` | `YandexYnisonProvider(PluginProvider)` — main plugin class |
+| `provider/setup_flow.py` | Setup/reconfigure flow for linked account and device identity |
+| `provider/credential_source.py` | Read-only adapter over Yandex Music setup credentials |
 | `provider/ynison_client.py` | `YnisonClient` — WebSocket client for Ynison protocol |
 | `provider/streaming.py` | PCM normalization profiles, ffmpeg pacing args |
 | `provider/protocols.py` | `YandexMusicProviderLike` — structural Protocol for yandex_music |
-| `provider/yandex_auth.py` | QR auth + token refresh via `ya-passport-auth` library |
-| `provider/config_helpers.py` | Sibling instance token discovery |
+| `provider/auth.py` | Music-token refresh via `ya-passport-auth` library |
+| `provider/config_helpers.py` | Configured Yandex Music instance discovery |
 | `provider/constants.py` | URLs, config keys, defaults, timeouts |
 | `provider/manifest.json` | Plugin metadata |
 
@@ -69,11 +71,7 @@ PluginSource → MA Player (Chromecast / DLNA / AirPlay / etc.)
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `ym_instance` | String (dropdown) | auto | Source of OAuth credentials: a `yandex_music` instance id (borrow), or `__own__` (per-instance own credentials via QR or manual paste) |
-| `token` | SecureString | — | Yandex Music OAuth token (own mode; populated by QR or manual entry) |
-| `x_token` | SecureString | — | Long-lived session token for own-mode reactive 401 refresh (hidden) |
-| `account_login` | String | — | Display login from QR (own mode); shown in the status label (hidden) |
-| `remember_session` | Boolean | `true` | Own mode: store `x_token` after QR for auto-refresh |
+| `ym_instance` | String (dropdown) | required | Linked `yandex_music` instance id; collected by setup/reconfigure |
 | `mass_player_id` | String | `__auto__` | Target MA player ID or auto-select |
 | `allow_player_switch` | Boolean | `true` | Allow selecting plugin source on any player |
 | `output_sample_rate` | String | `auto` | PCM sample rate: `auto` / `44100` / `48000` / `96000`. Auto adapts to first track via `_prefetch_format_for_track` (lossless 44.1 / 96 kHz preserved). |
@@ -83,10 +81,11 @@ PluginSource → MA Player (Chromecast / DLNA / AirPlay / etc.)
 | `publish_name` | String | `Music Assistant` | Device name in Yandex Music app |
 | `device_id` | String | auto-generated | 16-char hex, persisted per instance (hidden) |
 
-Three reachable auth states:
-- **Borrow** — `ym_instance` points at a `yandex_music` instance; tokens read live from there.
-- **Own + x_token** — `ym_instance == __own__`, `x_token` set; reactive 401 refresh works.
-- **Own + token only** — `ym_instance == __own__`, `x_token` empty (manual paste, or QR with Remember session off); expiry needs re-paste/re-QR.
+Authentication is linked-only: `ym_instance` points at one `yandex_music`
+instance and credentials are read through that provider's `get_setup_value`.
+Ynison never persists tokens. A music token is used directly; an x-token can
+mint a temporary cached token. Missing or legacy `__own__` selections require
+reconfigure.
 
 Auto-detection (no hint): `superb`/`lossless` → 24-bit/44.1kHz, else → 16-bit/44.1kHz. With hint from real `stream_details.audio_format` (pre-fetched on `_activate_playback` before `select_source`), auto mode lifts to the actual source rate — so a 96 kHz Hi-Res track is preserved instead of the 44.1 kHz no-hint base. Explicit `output_sample_rate` / `output_bit_depth` always win over the hint.
 
@@ -99,7 +98,7 @@ The auto/hint rate is then snapped down to the nearest rate the target player su
 
 #### Handoff invariants and safety nets
 
-- **URI uses linked instance_id**, not bare `yandex_music://` — picks the correct yandex_music account when both borrow and own coexist (`_build_handoff_uri`).
+- **URI uses linked instance_id**, not bare `yandex_music://` — picks the configured Yandex Music account (`_build_handoff_uri`).
 - **Heartbeat** (`_handoff_heartbeat_loop`): runs at `handoff_heartbeat_interval` (default 5s, configurable 3–10s). Pushes progress to Ynison even when MA's `QUEUE_TIME_UPDATED` is sparse (DLNA/UPnP), preventing Ynison from re-balancing the active device.
 - **Grace periods** (since v2.1): split into two distinct windows. `_drift_suppress_until` (`_DRIFT_SUPPRESS_PERIOD = 10s`) suppresses drift-driven seeks while MA spins up the stream after `play_media(REPLACE)` or a `seek`; `_re_issue_debounce_until` (`_REISSUE_DEBOUNCE_PERIOD = 8s`) blocks another REPLACE while the previous one is still resolving (prevents the IDLE-resume re-issue loop where each `paused=False` echo would re-fire). Override: a queue already PLAYING with `elapsed > 1s` lets a real user seek pass through. Stream mode still uses the older `_seek_grace_until` / `_ECHO_GRACE_PERIOD = 3s` for track change / seek / same-track resume.
 - **Dedup on reconnect**: before issuing `play_media`, compare `queue.current_item.uri` with the expected URI. Skip when already PLAYING; switch to `cmd_play` when same URI but PAUSED. (`PlaybackState` enum exposes only `IDLE` / `PAUSED` / `PLAYING` / `UNKNOWN` — there is no separate `BUFFERING` state.)
