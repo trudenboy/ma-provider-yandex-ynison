@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.0.0] - 2026-07-31
+
+### Changed
+
+- Every Ynison instance now uses the account of one explicitly linked Yandex Music provider. Account credentials are read from Music Assistant's encrypted setup data, while Yandex Music remains their only persistent owner.
+- Account, target player, and published device name are now configured through the native Music Assistant setup/reconfigure flow.
+
+### Removed
+
+- Removed Ynison's separate QR login, manual music-token entry, stored session token, and own-credentials mode. Existing own-mode instances must be reconfigured and linked to a Yandex Music provider; credentials are not transferred automatically.
+
 ## [3.4.2] - 2026-07-16
 
 - feat: reverse-port the unported upstream edits flagged by the P0 sync guard: provider-local `config_helpers.list_yandex_music_instances` (replacing the `ya_passport_auth.ma` import), keyword `title=` for dynamic `ConfigValueOption`s, common-string references and the `manifest` section in `strings.json`, and the stable-stage manifest promotion.
