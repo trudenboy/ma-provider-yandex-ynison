@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.0.3] - 2026-08-11
+
+### Fixed
+
+- Ynison reconnects now reuse Music Assistant's managed HTTP session and resolver instead of creating a private aiohttp session, preventing the published device from remaining stuck offline after transient connection failures (#125).
+
 ## [4.0.2] - 2026-08-11
 
 ### Changed
