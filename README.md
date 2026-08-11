@@ -13,172 +13,124 @@
 **Related providers:** [Yandex Music](https://github.com/trudenboy/ma-provider-yandex-music)
 <!-- <<< ma-provider-tools sync (readme header) <<< -->
 
-Makes any Music Assistant player appear as a playback device in the official
-Yandex Music app via the Ynison protocol (Yandex's equivalent of Spotify
-Connect).
-
-## How it works
-
-1. Plugin connects to Yandex's Ynison service via WebSocket
-2. Your MA player appears as a device in the Yandex Music app
-3. Select the device in Yandex Music → audio streams through MA to your speaker
-4. Control playback from the Yandex Music app (play/pause/skip/seek)
+Yandex Music Connect makes a Music Assistant player appear as a playback device
+in the official Yandex Music app. The app remains the queue owner and remote
+control; Music Assistant resolves and delivers the selected tracks to the
+configured speaker.
 
 ## Status
 
-**Beta** (v2.2.9) — see [CHANGELOG.md](CHANGELOG.md) and [ROADMAP.md](ROADMAP.md).
+**Stable.** Release history is available in [CHANGELOG.md](CHANGELOG.md);
+remaining work is tracked in [ROADMAP.md](ROADMAP.md).
+
+## Requirements
+
+- A current Music Assistant installation with this provider available.
+- At least one configured and authenticated `yandex_music` provider instance.
+- A target Music Assistant player.
+- Working ffmpeg support in the Music Assistant installation.
+
+Each Ynison instance links to exactly one Yandex Music provider instance. Yandex
+Music remains the only persistent owner of OAuth credentials; Ynison reads the
+linked account's setup credentials and keeps refreshed music tokens in memory
+only. To use several accounts or publish several devices, create a Yandex Music
+instance and a Ynison instance for each account/player pairing.
 
 ## Architecture
 
-```
-Yandex Music app (phone/web/desktop)
+```text
+Yandex Music app
+  │  queue, active device, play/pause/seek/skip
+  ▼
+Ynison redirector → Ynison state WebSocket
   │
   ▼
-Ynison WebSocket  ◄──►  YnisonClient (ynison_client.py)
-  │                         │  two-step: Redirector → State Service
-  ▼                         │  JSON over WebSocket (gRPC-like framing)
-YandexYnisonProvider (provider.py)
-  │
-  ├─ receives track_id from Ynison PlayerState
-  ├─ resolves StreamDetails via linked yandex_music provider
-  ├─ fetches audio from Yandex CDN (raw or encrypted FLAC/MP3/AAC)
-  ├─ per-track ffmpeg → fixed PCM (s16le or s24le)
+YandexYnisonProvider (AudioSource)
+  │  track id → linked yandex_music StreamDetails
+  ▼
+Yandex CDN → per-track ffmpeg → session-fixed PCM
   │
   ▼
-PluginSource → MA Player (Chromecast / DLNA / AirPlay / etc.)
-  │
-  └─ on play/pause/seek/next/prev → update_playing_status back to Ynison
+Music Assistant stream pipeline → target player
 ```
 
-### Passive player model
+The provider exposes one exclusive `AudioSource` named `main` per instance.
+Selecting the published device in Yandex Music triggers normal Music Assistant
+`play_media` handling. Selecting the source in Music Assistant can move it to
+another player when manual switching is enabled.
 
-MA acts as a **passive player** — Yandex Music controls the queue. The plugin
-never manipulates `current_playable_index` on auto-advance. When a track
-finishes, the plugin signals completion via `update_playing_status` and waits
-for the Yandex app (or Ynison backend) to push the next track. The only
-exception is RADIO/wave queues, where the active device is responsible for
-replenishing tracks via the Yandex Music REST API.
+## Setup
 
-### Audio streaming pipeline
+1. Configure and authenticate the Yandex Music provider in Music Assistant.
+2. Add **Yandex Music Connect (Ynison)**.
+3. Select the Yandex Music account that owns playback.
+4. Select a target player, or leave it on **Auto**.
+5. Choose the name published in the Yandex Music app.
+6. Save the setup and select the new device in Yandex Music.
 
-Each track is decoded through its own **per-track ffmpeg** process to produce
-a fixed PCM output that matches the session format. This ensures MA's single
-outer ffmpeg never encounters mid-stream format changes.
+Reconfigure the Ynison instance to change the linked account, target player, or
+published name. Legacy own-token/QR configurations are not migrated: reconfigure
+them and select a Yandex Music provider.
 
-```
-Yandex CDN → raw audio (FLAC/MP3/AAC)
-  → ffmpeg (per-track, realtime pacing)
-  → PCM s16le@44.1kHz or s24le@48kHz (based on quality tier)
-  → yield chunks via get_audio_stream()
-  → MA outer ffmpeg → target player
-```
+## Runtime options
 
-The PCM format is **frozen at session start** — if the normalization format
-changes mid-session (e.g. provider reload), the new format applies only to the
-next session, preventing bit-depth/sample-rate mismatches.
+- **Allow manual player switching** — permit selecting this AudioSource on a
+  player other than the configured default.
+- **Output sample rate** — `auto`, 44100, 48000, or 96000 Hz.
+- **Output bit depth** — `auto`, 16, or 24 bit.
+- **Device ID** — generated once and kept as a hidden runtime value.
 
-### Ynison echo detection
+In auto mode, lossy audio starts at 16-bit/44.1kHz and lossless audio at
+24-bit/44.1kHz when no per-track format hint is available. Before playback the
+provider tries to read the real source format, so supported 96 kHz tracks can
+remain 96 kHz. Auto-selected rates are then snapped to a rate supported by the
+target player. Explicit sample-rate overrides are not snapped.
 
-After the plugin sends `update_playing_status`, Ynison echoes the value back
-within a few seconds. Without detection, these echoes trigger false seek events.
-The plugin tracks the last sent progress and timestamp, treating any incoming
-value within ±2 s / 5 s window as an echo to be ignored.
+## Playback behavior
 
-### Radio queue replenishment
+- The PCM format is frozen for the lifetime of one stream session.
+- Every track is decoded through its own ffmpeg process into that fixed format.
+- Fresh `AudioFormat` objects prevent Music Assistant's ffmpeg mutations from
+  leaking between stream stages.
+- Progress sent to Ynison is clamped to duration because the service disconnects
+  clients that report progress beyond the track end.
+- User play, pause, and seek commands use strict delivery reporting; background
+  progress heartbeats remain best-effort.
+- Echo classification and short grace windows prevent the provider from
+  interpreting its own state broadcasts as user seeks.
+- RADIO queues are replenished through the linked Yandex Music provider near
+  the queue tail, then the expanded queue is published back to Ynison.
 
-Ynison only syncs playback state — it does **not** auto-generate new tracks for
-radio/wave queues when a non-YM-app device is active. The plugin handles this
-by calling `get_rotor_station_tracks()` on the linked yandex_music provider when
-nearing the end of the queue, then pushing the expanded list to Ynison via
-`update_player_state`.
+## Connection recovery
 
-## Key modules
-
-| File | Purpose |
-|------|---------|
-| `provider/__init__.py` | Setup function and `SUPPORTED_FEATURES` |
-| `provider/provider.py` | `YandexYnisonProvider(PluginProvider)` — main plugin class |
-| `provider/setup_flow.py` | Native setup/reconfigure flow for account and device identity |
-| `provider/credential_source.py` | Read-only access to linked Yandex Music setup credentials |
-| `provider/ynison_client.py` | `YnisonClient` — WebSocket client for Ynison protocol |
-| `provider/streaming.py` | PCM normalization profiles, ffmpeg pacing args |
-| `provider/protocols.py` | `YandexMusicProviderLike` — structural Protocol for yandex_music dependency |
-| `provider/auth.py` | Temporary music-token refresh via `ya-passport-auth` |
-| `provider/config_helpers.py` | Configured Yandex Music instance discovery |
-| `provider/constants.py` | URLs, config keys, defaults, timeouts |
-| `provider/manifest.json` | Plugin metadata (`multi_instance: true`, `depends_on: yandex_music`) |
-
-## Configuration
-
-### Authentication
-
-Every Ynison instance links to one configured `yandex_music` provider.
-Yandex Music is the only persistent owner of OAuth credentials; Ynison reads
-its current `token` and `x_token` from encrypted setup data. When only an
-`x_token` is available, Ynison may mint a temporary in-memory music token at
-startup; it also refreshes that token after an authentication rejection. To use
-another Yandex account, configure another Yandex Music provider instance and
-link Ynison to it.
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| **Yandex Music account** | Dropdown | Required configured `yandex_music` provider instance whose account Ynison uses |
-
-Ynison never persists or rotates linked credentials. Secret values are unwrapped
-only within the local authentication path, including the bounded in-memory
-refresh cache and Ynison authorization header construction.
-
-### Playback
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| **Connected MA Player** | Dropdown | `Auto` | Target MA player. `Auto` prefers a currently playing player, falls back to first available |
-| **Allow manual player switching** | Boolean | `true` | When enabled, selecting this plugin as a source on any player switches playback to it. When disabled, playback is fixed to the configured player |
-
-### Advanced
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| **Output sample rate** | Dropdown | `Auto` | PCM output sample rate. `Auto` selects 44.1 kHz for lossy, 48 kHz for lossless sources. Options: 44100, 48000, 96000 Hz |
-| **Output bit depth** | Dropdown | `Auto` | PCM output bit depth. `Auto` selects 16-bit for lossy, 24-bit for lossless. Options: 16, 24 bit |
-| **Device name** | String | `Music Assistant` | How this device appears in the Yandex Music app |
-
-### Auto-detection logic
-
-When set to `Auto`, sample rate and bit depth are derived from the linked
-yandex_music provider's quality setting:
-- `superb` / `lossless` → **24-bit / 48 kHz** (PCM_S24LE)
-- all others → **16-bit / 44.1 kHz** (PCM_S16LE)
-
-## Ynison protocol notes
-
-- **Transport**: JSON over WebSocket (gRPC-like framing, not binary protobuf)
-- **Two-step connection**: Redirector → State Service
-  - Redirect URL: `wss://ynison.music.yandex.ru/redirector.YnisonRedirectService/GetRedirectToYnison`
-  - State URL: `wss://{host}/ynison_state.YnisonStateService/PutYnisonState`
-- **Auth**: `Authorization: OAuth {token}`, device info in `Sec-WebSocket-Protocol` header
-- **Reconnect**: exponential backoff (5, 10, 30, 60 s saturating) with ±20% jitter, retries indefinitely
-- **Constraint**: Ynison rejects `progress > duration` with error 400030001 and disconnects — progress is always clamped
-- **Reference implementations**: [bulatorr/go-yaynison](https://github.com/bulatorr/go-yaynison) (Go), [FozerG/YandexMusicRPC](https://github.com/FozerG/YandexMusicRPC) (Python)
+The client performs the Ynison redirector and state-service handshakes, then
+keeps the state WebSocket alive. Transient disconnects reconnect indefinitely
+with saturated 5, 10, 30, and 60 second delays plus jitter. Authentication
+rejections trigger an in-memory refresh from the linked account's `x_token`
+when available. A short settle window after reconnect suppresses stale retained
+state.
 
 ## Development
 
 ```bash
-# Setup
-git clone https://github.com/trudenboy/ma-provider-yandex-ynison.git
-cd ma-provider-yandex-ynison
-scripts/setup.sh  # or: uv sync --extra test
-
-# Run tests
+scripts/setup.sh
 uv run pytest
-
-# Lint & format
-uv run ruff check .
-uv run ruff format .
-
-# Type check
+uv run ruff check provider tests
+uv run ruff format --check provider tests
 uv run mypy
 ```
+
+The local test dependency is a moving Music Assistant `dev` checkout recorded
+in `uv.lock`. If provider tests fail on missing Music Assistant APIs, first
+verify that the lock commit exposes `setup_flow`, `get_setup_value`, and the
+current shared stream-details contract.
+
+## Protocol notes
+
+Ynison uses JSON messages over WebSocket in a gRPC-like service layout. The
+client first requests a redirect ticket and then opens the state-service
+connection. Ynison is not a public stable API, so server-side protocol changes
+can require provider updates.
 
 ## License
 
