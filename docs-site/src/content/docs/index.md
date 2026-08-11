@@ -1,37 +1,49 @@
 ---
 title: Провайдер Yandex Music Connect (Ynison)
-description: Документация провайдера Yandex Music Connect (Ynison) для Music Assistant
+description: Превратите плеер Music Assistant в устройство Яндекс Музыки
 ---
 
 <img src="https://raw.githubusercontent.com/trudenboy/ma-provider-yandex-ynison/dev/provider/icon.svg" alt="Yandex Music Connect (Ynison)" style="width: 72px; float: right; margin: 0 0 1rem 1.5rem;" />
 
+# Yandex Music Connect для Music Assistant
 
-> Yandex Ynison / Music Connect plugin for Music Assistant — приложение Яндекс Музыка как пульт ДУ
+Провайдер публикует плеер Music Assistant как устройство в приложении Яндекс
+Музыки. Очередь и выбор треков остаются в Яндекс Музыке, а Music Assistant
+получает аудиопоток и доставляет его на Chromecast, DLNA, AirPlay или другой
+поддерживаемый плеер.
 
+## Что поддерживается
 
-[![CI](https://github.com/trudenboy/ma-provider-yandex-ynison/actions/workflows/test.yml/badge.svg)](https://github.com/trudenboy/ma-provider-yandex-ynison/actions/workflows/test.yml)
-[![Release](https://img.shields.io/github/v/release/trudenboy/ma-provider-yandex-ynison?display_name=tag)](https://github.com/trudenboy/ma-provider-yandex-ynison/releases/latest)
-[![License](https://img.shields.io/github/license/trudenboy/ma-provider-yandex-ynison)](https://github.com/trudenboy/ma-provider-yandex-ynison/blob/dev/LICENSE)
-[![Music Assistant](https://img.shields.io/badge/Music%20Assistant-provider-9070B8?logo=python&logoColor=white)](https://www.music-assistant.io/)
-[![Stars](https://img.shields.io/github/stars/trudenboy/ma-provider-yandex-ynison?style=flat&logo=github)](https://github.com/trudenboy/ma-provider-yandex-ynison/stargazers)
+- запуск воспроизведения из приложения Яндекс Музыки;
+- play, pause, переход между треками и перемотка в обе стороны;
+- метаданные и прогресс текущего трека в Music Assistant;
+- lossless и Hi-Res источники с выбором PCM-формата под возможности плеера;
+- автоматическое переподключение к Ynison;
+- пополнение очереди радио через связанный провайдер Yandex Music;
+- несколько экземпляров для разных аккаунтов, устройств или плееров.
 
+Один экземпляр Ynison публикует одно устройство и использует один связанный
+экземпляр провайдера Yandex Music. Для второго аккаунта сначала добавьте второй
+Yandex Music, затем отдельный Ynison.
 
-<div class="topic-pills"> <code>music-assistant</code> <code>home-assistant</code> <code>python</code> <code>plugin-provider</code> <code>yandex-connect</code> <code>yandex</code> <code>ynison</code> <code>yandex-music</code> <code>music-connect</code> <code>music</code> <code>spotify-connect-alt</code>
-</div>
+## Что потребуется
 
+1. Актуальная версия Music Assistant.
+2. Настроенный и авторизованный провайдер **Yandex Music**.
+3. Плеер Music Assistant, на котором будет звучать музыка.
+4. Подписка и доступ к нужному контенту Яндекс Музыки.
 
+Ynison не хранит собственные OAuth-данные. Токены принадлежат связанному
+провайдеру Yandex Music и читаются из защищённых setup-data Music Assistant.
 
-Music Assistant поддерживает [Yandex Music Connect (Ynison)](https://music.yandex.ru) — плеер.
-Провайдер создан и поддерживается [TrudenBoy](https://github.com/TrudenBoy).
+## Быстрый старт
 
+1. Откройте **Настройки → Плагины → Добавить плагин**.
+2. Выберите **Yandex Music Connect (Ynison)**.
+3. Укажите аккаунт Yandex Music, целевой плеер и имя устройства.
+4. Сохраните настройку.
+5. Откройте список устройств в Яндекс Музыке и выберите опубликованное имя.
 
-
-**Связанные провайдеры:** [Yandex Music](https://github.com/trudenboy/ma-provider-yandex-music)
-
-
-
-
-## Настройка
-
-
-Инструкция по подключению — на странице [Настройка](configuration/).
+Подробности приведены на странице [Настройка](configuration/). Решения типовых
+проблем и эксплуатационные ограничения — в разделе
+[Известные проблемы](known-issues/).
