@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.0.4] - 2026-08-11
+
+### Fixed
+
+- Aligned the shared Yandex authentication dependency with current Music Assistant releases, preventing dependency conflicts during installation and upstream synchronization.
+
 ## [4.0.3] - 2026-08-11
 
 ### Fixed
