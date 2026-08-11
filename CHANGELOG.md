@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.0.2] - 2026-08-11
+
+### Changed
+
+- Ynison audio sources now use the same stream-details interface as music providers, keeping the plugin compatible with current Music Assistant releases.
+
 ## [4.0.0] - 2026-07-31
 
 ### Changed
