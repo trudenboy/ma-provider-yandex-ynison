@@ -48,10 +48,10 @@ guards remain authoritative.
 
 ## Tests
 
-Add one provider-level regression test around `handle_async_init` that captures
-the `YnisonClient` constructor and asserts that its `http_session` argument is
-the exact `mass.http_session` object. The test must fail before the production
-change and pass after it.
+Add one provider-level regression test around `handle_async_init` that keeps a
+real `YnisonClient`, forbids construction of a private `ClientSession`, and
+drives `connect()` up to a controlled redirector failure. The test must fail
+before the production change and pass after it.
 
 Retain the existing client-level tests that prove reconnect reuses an external
 session and disconnect does not close it. Run the complete pytest suite, mypy,
