@@ -76,6 +76,7 @@ them and select a Yandex Music provider.
 
 - **Allow manual player switching** — permit selecting this AudioSource on a
   player other than the configured default.
+- **Stream mode** — `stable` (default) or `max_quality_dynamic`.
 - **Output sample rate** — `auto`, 44100, 48000, or 96000 Hz.
 - **Output bit depth** — `auto`, 16, or 24 bit.
 - **Device ID** — generated once and kept as a hidden runtime value.
@@ -86,9 +87,21 @@ provider tries to read the real source format, so supported 96 kHz tracks can
 remain 96 kHz. Auto-selected rates are then snapped to a rate supported by the
 target player. Explicit sample-rate overrides are not snapped.
 
+`max_quality_dynamic` is active only when the linked Yandex Music provider uses
+**Superb** quality and both output settings are **Auto**. Otherwise the provider
+continues in `stable` mode and logs one warning describing the incompatible
+setting. Existing installations therefore keep their current stable behavior.
+
 ## Playback behavior
 
-- The PCM format is frozen for the lifetime of one stream session.
+- In `stable` mode, the PCM format is frozen for the lifetime of one stream
+  session.
+- In `max_quality_dynamic`, each real source format is matched to the actual
+  player, bridge, or group: sample rate is constrained to a supported value,
+  while native bit depth is preserved in the PCM container just like MA's
+  realtime AudioSource path. Tracks with the same effective PCM continue in one
+  session; a changed effective PCM restarts the AudioSource on a complete
+  PCM-frame boundary.
 - Every track is decoded through its own ffmpeg process into that fixed format.
 - Fresh `AudioFormat` objects prevent Music Assistant's ffmpeg mutations from
   leaking between stream stages.
@@ -100,6 +113,10 @@ target player. Explicit sample-rate overrides are not snapped.
   interpreting its own state broadcasts as user seeks.
 - RADIO queues are replenished through the linked Yandex Music provider near
   the queue tail, then the expanded queue is published back to Ynison.
+
+A mixed-format dynamic transition can have an audible gap. Ynison's playback
+clock continues while Music Assistant restarts the source, so playback resumes
+from the latest reported position and may skip the time elapsed during restart.
 
 ## Connection recovery
 

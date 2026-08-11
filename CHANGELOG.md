@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- Added an optional maximum-quality dynamic stream mode that follows each track's effective native PCM and restarts the AudioSource only when the player-facing format changes. Stable continuous playback remains the default.
+
 ## [4.0.4] - 2026-08-11
 
 ### Fixed
