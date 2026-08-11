@@ -187,10 +187,10 @@ pre-commit run --all-files
 ```
 
 The test dependency follows a pinned Music Assistant `dev` commit in
-`uv.lock`. When local tests or mypy report missing `setup_flow`,
-`get_setup_value`, or the new shared stream-details signature, compare the
-lock commit with the API required by this provider before treating the cascade
-as provider regressions.
+`uv.lock`, together with the matching models and test-only server requirements.
+Use `uv sync --extra test --frozen` before validation. Update the lock
+intentionally when adopting a newer shared API; do not mix provider code with
+an older globally installed Music Assistant checkout.
 
 Most automated coverage is unit/mock based. Live Ynison, Yandex CDN, ffmpeg,
 and real player transports remain integration boundaries requiring manual or

@@ -120,10 +120,10 @@ uv run ruff format --check provider tests
 uv run mypy
 ```
 
-The local test dependency is a moving Music Assistant `dev` checkout recorded
-in `uv.lock`. If provider tests fail on missing Music Assistant APIs, first
-verify that the lock commit exposes `setup_flow`, `get_setup_value`, and the
-current shared stream-details contract.
+The local test dependency follows Music Assistant `dev`, while `uv.lock` pins a
+tested commit and the matching models version. Use `uv sync --extra test
+--frozen` to reproduce that baseline; refresh the lock intentionally when the
+provider adopts a newer Music Assistant API.
 
 ## Protocol notes
 
