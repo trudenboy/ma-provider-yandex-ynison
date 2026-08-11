@@ -2,7 +2,7 @@
 id: "0004"
 title: "Cache in-memory music token to avoid Passport hammering"
 size: M
-status: inprogress
+status: done
 priority: P2
 effort_minutes: 25
 ---

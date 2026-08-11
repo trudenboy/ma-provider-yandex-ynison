@@ -2,7 +2,7 @@
 id: "0007"
 title: "Require a linked Yandex Music account for Ynison authentication"
 size: M
-status: inprogress
+status: done
 priority: P1
 effort_minutes: 20
 feature_id:

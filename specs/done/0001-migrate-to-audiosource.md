@@ -2,7 +2,7 @@
 id: "0001"
 title: "Migrate yandex_ynison to AudioSource MediaItem contract"
 size: L
-status: inprogress
+status: done
 priority: P0
 effort_minutes: 60
 feature_id: AUDIO_SOURCE

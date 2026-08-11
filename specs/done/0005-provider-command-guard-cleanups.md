@@ -2,7 +2,7 @@
 id: "0005"
 title: "Extract connected-Ynison guard, fix drift docstring, rename `_paused`"
 size: M
-status: inprogress
+status: done
 priority: P2
 effort_minutes: 18
 ---

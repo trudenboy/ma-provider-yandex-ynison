@@ -2,7 +2,7 @@
 id: "0002"
 title: "Correct documented sample rate for superb/lossless PCM profile"
 size: S
-status: inprogress
+status: done
 priority: P2
 effort_minutes: 8
 ---
