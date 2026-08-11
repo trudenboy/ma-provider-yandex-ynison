@@ -22,3 +22,4 @@ aprender-webui.png
 .playwright-mcp/
 ma-server/
 docker-compose.override.yml
+.worktrees/
