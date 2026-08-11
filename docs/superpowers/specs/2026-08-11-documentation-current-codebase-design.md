@@ -85,30 +85,34 @@ codebase. Their frontmatter will use `status: done`; files still under
 intact unless it incorrectly claims to describe current behavior; historical
 references to removed APIs are allowed when clearly framed as prior state.
 
-## Regression Protection
+## Validation Strategy
 
-`tests/test_docs.py` will pin facts that are cheap and reliable to verify from
-repository files:
+Human-facing prose will not gain new source-text pytest assertions. Such tests
+would be brittle change detectors: they fail on intentional copy editing while
+providing no evidence that a reader receives correct operational guidance.
+Validation instead exercises the documentation artifacts and their structure:
 
-1. README stage matches `provider/manifest.json` and does not advertise the
-   obsolete 2.2.9 status.
-2. Maintained current-state documents do not advertise `PluginSource`, handoff,
-   own credentials, or manual reconnect as supported behavior.
-3. README and `CLAUDE.local.md` describe the lossless no-hint profile from
-   `PCM_LOSSLESS_PARAMS` as 24-bit/44.1 kHz.
-4. The docs site does not claim that multi-instance use is unsupported.
-5. Every spec under `specs/done/` has `status: done`, and
-   `specs/inprogress/` is empty after this synchronization.
+1. Astro builds the docs site successfully.
+2. Codespell, JSON/TOML parsers, and repository formatting checks pass.
+3. Specification locations and frontmatter are inspected structurally after
+   the moves.
+4. Focused repository searches prove that known obsolete current-state claims
+   were removed from maintained guides; historical specs and changelog remain
+   outside that search.
+5. A manual evidence table maps each important claim to its code-owned source
+   before final review.
 
-Tests will assert durable facts rather than exact paragraphs so normal copy
-editing does not create brittle failures.
+The existing `tests/test_docs.py` check remains part of the repository gate and
+will pass against the corrected lossless-profile documentation, but this task
+does not expand it with new prose assertions.
 
 ## Verification
 
-The documentation-specific red/green cycle will run independently of the
-known Music Assistant lock mismatch. Verification will include:
+Documentation verification will run independently of the known Music Assistant
+lock mismatch and will include:
 
-- the new `tests/test_docs.py` checks, first observed failing and then passing;
+- the existing `tests/test_docs.py` check;
+- an Astro production build;
 - Ruff and formatting for `provider/` and `tests/`;
 - codespell over the changed documentation;
 - JSON/TOML parsing where applicable;
