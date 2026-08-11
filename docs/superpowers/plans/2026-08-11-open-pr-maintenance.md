@@ -212,9 +212,11 @@ No separate feature specification is required because this ports an already merg
 
 ## Verification
 
-- [x] Local static quality gate completed.
+- [x] 277 provider tests pass locally.
+- [x] Ruff and provider-only mypy pass locally.
 - [x] Changed stream-details behavior remains covered by regression tests.
 - [x] `VERSION` was not modified.
+- [ ] Fresh GitHub CI passes on the updated branch.
 ```
 
 - [ ] **Step 4: Wait for fresh GitHub checks**
