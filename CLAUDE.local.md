@@ -103,6 +103,7 @@ transferring credentials.
 | Key | Default | Meaning |
 |-----|---------|---------|
 | `allow_player_switch` | `true` | Allow this source to move to another player |
+| `stream_mode` | `stable` | `stable` or per-track `max_quality_dynamic` PCM sessions |
 | `output_sample_rate` | `auto` | `auto`, 44100, 48000, or 96000 Hz |
 | `output_bit_depth` | `auto` | `auto`, 16, or 24 bit |
 | `device_id` | generated | Hidden persistent 16-character Ynison device id |
@@ -133,6 +134,13 @@ stream hint may promote rate/depth, including 96 kHz. Explicit configuration
 wins over hints. Automatic rates are snapped down to the nearest supported
 target-player rate; explicit rates are preserved.
 
+`max_quality_dynamic` is eligible only for Yandex Music `Superb` quality with
+both output overrides set to `auto`. It accepts real source rates from 8 through
+384 kHz, maps source precision to PCM16/24/32, and selects the highest player
+rate not above the source when possible. The effective signature is frozen per
+session and recalculated for the actual player/bridge/group in
+`on_source_selected`.
+
 `get_audio_stream` follows Ynison track changes in one long-lived AudioSource
 session. It fetches cached StreamDetails, runs one ffmpeg decoder per track,
 updates metadata/duration, counts PCM bytes for progress, aligns interrupted
@@ -150,6 +158,13 @@ IDLE; resume reissues `play_media` from Ynison progress. Seek restarts the
 local track generator at the requested offset. Natural end, pause, track
 change, and stale session teardown are classified separately so an interrupted
 track is never advanced accidentally.
+
+Dynamic mode prefetches the current and immediate next playable ID in the
+background. Equal effective signatures continue the current generator. A
+changed signature ends it on a PCM-frame boundary without signalling natural
+completion, rebuilds the AudioSource format, and reissues `play_media` for the
+same queue from the latest Ynison progress. A mixed-format boundary may be
+audible and can skip elapsed time because the Ynison clock keeps running.
 
 ## Ynison transport and recovery
 
