@@ -17,9 +17,12 @@ from music_assistant_models.enums import (
     ProviderType,
 )
 from music_assistant_models.errors import (
+    ActionUnavailable,
     LoginFailed,
+    MediaNotFoundError,
     PlayerCommandFailed,
     ResourceTemporarilyUnavailable,
+    RetriesExhausted,
     UnsupportedFeaturedException,
 )
 from music_assistant_models.media_items import AudioFormat, AudioSource
@@ -440,7 +443,7 @@ class TestSourceSelection:
         provider._default_player_id = "default-player"
         mass.players.get_player.return_value = MagicMock()
 
-        with pytest.raises(RuntimeError, match="Player switching is disabled"):
+        with pytest.raises(ActionUnavailable, match="Player switching is disabled"):
             await provider.on_source_selected("main", "other-player", "other-player", "session_1")
 
         # Should have redirected to the configured default via play_media
@@ -467,7 +470,7 @@ class TestSourceSelection:
         mass.players.get_player.return_value = MagicMock()
 
         for _ in range(3):
-            with pytest.raises(RuntimeError, match="Player switching is disabled"):
+            with pytest.raises(ActionUnavailable, match="Player switching is disabled"):
                 await provider.on_source_selected(
                     "main", "other-player", "other-player", "session_1"
                 )
@@ -2308,7 +2311,9 @@ class TestGetStreamDetailsWithRetry:
         sd = MagicMock()
         sd.expiration = 600
         sd.to_dict.return_value = {"track_id": "t1"}
-        mock_yp.get_stream_details = AsyncMock(side_effect=[RuntimeError("transient"), sd])
+        mock_yp.get_stream_details = AsyncMock(
+            side_effect=[ResourceTemporarilyUnavailable("transient"), sd]
+        )
         provider._yandex_provider = mock_yp
 
         with patch("provider.provider.asyncio.sleep", new_callable=AsyncMock):
@@ -2317,10 +2322,12 @@ class TestGetStreamDetailsWithRetry:
         assert mock_yp.get_stream_details.await_count == 2
 
     async def test_raises_after_max_retries(self) -> None:
-        """Raises RuntimeError after all retries exhausted."""
+        """Raises RetriesExhausted after all transient retries are exhausted."""
         provider = _make_provider()
         mock_yp = MagicMock()
-        mock_yp.get_stream_details = AsyncMock(side_effect=RuntimeError("always fails"))
+        mock_yp.get_stream_details = AsyncMock(
+            side_effect=ResourceTemporarilyUnavailable("always fails")
+        )
         provider._yandex_provider = mock_yp
 
         with (
@@ -2328,10 +2335,22 @@ class TestGetStreamDetailsWithRetry:
                 "provider.provider.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
-            pytest.raises(RuntimeError, match="failed after"),
+            pytest.raises(RetriesExhausted, match="failed after"),
         ):
             await provider._get_stream_details_with_retry("t1")
         assert mock_yp.get_stream_details.await_count == _API_MAX_RETRIES
+
+    async def test_permanent_error_is_not_retried(self) -> None:
+        """A permanent MA error propagates without consuming the retry budget."""
+        provider = _make_provider()
+        mock_yp = MagicMock()
+        mock_yp.get_stream_details = AsyncMock(side_effect=MediaNotFoundError("missing"))
+        provider._yandex_provider = mock_yp
+
+        with pytest.raises(MediaNotFoundError, match="missing"):
+            await provider._get_stream_details_with_retry("t1")
+
+        mock_yp.get_stream_details.assert_awaited_once()
 
     async def test_cancellation_not_retried(self) -> None:
         """CancelledError propagates immediately, no retry."""

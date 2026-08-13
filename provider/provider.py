@@ -24,9 +24,12 @@ from music_assistant_models.enums import (
     StreamType,
 )
 from music_assistant_models.errors import (
+    ActionUnavailable,
     LoginFailed,
     MediaNotFoundError,
     PlayerCommandFailed,
+    ResourceTemporarilyUnavailable,
+    RetriesExhausted,
     UnsupportedFeaturedException,
 )
 from music_assistant_models.media_items import AudioSource, ProviderMapping
@@ -693,7 +696,7 @@ class YandexYnisonProvider(PluginProvider):
                         current_target, str(self._audio_source.uri)
                     )
                 msg = f"Player switching is disabled; source must remain on {current_target}"
-                raise RuntimeError(msg)
+                raise ActionUnavailable(msg)
 
         if self._effective_stream_mode == STREAM_MODE_MAX_QUALITY:
             track_id = self._pending_restart_track_id or (
@@ -929,7 +932,7 @@ class YandexYnisonProvider(PluginProvider):
                 return sd
             except asyncio.CancelledError:
                 raise
-            except Exception as err:
+            except ResourceTemporarilyUnavailable as err:
                 last_err = err
                 if attempt < _API_MAX_RETRIES - 1:
                     jitter = backoff * random.uniform(0.75, 1.25)
@@ -943,7 +946,7 @@ class YandexYnisonProvider(PluginProvider):
                     await asyncio.sleep(jitter)
                     backoff = min(backoff * 2, _API_MAX_BACKOFF)
         msg = f"get_stream_details failed after {_API_MAX_RETRIES} attempts for {track_id}"
-        raise RuntimeError(msg) from last_err
+        raise RetriesExhausted(msg) from last_err
 
     async def _invalidate_stream_cache(self, track_id: str) -> None:
         """Evict cached stream details for a track so the next fetch is fresh."""
