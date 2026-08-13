@@ -1546,7 +1546,7 @@ class YandexYnisonProvider(PluginProvider):
                 _PREFETCH_FORMAT_TIMEOUT,
             )
             return
-        except Exception:
+        except MusicAssistantError:
             self.logger.warning(
                 "Pre-fetch of stream details failed for %s — keeping current format",
                 track_id,
@@ -1654,7 +1654,7 @@ class YandexYnisonProvider(PluginProvider):
             if not supported or rate in supported:
                 return rate
             return max((r for r in supported if r <= rate), default=min(supported))
-        except Exception:
+        except AttributeError, TypeError, ValueError:
             self.logger.debug(
                 "Could not snap sample rate to player capabilities; keeping %d Hz",
                 rate,
@@ -2007,7 +2007,7 @@ class YandexYnisonProvider(PluginProvider):
             except asyncio.CancelledError:
                 self.logger.debug("Dynamic prefetch cancelled for %s", track_id)
                 raise
-            except Exception as err:
+            except (ResourceTemporarilyUnavailable, RetriesExhausted, ValueError) as err:
                 self.logger.warning(
                     "Dynamic prefetch for %s failed (%s); retrying in %.1fs",
                     track_id,
@@ -2069,7 +2069,7 @@ class YandexYnisonProvider(PluginProvider):
             player = self.mass.players.get_player(player_id)
             if player is not None:
                 supported = list(player.get_supported_sample_rates())
-        except Exception:
+        except AttributeError, TypeError, ValueError:
             self.logger.debug(
                 "Could not resolve supported formats for %s; using source PCM",
                 player_id,
@@ -2389,7 +2389,7 @@ class YandexYnisonProvider(PluginProvider):
             tracks, batch_id = await self._yandex_provider.get_rotor_station_tracks(
                 entity_id, queue=last_track_id
             )
-        except Exception:
+        except MusicAssistantError:
             self.logger.exception("Failed to fetch radio tracks for %s", entity_id)
             return None
 
