@@ -432,6 +432,28 @@ class TestSourceSelection:
         assert provider._active_player_id == "spb_base-player"
         assert provider._in_use_by_queue == "base-player"
 
+    async def test_known_failure_stopping_previous_player_keeps_selection(self) -> None:
+        """A typed player-command failure must not block a new source selection."""
+        provider = _make_provider()
+        provider._active_player_id = "old-player"
+        provider.mass.players.cmd_stop = AsyncMock(side_effect=PlayerCommandFailed("stop failed"))
+
+        await provider.on_source_selected("main", "new-player", "new-player", "session_1")
+
+        assert provider._active_player_id == "new-player"
+        assert provider._in_use_by_queue == "new-player"
+
+    async def test_unexpected_failure_stopping_previous_player_propagates(self) -> None:
+        """An unexpected stop error must not be mistaken for an operational failure."""
+        provider = _make_provider()
+        provider._active_player_id = "old-player"
+        provider.mass.players.cmd_stop = AsyncMock(side_effect=RuntimeError("bug"))
+
+        with pytest.raises(RuntimeError, match="bug"):
+            await provider.on_source_selected("main", "new-player", "new-player", "session_1")
+
+        assert provider._active_player_id == "old-player"
+
     async def test_on_source_selected_switching_disabled(self) -> None:
         """Rejects source selection when player switching is disabled."""
         mass = _make_mock_mass()
@@ -2086,7 +2108,7 @@ class TestPausePlayback:
         provider = _make_provider()
         provider._active_player_id = "spb_bridge1"
         provider._in_use_by_queue = "player1"
-        provider.mass.players.cmd_stop = AsyncMock(side_effect=RuntimeError("boom"))
+        provider.mass.players.cmd_stop = AsyncMock(side_effect=PlayerCommandFailed("boom"))
 
         await provider._pause_playback()
 
@@ -2099,6 +2121,16 @@ class TestPausePlayback:
         # "successfully paused, expecting resume" state.
         assert provider._externally_paused is False
 
+    async def test_unexpected_cmd_stop_error_propagates(self) -> None:
+        """An unexpected player-controller error must escape the pause fallback."""
+        provider = _make_provider()
+        provider._active_player_id = "spb_bridge1"
+        provider._in_use_by_queue = "player1"
+        provider.mass.players.cmd_stop = AsyncMock(side_effect=RuntimeError("bug"))
+
+        with pytest.raises(RuntimeError, match="bug"):
+            await provider._pause_playback()
+
     async def test_no_active_player_is_a_noop(self) -> None:
         """Pause with no active queue does not call cmd_stop or set the stop event."""
         provider = _make_provider()
@@ -2109,6 +2141,36 @@ class TestPausePlayback:
 
         assert not provider._stream_stop_event.is_set()
         provider.mass.players.cmd_stop.assert_not_called()
+
+
+class TestStreamTrackErrorHandling:
+    """Expected MA failures end a track while unexpected failures propagate."""
+
+    async def test_stream_details_ma_error_ends_track(self) -> None:
+        """An exhausted operational lookup stops the stream without yielding audio."""
+        provider = _make_provider()
+        _stub_attr(
+            provider,
+            "_get_stream_details_with_retry",
+            AsyncMock(side_effect=RetriesExhausted("unavailable")),
+        )
+
+        chunks = [chunk async for chunk in provider._stream_track("track1")]
+
+        assert chunks == []
+        assert provider._stream_stop_event.is_set()
+
+    async def test_unexpected_stream_details_error_propagates(self) -> None:
+        """An internal lookup bug must not be converted into an ordinary stream end."""
+        provider = _make_provider()
+        _stub_attr(
+            provider,
+            "_get_stream_details_with_retry",
+            AsyncMock(side_effect=RuntimeError("bug")),
+        )
+
+        with pytest.raises(RuntimeError, match="bug"):
+            await anext(provider._stream_track("track1"))
 
 
 # ------------------------------------------------------------------

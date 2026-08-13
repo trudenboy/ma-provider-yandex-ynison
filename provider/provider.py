@@ -27,6 +27,7 @@ from music_assistant_models.errors import (
     ActionUnavailable,
     LoginFailed,
     MediaNotFoundError,
+    MusicAssistantError,
     PlayerCommandFailed,
     ResourceTemporarilyUnavailable,
     RetriesExhausted,
@@ -732,7 +733,7 @@ class YandexYnisonProvider(PluginProvider):
             )
             try:
                 await self.mass.players.cmd_stop(prev_player_id)
-            except Exception as err:
+            except PlayerCommandFailed as err:
                 self.logger.debug(
                     "Failed to stop previous player %s: %s",
                     prev_player_id,
@@ -824,7 +825,7 @@ class YandexYnisonProvider(PluginProvider):
         bypass_token = BYPASS_THROTTLER.set(True)
         try:
             stream_details = await self._get_stream_details_with_retry(track_id)
-        except Exception:
+        except MusicAssistantError:
             self.logger.exception("Failed to get stream details for track %s", track_id)
             self._stream_stop_event.set()
             return
@@ -1408,7 +1409,7 @@ class YandexYnisonProvider(PluginProvider):
         self._stream_stop_event.set()
         try:
             await self.mass.players.cmd_stop(target)
-        except Exception:
+        except PlayerCommandFailed:
             # cmd_stop is the only mechanism that flips MA's PlaybackState
             # to IDLE for an AudioSource. A silent failure here resurrects
             # the very UX bug this code path exists to fix.
