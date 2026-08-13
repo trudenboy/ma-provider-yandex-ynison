@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.1.1] - 2026-08-13
+
+### Changed
+
+- Provider failures now retain Music Assistant's specific error categories, while retries and best-effort fallbacks are limited to expected transient, player-command, and capability-data failures.
+
+### Fixed
+
+- Permanent authentication and missing-media failures no longer enter stream retry loops, and unexpected internal errors are no longer hidden by playback fallback paths.
+
 ## [4.1.0] - 2026-08-11
 
 ### Added
