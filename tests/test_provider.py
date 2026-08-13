@@ -1457,10 +1457,10 @@ class TestPCMNormalization:
         assert mapping.audio_format is not original_format
 
     async def test_stream_track_api_error_returns_empty(self) -> None:
-        """If get_stream_details fails, _stream_track yields nothing."""
+        """A typed stream-details failure ends the track without yielding audio."""
         provider = _make_provider()
         mock_yandex = MagicMock()
-        mock_yandex.get_stream_details = AsyncMock(side_effect=Exception("API error"))
+        mock_yandex.get_stream_details = AsyncMock(side_effect=MediaNotFoundError("API error"))
         provider._yandex_provider = mock_yandex
 
         collected: list[bytes] = []
@@ -3912,12 +3912,8 @@ class TestBypassThrottlerScope:
         mock_ynison.state.is_paused = False
         provider._ynison = mock_ynison
 
-        # _stream_track swallows the exception, sets the stop event, returns.
-        # Patch asyncio.sleep so the inner retry-with-backoff (2s + 4s) does
-        # not block the test in real time.
-        with patch("provider.provider.asyncio.sleep", new=AsyncMock()):
-            async for _ in provider._stream_track("track1"):
-                pass
+        with pytest.raises(RuntimeError, match="boom"):
+            await anext(provider._stream_track("track1"))
 
         assert BYPASS_THROTTLER.get() is False
 
