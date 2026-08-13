@@ -2,7 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [4.1.2] - 2026-08-17
+
+### Fixed
+
+- Dynamic playback now preserves the advertised PCM format through source selection, resumes
+  same-format track transitions from the latest Ynison position, and remains retryable after a
+  failed launch.
+- Disabled player switching once again aborts unsupported source requests through Music
+  Assistant's current audio-source lifecycle contract.
+
+## [4.1.1] - 2026-08-13
 
 ### Changed
 
