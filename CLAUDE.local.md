@@ -216,3 +216,20 @@ an older globally installed Music Assistant checkout.
 Most automated coverage is unit/mock based. Live Ynison, Yandex CDN, ffmpeg,
 and real player transports remain integration boundaries requiring manual or
 environment-backed validation.
+
+## Known technical debt
+
+### AudioSource lifecycle contract mismatch
+
+Music Assistant's AudioSource lifecycle paths currently translate only
+`RuntimeError` into a clean stream abort (`HTTPNotFound` on the HTTP route,
+`AudioError` on the direct-PCM route). When player switching is disabled,
+`on_source_selected` must abort a wrong-player selection, so it raises
+`RuntimeError` as a temporary workaround instead of the more precise
+`ActionUnavailable` from `music_assistant_models.errors`.
+
+Resolution path: once upstream updates the streams controller to also accept
+`ActionUnavailable` (see
+[music-assistant/server#5589](https://github.com/music-assistant/server/pull/5589#discussion_r3794988694)),
+replace the `RuntimeError` raise in `on_source_selected` with
+`ActionUnavailable` and remove the inline NOTE plus this section.
