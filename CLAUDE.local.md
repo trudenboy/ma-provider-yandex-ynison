@@ -71,7 +71,7 @@ per-track ffmpeg → session-fixed PCM → Music Assistant player
 |------|----------------|
 | `provider/__init__.py` | Provider setup entry point and supported features |
 | `provider/setup_flow.py` | Account, target player, and published-name setup/reconfigure |
-| `provider/credential_source.py` | Read-only linked Yandex Music credential adapter |
+| `provider/credential_source.py` | Provider-local adapter for setup-owned Yandex Music credentials |
 | `provider/auth.py` | Temporary music-token refresh from an `x_token` |
 | `provider/provider.py` | AudioSource lifecycle, streaming, control sync, metadata, and queues |
 | `provider/ynison_client.py` | Ynison transport, messages, state, reconnect, and strict sends |
@@ -114,6 +114,12 @@ transferring credentials.
 provider, verifies its domain/type, and reads setup-owned `token` and
 `x_token` values. A missing linked provider is temporary during startup; an
 incompatible provider or unsupported setup API is a login failure.
+
+This Music Assistant-specific adapter intentionally remains inside the
+provider. It owns no Passport authentication behavior: it never refreshes,
+rotates, or persists credentials, and it does not depend on the shared
+credential-source abstraction from `ya-passport-auth.ma`. Yandex Music remains
+the sole persistent credential owner.
 
 A stored music token is preferred. If only `x_token` is available,
 `_refresh_via_x_token` mints a temporary music token and caches it in memory
