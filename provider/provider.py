@@ -1561,7 +1561,20 @@ class YandexYnisonProvider(PluginProvider):
         """Clear the active player and reset plugin state."""
         self._invalidate_dynamic_tasks(clear_prefetch=True)
         prev_player_id = self._active_player_id
+<<<<<<< provider
         was_in_use = self._in_use_by_queue == prev_player_id
+||||||| upstream-base
+        # the owner is the user-facing MA player; _active_player_id can be the protocol
+        # player that consumed the stream, which is not what holds the source session
+        owner_player_id = self._in_use_by_player
+=======
+        # the owner is the user-facing MA player; _active_player_id can be the protocol
+        # player that consumed the stream, which is not what holds the source session
+        owner_player_id = self._in_use_by_player
+        source_session = (
+            self.mass.players.get_audio_source_session(owner_player_id) if owner_player_id else None
+        )
+>>>>>>> upstream-head
         self._active_player_id = None
         self._in_use_by_queue = None
         self._active_session_id = None
@@ -1578,8 +1591,29 @@ class YandexYnisonProvider(PluginProvider):
                 "Playback ended on player %s, clearing active player",
                 prev_player_id,
             )
+<<<<<<< provider
             if was_in_use:
                 self.mass.create_task(self.mass.players.cmd_stop(prev_player_id))
+||||||| upstream-base
+            if owner_player_id:
+                # give the source back as well as stopping: a session left on the player
+                # keeps it publishing this source, so its own queue stays unreachable
+                self.mass.create_task(self.mass.players.deselect_source(owner_player_id))
+=======
+            if owner_player_id:
+                # give the source back as well as stopping: a session left on the player
+                # keeps it publishing this source, so its own queue stays unreachable
+                self.mass.create_task(
+                    self.mass.players.deselect_source(
+                        owner_player_id,
+                        provider_instance_id=self.instance_id,
+                        source_id=AUDIO_SOURCE_ID,
+                        playback_session_id=(
+                            source_session.playback_session_id if source_session else None
+                        ),
+                    )
+                )
+>>>>>>> upstream-head
             self.mass.players.trigger_player_update(prev_player_id)
 
     # ------------------------------------------------------------------
