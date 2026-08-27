@@ -30,16 +30,10 @@ from music_assistant_models.media_items import AudioFormat, AudioSource
 from music_assistant_models.streamdetails import StreamDetails
 from ya_passport_auth import SecretStr
 
-<<<<<<< provider
-from music_assistant.helpers.throttle_retry import BYPASS_THROTTLER
-from provider.config_helpers import list_yandex_music_instances
-||||||| upstream-base
-from music_assistant.helpers.throttle_retry import BYPASS_THROTTLER, ThrottlerManager
-=======
 from music_assistant.controllers.streams.constants import STREAM_SLOT_PLAYBACK_WAIT_TIMEOUT
-from music_assistant.helpers.throttle_retry import BYPASS_THROTTLER, ThrottlerManager
+from music_assistant.helpers.throttle_retry import BYPASS_THROTTLER
 from music_assistant.models.music_provider import MusicProvider, ProviderStreamLimitError
->>>>>>> upstream-head
+from provider.config_helpers import list_yandex_music_instances
 from provider.constants import (
     CONF_ALLOW_PLAYER_SWITCH,
     CONF_DEVICE_ID,
@@ -2374,6 +2368,9 @@ class TestStreamTrackErrorHandling:
     async def test_stream_details_ma_error_ends_track(self) -> None:
         """An exhausted operational lookup stops the stream without yielding audio."""
         provider = _make_provider()
+        linked_provider = MagicMock()
+        _set_stream_owner(linked_provider)
+        provider._yandex_provider = linked_provider
         _stub_attr(
             provider,
             "_get_stream_details_with_retry",
@@ -2388,6 +2385,9 @@ class TestStreamTrackErrorHandling:
     async def test_unexpected_stream_details_error_propagates(self) -> None:
         """An internal lookup bug must not be converted into an ordinary stream end."""
         provider = _make_provider()
+        linked_provider = MagicMock()
+        _set_stream_owner(linked_provider)
+        provider._yandex_provider = linked_provider
         _stub_attr(
             provider,
             "_get_stream_details_with_retry",
@@ -2648,16 +2648,10 @@ class TestGetStreamDetailsWithRetry:
         sd = MagicMock()
         sd.expiration = 600
         sd.to_dict.return_value = {"track_id": "t1"}
-<<<<<<< provider
+        _set_stream_owner(mock_yp, sd)
         mock_yp.get_stream_details = AsyncMock(
             side_effect=[ResourceTemporarilyUnavailable("transient"), sd]
         )
-||||||| upstream-base
-        mock_yp.get_stream_details = AsyncMock(side_effect=[RuntimeError("transient"), sd])
-=======
-        _set_stream_owner(mock_yp, sd)
-        mock_yp.get_stream_details = AsyncMock(side_effect=[RuntimeError("transient"), sd])
->>>>>>> upstream-head
         provider._yandex_provider = mock_yp
 
         with patch("provider.provider.asyncio.sleep", new_callable=AsyncMock):
@@ -2669,16 +2663,10 @@ class TestGetStreamDetailsWithRetry:
         """Raises RetriesExhausted after all transient retries are exhausted."""
         provider = _make_provider()
         mock_yp = MagicMock()
-<<<<<<< provider
+        _set_stream_owner(mock_yp)
         mock_yp.get_stream_details = AsyncMock(
             side_effect=ResourceTemporarilyUnavailable("always fails")
         )
-||||||| upstream-base
-        mock_yp.get_stream_details = AsyncMock(side_effect=RuntimeError("always fails"))
-=======
-        _set_stream_owner(mock_yp)
-        mock_yp.get_stream_details = AsyncMock(side_effect=RuntimeError("always fails"))
->>>>>>> upstream-head
         provider._yandex_provider = mock_yp
 
         with (

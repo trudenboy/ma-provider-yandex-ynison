@@ -24,13 +24,10 @@ class YandexMusicProviderLike(Protocol):
     Only the subset of methods/properties used by the Ynison plugin.
     """
 
-<<<<<<< provider
     def get_quality(self) -> str:
         """Return the configured Yandex Music quality tier."""
         ...
 
-||||||| upstream-base
-=======
     @property
     def instance_id(self) -> str:
         """Return the exact linked provider instance ID."""
@@ -41,7 +38,6 @@ class YandexMusicProviderLike(Protocol):
         """Return whether the linked provider instance is available."""
         ...
 
->>>>>>> upstream-head
     async def get_stream_details(self, item_id: str, media_type: MediaType) -> StreamDetails:
         """Resolve stream details for a track."""
         ...

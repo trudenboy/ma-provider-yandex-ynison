@@ -837,16 +837,8 @@ class YandexYnisonProvider(PluginProvider):
         # stays throttled (see `_prefetch_format_for_track`).
         bypass_token = BYPASS_THROTTLER.set(True)
         try:
-<<<<<<< provider
-            stream_details = await self._get_stream_details_with_retry(track_id)
-        except MusicAssistantError:
-||||||| upstream-base
-            stream_details = await self._get_stream_details_with_retry(track_id)
-        except Exception:
-=======
             stream_details = await self._get_stream_details_with_retry(track_id, provider=provider)
-        except Exception:
->>>>>>> upstream-head
+        except MusicAssistantError:
             self.logger.exception("Failed to get stream details for track %s", track_id)
             self._stream_stop_event.set()
             return
@@ -990,15 +982,9 @@ class YandexYnisonProvider(PluginProvider):
                 return sd
             except asyncio.CancelledError:
                 raise
-<<<<<<< provider
-            except ResourceTemporarilyUnavailable as err:
-||||||| upstream-base
-            except Exception as err:
-=======
             except _StreamOwnerMismatchError:
                 raise
-            except Exception as err:
->>>>>>> upstream-head
+            except ResourceTemporarilyUnavailable as err:
                 last_err = err
                 if attempt < _API_MAX_RETRIES - 1:
                     jitter = backoff * random.uniform(0.75, 1.25)
