@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.2.0] - 2026-08-27
+
+### Changed
+
+- Audio-source controls now accept Music Assistant's current payload contract while preventing
+  boolean controls from being interpreted as zero- or one-second seeks.
+
+### Fixed
+
+- Ynison playback now uses the exact linked Yandex Music account's shared stream-capacity slot
+  and releases it immediately when the track, provider, or consuming stream changes.
+
 ## [4.1.2] - 2026-08-17
 
 ### Fixed
