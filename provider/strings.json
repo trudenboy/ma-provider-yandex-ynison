@@ -6,7 +6,10 @@
     },
     "mass_player_id": {
       "label": "[%key:common::config_entries::mass_player_id::label%]",
-      "description": "The Music Assistant player connected to this Ynison plugin. When playback is directed to this device in the Yandex Music app, the audio will play on the selected player."
+      "description": "The Music Assistant player connected to this Ynison plugin. When playback is directed to this device in the Yandex Music app, the audio will play on the selected player. Set to 'Auto' to automatically select a currently playing player.",
+      "options": {
+        "__auto__": "[%key:common::config_entries::mass_player_id::options::__auto__%]"
+      }
     },
     "allow_player_switch": {
       "label": "Allow manual player switching",
@@ -39,53 +42,23 @@
         "24": "24-bit"
       }
     },
+    "publish_name": {
+      "label": "Device name in Yandex Music",
+      "description": "How this device appears in the Yandex Music app."
+    },
     "device_id": {
       "label": "Device ID"
     }
   },
   "setup_flow": {
     "user": {
-<<<<<<< provider
       "title": "Configure Yandex Music Connect",
       "description": "Choose the Yandex Music account, target Music Assistant player, and device name published to the Yandex Music app."
-||||||| upstream-base
-      "title": "Yandex Music account",
-      "description": "Choose the Yandex Music account, target player and device name."
-=======
-      "title": "Yandex Music account",
-      "description": "Choose the Yandex Music account and the target player."
->>>>>>> upstream-head
     },
-<<<<<<< provider
     "abort": {
       "missing_dependency": "Configure and authenticate a Yandex Music provider before adding or reconfiguring Ynison."
-||||||| upstream-base
-    "scan_qr": {
-      "title": "Scan to sign in",
-      "description": "Scan the QR code with the Yandex app and confirm the login. A fresh code is shown automatically if it expires.",
-      "progress_text": "Waiting for you to scan and confirm in the Yandex app..."
-=======
-    "scan_qr": {
-      "title": "Scan to sign in",
-      "description": "Scan the QR code with the Yandex app and confirm the login. A fresh code is shown automatically if it expires.",
-      "progress_text": "Waiting for you to scan and confirm in the Yandex app..."
-    },
-    "abort": {
-      "no_players": "No players are available yet. Add a player to Music Assistant first, then try again."
->>>>>>> upstream-head
     }
   },
-<<<<<<< provider
-||||||| upstream-base
-  "errors": {
-    "no_music_token": "Login succeeded but Yandex returned no music token. Please try again."
-  },
-=======
-  "errors": {
-    "no_music_token": "Login succeeded but Yandex returned no music token. Please try again.",
-    "no_connected_player": "No connected Music Assistant player is configured. Run the setup again to select one."
-  },
->>>>>>> upstream-head
   "manifest": {
     "description": "Makes a Music Assistant player appear as a device in the Yandex Music app via the Ynison protocol."
   }
