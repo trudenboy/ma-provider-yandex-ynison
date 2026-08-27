@@ -460,8 +460,7 @@ class YandexYnisonProvider(PluginProvider):
             await self._on_previous()
         elif (
             action == SourceControl.SEEK
-            # tolerate float positions from internal callers; bool is an int
-            # subclass, so a misrouted toggle must not become a 1-second seek
+            # bool is an int subclass, so a toggle must not become a seek.
             and isinstance(value, (int, float))
             and not isinstance(value, bool)
         ):

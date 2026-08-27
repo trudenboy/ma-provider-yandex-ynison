@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -15,6 +15,7 @@ from music_assistant_models.enums import (
     PlaybackState,
     ProviderFeature,
     ProviderType,
+    SourceControl,
 )
 from music_assistant_models.errors import (
     LoginFailed,
@@ -1912,6 +1913,48 @@ def _mock_ynison(
 
 class TestPlaybackControls:
     """Tests for _on_play, _on_pause, _on_next, _on_previous, _on_seek."""
+
+    @pytest.mark.parametrize("value", [True, False])
+    async def test_source_control_does_not_treat_boolean_as_seek_position(
+        self, value: bool
+    ) -> None:
+        """A shuffle-style boolean payload must not become a zero/one-second seek."""
+        provider = _make_provider()
+        provider._actual_duration_ms = 200000
+        provider._seek_position_ms = 0
+        provider._track_changed_event.clear()
+        state = _make_ynison_state(progress_ms=5000, duration_ms=200000, paused=False)
+        mock_ynison = _mock_ynison(state)
+        provider._ynison = mock_ynison
+
+        await provider.on_source_control(AUDIO_SOURCE_ID, SourceControl.SEEK, value)
+
+        assert provider._seek_position_ms == 0
+        assert not provider._track_changed_event.is_set()
+        mock_ynison.update_playing_status.assert_not_awaited()
+
+    async def test_source_control_normalizes_float_seek_position(self) -> None:
+        """An internal fractional seek is truncated before reaching Ynison."""
+        provider = _make_provider()
+        provider._actual_duration_ms = 200000
+        provider._seek_position_ms = 0
+        state = _make_ynison_state(progress_ms=5000, duration_ms=200000, paused=False)
+        mock_ynison = _mock_ynison(state)
+        provider._ynison = mock_ynison
+
+        await provider.on_source_control(
+            AUDIO_SOURCE_ID,
+            SourceControl.SEEK,
+            cast("Any", 12.75),
+        )
+
+        assert provider._seek_position_ms == 12000
+        mock_ynison.update_playing_status.assert_awaited_once_with(
+            progress_ms=12000,
+            duration_ms=200000,
+            paused=False,
+            strict=True,
+        )
 
     async def test_on_play_sends_progress_unpaused(self) -> None:
         """_on_play sends update_playing_status with paused=False."""
