@@ -31,6 +31,7 @@ STREAM_MODE_MAX_QUALITY: Final[str] = "max_quality_dynamic"
 
 # Legacy sentinel and auth keys retained only to reject/clear old own-mode setup data.
 LEGACY_YM_INSTANCE_OWN: Final[str] = "__own__"
+LEGACY_AUTOMATIC_PLAYER: Final[str] = "__auto__"
 LEGACY_AUTH_KEYS: Final[tuple[str, ...]] = (
     "token",
     "x_token",

@@ -13,17 +13,19 @@ All notable changes to this project will be documented in this file.
 - Setup now requires a concrete Music Assistant player, and the device advertised to Yandex
   Music automatically follows that player's current name.
 
+### Removed
+
+- Removed automatic player selection and the free-form published-name setting. Existing
+  instances configured for automatic selection must choose a player once in setup.
+
 ### Fixed
 
 - Ynison playback now uses the exact linked Yandex Music account's shared stream-capacity slot
   and releases it immediately when the track, provider, or consuming stream changes.
 - Delayed Ynison cleanup is now scoped to its provider, source, and playback generation, so it
   cannot release a newer live-source session on the same player.
-
-### Removed
-
-- Removed automatic player selection and the free-form published-name setting. Existing
-  instances configured for automatic selection must choose a player once in setup.
+- Bridge-backed playback now remains attached to its owning player when switching is locked,
+  dynamic audio restarts, or progress metadata is refreshed.
 
 ## [4.1.2] - 2026-08-17
 
