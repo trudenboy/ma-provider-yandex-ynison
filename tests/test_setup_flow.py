@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
 import pytest
+from music_assistant_models.enums import PlayerType
 
 from music_assistant.models.setup_flow import (
     AbortFlow,
@@ -82,6 +83,8 @@ class _SetupSession(SetupSession):
 
     def set_players(self, players: list[Any]) -> None:
         """Configure the players returned by the Music Assistant fake."""
+        for player in players:
+            player.type = PlayerType.PLAYER
         self._mass_mock.players.all_players.return_value = players
 
 
@@ -112,6 +115,32 @@ async def test_single_yandex_music_instance_is_preselected_and_persisted() -> No
         CONF_MASS_PLAYER_ID: PLAYER_ID_AUTO,
         CONF_PUBLISH_NAME: DEFAULT_DISPLAY_NAME,
     }
+
+
+async def test_player_selector_preserves_auto_option() -> None:
+    """Upstream selector changes must not remove automatic player selection."""
+    session = _SetupSession(
+        {"ym-main": {"domain": "yandex_music", "name": "Primary"}},
+        {
+            CONF_YM_INSTANCE: "ym-main",
+            CONF_MASS_PLAYER_ID: PLAYER_ID_AUTO,
+            CONF_PUBLISH_NAME: DEFAULT_DISPLAY_NAME,
+        },
+    )
+    player = MagicMock()
+    player.player_id = "living-room"
+    player.display_name = "Living room"
+    session.set_players([player])
+
+    await run_setup(session)
+
+    selector = _entry(session, CONF_MASS_PLAYER_ID)
+    assert [option.value for option in selector.options] == [
+        PLAYER_ID_AUTO,
+        "living-room",
+    ]
+    assert selector.default_value == PLAYER_ID_AUTO
+    assert selector.value == PLAYER_ID_AUTO
 
 
 async def test_multiple_accounts_without_valid_prefill_require_explicit_selection() -> None:

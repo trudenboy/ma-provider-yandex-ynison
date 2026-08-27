@@ -24,6 +24,7 @@ from .constants import (
 if TYPE_CHECKING:
     from music_assistant_models.config_entries import ConfigValueType
 
+    from music_assistant.mass import MusicAssistant
     from music_assistant.models.setup_flow import SetupSession
 
 
@@ -60,12 +61,7 @@ async def run_setup(session: SetupSession) -> None:
         submitted = await session.form(
             [
                 _source_entry(selected_source, ym_instances),
-                create_player_selector(
-                    session.mass,
-                    CONF_MASS_PLAYER_ID,
-                    selected_player,
-                    PLAYER_ID_AUTO,
-                ),
+                _player_entry(session.mass, selected_player),
                 ConfigEntry(
                     key=CONF_PUBLISH_NAME,
                     type=ConfigEntryType.STRING,
@@ -109,3 +105,20 @@ def _source_entry(
             for instance_id, name in ym_instances
         ],
     )
+
+
+def _player_entry(mass: MusicAssistant, selected_player: str) -> ConfigEntry:
+    """Build a player selector while retaining the provider's automatic option."""
+    entry = create_player_selector(mass, CONF_MASS_PLAYER_ID, selected_player)
+    entry.options = [
+        ConfigValueOption(value=PLAYER_ID_AUTO),
+        *(option for option in entry.options if option.value != PLAYER_ID_AUTO),
+    ]
+    selected = (
+        selected_player
+        if any(option.value == selected_player for option in entry.options)
+        else PLAYER_ID_AUTO
+    )
+    entry.default_value = selected
+    entry.value = selected
+    return entry
