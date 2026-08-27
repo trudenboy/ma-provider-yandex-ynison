@@ -26,8 +26,8 @@ YnisonClient
   │
   ▼
 YandexYnisonProvider
-  ├─ setup-owned account/player/name
-  ├─ queue-scoped AudioSource ownership
+  ├─ setup-owned linked account and concrete player
+  ├─ player-owned AudioSource session
   ├─ Ynison ↔ Music Assistant controls and progress
   ├─ linked yandex_music StreamDetails/audio generator
   └─ RADIO queue replenishment
@@ -44,9 +44,9 @@ per-track ffmpeg → session-fixed PCM → Music Assistant player
 - **Single credential owner.** Yandex Music owns persistent `token` and
   `x_token` values. Ynison reads them through `get_setup_value` and never
   writes them back.
-- **Queue-scoped exclusivity.** `on_source_selected` claims
-  `_in_use_by_queue`; `stream_session_id` rejects teardown callbacks from
-  superseded same-queue requests.
+- **Player-owned exclusivity.** `on_source_selected` claims
+  `_in_use_by_player`; `playback_session_id` rejects teardown callbacks from
+  superseded requests on the same player.
 - **Side-effect-free stream details.** `get_stream_details(item_id,
   media_type)` does not claim playback ownership, so preload cannot reserve the
   source.
@@ -70,7 +70,7 @@ per-track ffmpeg → session-fixed PCM → Music Assistant player
 | File | Responsibility |
 |------|----------------|
 | `provider/__init__.py` | Provider setup entry point and supported features |
-| `provider/setup_flow.py` | Account, target player, and published-name setup/reconfigure |
+| `provider/setup_flow.py` | Linked account and required target-player setup/reconfigure |
 | `provider/credential_source.py` | Provider-local adapter for setup-owned Yandex Music credentials |
 | `provider/auth.py` | Temporary music-token refresh from an `x_token` |
 | `provider/provider.py` | AudioSource lifecycle, streaming, control sync, metadata, and queues |
@@ -90,13 +90,13 @@ The native setup flow stores these values in setup data:
 | Key | Meaning |
 |-----|---------|
 | `ym_instance` | Required linked Yandex Music provider instance |
-| `mass_player_id` | Target player or `__auto__` |
-| `publish_name` | Device title published to Yandex Music |
+| `mass_player_id` | Required concrete target player; its current name is advertised |
 
 With one Yandex Music instance, setup selects it automatically. With several,
 the user must choose. No configured Yandex Music provider aborts setup with
-`missing_dependency`. Reconfigure clears legacy auth keys rather than
-transferring credentials.
+`missing_dependency`; no available player aborts with `no_players`. Reconfigure
+clears legacy auth keys rather than transferring credentials. Legacy `__auto__`
+setups fail with `no_connected_player` until a concrete player is selected.
 
 ### Runtime values
 
@@ -155,7 +155,8 @@ confirm the next track.
 
 ## Playback and session ownership
 
-`on_source_selected` records queue, player, and request session id. Switching
+`on_source_selected` records the owning player, physical consumer, and playback
+session id. Switching
 players stops the previous player. When switching is disabled, a wrong-player
 selection is rejected and redirected at most once per idempotency window.
 

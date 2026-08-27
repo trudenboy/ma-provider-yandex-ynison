@@ -64,13 +64,15 @@ another player when manual switching is enabled.
 1. Configure and authenticate the Yandex Music provider in Music Assistant.
 2. Add **Yandex Music Connect (Ynison)**.
 3. Select the Yandex Music account that owns playback.
-4. Select a target player, or leave it on **Auto**.
-5. Choose the name published in the Yandex Music app.
-6. Save the setup and select the new device in Yandex Music.
+4. Select a target player. A concrete player is required; automatic selection
+   is intentionally unavailable.
+5. Save the setup and select the new device in Yandex Music. The advertised
+   device name follows the selected player's current name.
 
-Reconfigure the Ynison instance to change the linked account, target player, or
-published name. Legacy own-token/QR configurations are not migrated: reconfigure
-them and select a Yandex Music provider.
+Reconfigure the Ynison instance to change the linked account or target player.
+Rename the player in Music Assistant to change the name advertised in Yandex
+Music. Legacy own-token/QR configurations are not migrated: reconfigure them
+and select a Yandex Music provider.
 
 ## Runtime options
 

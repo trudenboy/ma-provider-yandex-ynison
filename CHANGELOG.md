@@ -10,6 +10,8 @@ All notable changes to this project will be documented in this file.
   boolean controls from being interpreted as zero- or one-second seeks.
 - Ynison now participates in Music Assistant's player-owned live-source lifecycle, preserving
   the player's existing queue when external playback starts and ends.
+- Setup now requires a concrete Music Assistant player, and the device advertised to Yandex
+  Music automatically follows that player's current name.
 
 ### Fixed
 
@@ -17,6 +19,11 @@ All notable changes to this project will be documented in this file.
   and releases it immediately when the track, provider, or consuming stream changes.
 - Delayed Ynison cleanup is now scoped to its provider, source, and playback generation, so it
   cannot release a newer live-source session on the same player.
+
+### Removed
+
+- Removed automatic player selection and the free-form published-name setting. Existing
+  instances configured for automatic selection must choose a player once in setup.
 
 ## [4.1.2] - 2026-08-17
 
