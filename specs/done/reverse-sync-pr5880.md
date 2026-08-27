@@ -38,13 +38,20 @@ Music Assistant's standalone Git package omits the provider requirements from
 `hass-client==1.3.0` workspace pin after `uv sync --frozen`. Upstream-layout CI
 already installs the complete requirements file.
 
+Current upstream CI also exposes the post-#6026 three-argument player-selector
+helper. The provider calls that stable subset and restores its temporary
+automatic-selection sentinel on the returned entry, keeping this port valid on
+both sides of the later setup-flow migration without absorbing that migration.
+
 ## Verification
 
-- RED: boolean payloads changed seek state and `12.75` remained fractional.
+- RED: boolean payloads changed seek state, `12.75` remained fractional, and
+  current Music Assistant rejected the old four-argument player selector.
 - GREEN: boolean payloads have no playback side effects and fractional seek is
-  sent as 12 seconds.
+  sent as 12 seconds; setup retains the automatic player option with both
+  player-selector APIs.
 - `uv lock --check`
-- `uv run pytest` — 338 tests
+- `uv run pytest` — 339 tests on the pinned baseline and current server source
 - `uv run ruff check provider tests`
 - `uv run ruff format --check provider tests`
 - `uv run mypy`
