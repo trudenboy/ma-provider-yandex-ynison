@@ -8,6 +8,8 @@ All notable changes to this project will be documented in this file.
 
 - Audio-source controls now accept Music Assistant's current payload contract while preventing
   boolean controls from being interpreted as zero- or one-second seeks.
+- Ynison now participates in Music Assistant's player-owned live-source lifecycle, preserving
+  the player's existing queue when external playback starts and ends.
 
 ### Fixed
 
