@@ -151,6 +151,9 @@ def _make_mock_mass() -> MagicMock:
     mass.players.cmd_play = AsyncMock()
     mass.players.cmd_volume_set = AsyncMock()
     mass.players.trigger_player_update = MagicMock()
+    mass.players.get_audio_source_session.return_value = MagicMock(
+        playback_session_id="playback-session"
+    )
 
     # Player queues
     mass.player_queues.play_media = AsyncMock()
@@ -548,10 +551,18 @@ class TestClearActivePlayer:
         provider = _make_provider()
         provider._active_player_id = "some-player"
         provider._in_use_by_player = "some-player"
+        provider.mass.players.get_audio_source_session.return_value.playback_session_id = (
+            "generation-7"
+        )
 
         provider._clear_active_player()
 
-        provider.mass.players.deselect_source.assert_called_once_with("some-player")
+        provider.mass.players.deselect_source.assert_called_once_with(
+            "some-player",
+            provider_instance_id=provider.instance_id,
+            source_id=AUDIO_SOURCE_ID,
+            playback_session_id="generation-7",
+        )
 
     def test_the_owner_is_released_not_the_consuming_player(self) -> None:
         """The session hangs off the owner, which is not who consumed the audio."""
@@ -562,7 +573,12 @@ class TestClearActivePlayer:
 
         provider._clear_active_player()
 
-        provider.mass.players.deselect_source.assert_called_once_with("owner-player")
+        provider.mass.players.deselect_source.assert_called_once_with(
+            "owner-player",
+            provider_instance_id=provider.instance_id,
+            source_id=AUDIO_SOURCE_ID,
+            playback_session_id="playback-session",
+        )
 
     def test_nothing_is_released_when_the_source_was_not_in_use(self) -> None:
         """No owner means no session to give back."""
@@ -573,6 +589,22 @@ class TestClearActivePlayer:
         provider._clear_active_player()
 
         provider.mass.players.deselect_source.assert_not_called()
+
+    def test_missing_generation_is_forwarded_as_guarded_noop(self) -> None:
+        """The controller receives an empty generation instead of an unscoped release."""
+        provider = _make_provider()
+        provider._active_player_id = "some-player"
+        provider._in_use_by_player = "some-player"
+        provider.mass.players.get_audio_source_session.return_value = None
+
+        provider._clear_active_player()
+
+        provider.mass.players.deselect_source.assert_called_once_with(
+            "some-player",
+            provider_instance_id=provider.instance_id,
+            source_id=AUDIO_SOURCE_ID,
+            playback_session_id=None,
+        )
 
 
 # ------------------------------------------------------------------
