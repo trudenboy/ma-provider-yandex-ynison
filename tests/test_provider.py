@@ -523,10 +523,17 @@ class TestSourceSelection:
             "base-player",
             "session_1",
         )
+        await provider.on_source_selected(
+            "main",
+            "spb_base-player",
+            "base-player",
+            "session_2",
+        )
 
         mass.player_queues.play_media.assert_not_awaited()
         assert provider._active_player_id == "spb_base-player"
         assert provider._in_use_by_player == "base-player"
+        assert provider._active_session_id == "session_2"
 
     async def test_known_failure_stopping_previous_player_keeps_selection(self) -> None:
         """A typed player-command failure must not block a new source selection."""
@@ -3705,7 +3712,7 @@ class TestDynamicSessionCoordinator:
         provider = _make_provider("base-player")
         self._enable(provider, [(96_000, 24)])
         provider._active_player_id = "spb_base-player"
-        provider._in_use_by_player = "base-player"
+        provider._in_use_by_player = None
         provider.mass.players.get_player.return_value = MagicMock()
         schedule = MagicMock()
         _stub_attr(provider, "_schedule_dynamic_launch", schedule)

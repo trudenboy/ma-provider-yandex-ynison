@@ -706,25 +706,25 @@ class YandexYnisonProvider(PluginProvider):
 
         # Check if manual player switching is allowed
         if not self._allow_player_switch:
-            current_target = self._get_target_player_id()
-            if owner_player_id != current_target and current_target:
+            locked_owner_id = self._default_player_id
+            if owner_player_id != locked_owner_id:
                 # Redirect to the configured target, but only once per
-                # idempotency window. The target may be a sendspin bridge /
-                # sync-group whose stream is consumed under a player id that
-                # never equals `current_target`, so each redirect re-triggers
-                # selection here. Re-issuing `play_media` on every rejection
-                # turns that into an unbounded AudioError storm; the raise
-                # below still aborts every wrong-player stream regardless.
-                if self._idempotent("source_redirect", current_target):
+                # idempotency window. Compare stable owner ids here: the
+                # physical consumer may be a bridge whose id differs from the
+                # configured owner and may already be `_active_player_id` on a
+                # repeated callback.
+                if self.mass.players.get_player(locked_owner_id) and self._idempotent(
+                    "source_redirect", locked_owner_id
+                ):
                     self.logger.debug(
                         "Player switching disabled, redirecting selection from %s to %s",
                         player_id,
-                        current_target,
+                        locked_owner_id,
                     )
                     await self.mass.player_queues.play_media(
-                        current_target, str(self._audio_source.uri)
+                        locked_owner_id, str(self._audio_source.uri)
                     )
-                msg = f"Player switching is disabled; source must remain on {current_target}"
+                msg = f"Player switching is disabled; source must remain on {locked_owner_id}"
                 # NOTE: Using RuntimeError as a temporary workaround until
                 # music-assistant/server updates the AudioSource lifecycle
                 # contract to accept ActionUnavailable in addition to RuntimeError
@@ -1223,7 +1223,7 @@ class YandexYnisonProvider(PluginProvider):
         if not target_player_id:
             self.logger.warning("Ynison active on our device but no MA player available")
             return
-        owner_player_id = self._in_use_by_player or target_player_id
+        owner_player_id = self._in_use_by_player or self._default_player_id
 
         # Resume after pause / fresh start: either signal triggers
         # play_media below. `_externally_paused` survives a stray stop-event
