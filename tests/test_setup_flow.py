@@ -14,17 +14,20 @@ from music_assistant.models.setup_flow import (
     SetupFlowError,
     SetupSession,
 )
-from provider.constants import (
-    CONF_MASS_PLAYER_ID,
-    CONF_PUBLISH_NAME,
-    CONF_YM_INSTANCE,
-    DEFAULT_DISPLAY_NAME,
-    PLAYER_ID_AUTO,
-)
+from provider.constants import CONF_MASS_PLAYER_ID, CONF_YM_INSTANCE, LEGACY_AUTH_KEYS
 from provider.setup_flow import run_setup
 
 if TYPE_CHECKING:
     from music_assistant_models.config_entries import ConfigEntry, ConfigValueType
+
+
+def _player(player_id: str = "living-room", name: str = "Living room") -> MagicMock:
+    """Return a real-player-shaped setup option."""
+    player = MagicMock()
+    player.player_id = player_id
+    player.display_name = name
+    player.type = PlayerType.PLAYER
+    return player
 
 
 class _SetupSession(SetupSession):
@@ -35,13 +38,16 @@ class _SetupSession(SetupSession):
         providers: dict[str, dict[str, Any]],
         submitted: dict[str, ConfigValueType],
         *,
+        players: list[Any] | None = None,
         values: dict[str, ConfigValueType] | None = None,
         setup_data: dict[str, ConfigValueType] | None = None,
     ) -> None:
         self._mass_mock = MagicMock()
         self.mass = self._mass_mock
         self._mass_mock.config.get.return_value = providers
-        self._mass_mock.players.all_players.return_value = []
+        self._mass_mock.players.all_players.return_value = (
+            [_player()] if players is None else players
+        )
         self.context = SetupFlowContext(
             kind="setup",
             reason="user",
@@ -81,26 +87,65 @@ class _SetupSession(SetupSession):
         self.finished_values = values
         return {"instance_id": "ynison-test"}
 
-    def set_players(self, players: list[Any]) -> None:
-        """Configure the players returned by the Music Assistant fake."""
-        for player in players:
-            player.type = PlayerType.PLAYER
-        self._mass_mock.players.all_players.return_value = players
-
 
 def _entry(session: _SetupSession, key: str) -> Any:
     return next(entry for entry in session.entries if entry.key == key)
 
 
-async def test_single_yandex_music_instance_is_preselected_and_persisted() -> None:
-    """Removing the single-account default must not make simple setup ambiguous."""
+async def test_setup_collects_only_linked_account_and_concrete_player() -> None:
+    """The final form must not expose Auto, a free-form name, or own authentication."""
     session = _SetupSession(
         {"ym-main": {"domain": "yandex_music", "name": "Primary"}},
-        {
-            CONF_YM_INSTANCE: "ym-main",
-            CONF_MASS_PLAYER_ID: PLAYER_ID_AUTO,
-            CONF_PUBLISH_NAME: DEFAULT_DISPLAY_NAME,
-        },
+        {CONF_YM_INSTANCE: "ym-main", CONF_MASS_PLAYER_ID: "living-room"},
+    )
+
+    await run_setup(session)
+
+    assert {entry.key for entry in session.entries} == {
+        CONF_YM_INSTANCE,
+        CONF_MASS_PLAYER_ID,
+    }
+    selector = _entry(session, CONF_MASS_PLAYER_ID)
+    assert selector.required is True
+    assert [option.value for option in selector.options] == ["living-room"]
+    assert selector.value is None
+    assert selector.value != "__auto__"
+    assert session.form_kwargs["last_step"] is True
+    assert session.finished_values == {
+        CONF_YM_INSTANCE: "ym-main",
+        CONF_MASS_PLAYER_ID: "living-room",
+    }
+
+
+async def test_no_players_aborts_before_rendering_setup() -> None:
+    """A provider instance cannot be created without a concrete target player."""
+    session = _SetupSession(
+        {"ym-main": {"domain": "yandex_music", "name": "Primary"}},
+        {},
+        players=[],
+    )
+
+    with pytest.raises(AbortFlow) as err:
+        await run_setup(session)
+
+    assert err.value.reason == "no_players"
+
+
+async def test_no_yandex_music_instance_aborts_as_missing_dependency() -> None:
+    """An authenticated linked account remains a hard setup dependency."""
+    session = _SetupSession({}, {})
+
+    with pytest.raises(AbortFlow) as err:
+        await run_setup(session)
+
+    assert err.value.reason == "missing_dependency"
+
+
+async def test_single_yandex_music_instance_is_preselected() -> None:
+    """A sole linked account is selected without introducing another auth path."""
+    session = _SetupSession(
+        {"ym-main": {"domain": "yandex_music", "name": "Primary"}},
+        {CONF_YM_INSTANCE: "ym-main", CONF_MASS_PLAYER_ID: "living-room"},
     )
 
     await run_setup(session)
@@ -109,52 +154,16 @@ async def test_single_yandex_music_instance_is_preselected_and_persisted() -> No
     assert source.default_value == "ym-main"
     assert source.value == "ym-main"
     assert [option.value for option in source.options] == ["ym-main"]
-    assert session.form_kwargs["last_step"] is True
-    assert session.finished_values == {
-        CONF_YM_INSTANCE: "ym-main",
-        CONF_MASS_PLAYER_ID: PLAYER_ID_AUTO,
-        CONF_PUBLISH_NAME: DEFAULT_DISPLAY_NAME,
-    }
 
 
-async def test_player_selector_preserves_auto_option() -> None:
-    """Upstream selector changes must not remove automatic player selection."""
-    session = _SetupSession(
-        {"ym-main": {"domain": "yandex_music", "name": "Primary"}},
-        {
-            CONF_YM_INSTANCE: "ym-main",
-            CONF_MASS_PLAYER_ID: PLAYER_ID_AUTO,
-            CONF_PUBLISH_NAME: DEFAULT_DISPLAY_NAME,
-        },
-    )
-    player = MagicMock()
-    player.player_id = "living-room"
-    player.display_name = "Living room"
-    session.set_players([player])
-
-    await run_setup(session)
-
-    selector = _entry(session, CONF_MASS_PLAYER_ID)
-    assert [option.value for option in selector.options] == [
-        PLAYER_ID_AUTO,
-        "living-room",
-    ]
-    assert selector.default_value == PLAYER_ID_AUTO
-    assert selector.value == PLAYER_ID_AUTO
-
-
-async def test_multiple_accounts_without_valid_prefill_require_explicit_selection() -> None:
-    """Defaulting to the first account must not silently switch a user's identity."""
+async def test_multiple_accounts_require_an_explicit_valid_selection() -> None:
+    """A stale legacy source must not silently select the first linked account."""
     session = _SetupSession(
         {
             "ym-a": {"domain": "yandex_music", "name": "A"},
             "ym-b": {"domain": "yandex_music", "name": "B"},
         },
-        {
-            CONF_YM_INSTANCE: "ym-b",
-            CONF_MASS_PLAYER_ID: PLAYER_ID_AUTO,
-            CONF_PUBLISH_NAME: DEFAULT_DISPLAY_NAME,
-        },
+        {CONF_YM_INSTANCE: "ym-b", CONF_MASS_PLAYER_ID: "living-room"},
         setup_data={CONF_YM_INSTANCE: "__own__"},
     )
 
@@ -168,12 +177,12 @@ async def test_multiple_accounts_without_valid_prefill_require_explicit_selectio
     assert session.finished_values[CONF_YM_INSTANCE] == "ym-b"
 
 
-async def test_reconfigure_preserves_valid_identity_and_nulls_legacy_secrets() -> None:
-    """Leaving legacy values intact must not preserve a second credential owner."""
+async def test_reconfigure_clears_legacy_auth_and_drops_legacy_identity() -> None:
+    """Reconfigure must leave exactly one credential owner and player-derived identity."""
     setup_data: dict[str, ConfigValueType] = {
         CONF_YM_INSTANCE: "ym-main",
         CONF_MASS_PLAYER_ID: "living-room",
-        CONF_PUBLISH_NAME: "Living room",
+        "publish_name": "Old free-form name",
         "token": "old-music-token",
         "x_token": "old-x-token",
         "account_login": "alice",
@@ -181,68 +190,34 @@ async def test_reconfigure_preserves_valid_identity_and_nulls_legacy_secrets() -
     }
     session = _SetupSession(
         {"ym-main": {"domain": "yandex_music", "name": "Primary"}},
-        {
-            CONF_YM_INSTANCE: "ym-main",
-            CONF_MASS_PLAYER_ID: "living-room",
-            CONF_PUBLISH_NAME: "Living room",
-        },
+        {CONF_YM_INSTANCE: "ym-main", CONF_MASS_PLAYER_ID: "living-room"},
         setup_data=setup_data,
     )
-    player = MagicMock()
-    player.player_id = "living-room"
-    player.display_name = "Living room"
-    session.set_players([player])
 
     await run_setup(session)
 
     assert _entry(session, CONF_YM_INSTANCE).value == "ym-main"
     assert _entry(session, CONF_MASS_PLAYER_ID).value == "living-room"
-    assert _entry(session, CONF_PUBLISH_NAME).value == "Living room"
-    assert session.finished_values is not None
-    for key in ("token", "x_token", "account_login", "remember_session"):
-        assert session.finished_values[key] is None
+    assert session.finished_values == {
+        CONF_YM_INSTANCE: "ym-main",
+        CONF_MASS_PLAYER_ID: "living-room",
+        **dict.fromkeys(LEGACY_AUTH_KEYS),
+    }
 
 
 async def test_new_setup_does_not_persist_legacy_auth_keys() -> None:
-    """Always writing legacy nulls must not pollute setup data for new instances."""
+    """New instances must persist only the linked account and concrete player."""
     session = _SetupSession(
         {"ym-main": {"domain": "yandex_music", "name": "Primary"}},
-        {
-            CONF_YM_INSTANCE: "ym-main",
-            CONF_MASS_PLAYER_ID: PLAYER_ID_AUTO,
-            CONF_PUBLISH_NAME: DEFAULT_DISPLAY_NAME,
-        },
+        {CONF_YM_INSTANCE: "ym-main", CONF_MASS_PLAYER_ID: "living-room"},
     )
 
     await run_setup(session)
 
-    assert session.finished_values is not None
-    assert (
-        not {
-            "token",
-            "x_token",
-            "account_login",
-            "remember_session",
-        }
-        & session.finished_values.keys()
-    )
-
-
-async def test_no_yandex_music_instance_aborts_as_missing_dependency() -> None:
-    """Rendering an empty account picker must not create an unusable Ynison instance."""
-    session = _SetupSession(
-        {},
-        {
-            CONF_YM_INSTANCE: "unused",
-            CONF_MASS_PLAYER_ID: PLAYER_ID_AUTO,
-            CONF_PUBLISH_NAME: DEFAULT_DISPLAY_NAME,
-        },
-    )
-
-    with pytest.raises(AbortFlow) as err:
-        await run_setup(session)
-
-    assert err.value.reason == "missing_dependency"
+    assert session.finished_values == {
+        CONF_YM_INSTANCE: "ym-main",
+        CONF_MASS_PLAYER_ID: "living-room",
+    }
 
 
 async def test_disabled_yandex_music_instances_are_not_linkable() -> None:
@@ -260,11 +235,7 @@ async def test_disabled_yandex_music_instances_are_not_linkable() -> None:
                 "enabled": True,
             },
         },
-        {
-            CONF_YM_INSTANCE: "ym-enabled",
-            CONF_MASS_PLAYER_ID: PLAYER_ID_AUTO,
-            CONF_PUBLISH_NAME: DEFAULT_DISPLAY_NAME,
-        },
+        {CONF_YM_INSTANCE: "ym-enabled", CONF_MASS_PLAYER_ID: "living-room"},
     )
 
     await run_setup(session)
@@ -274,21 +245,8 @@ async def test_disabled_yandex_music_instances_are_not_linkable() -> None:
     assert source.value == "ym-enabled"
 
 
-async def test_only_disabled_yandex_music_instances_abort_setup() -> None:
-    """Setup must stop when every possible credential owner is disabled."""
-    session = _SetupSession(
-        {"ym-disabled": {"domain": "yandex_music", "enabled": False}},
-        {},
-    )
-
-    with pytest.raises(AbortFlow) as err:
-        await run_setup(session)
-
-    assert err.value.reason == "missing_dependency"
-
-
 async def test_finish_error_reopens_form_with_preserved_values() -> None:
-    """Letting a load failure escape must not discard the user's linked-account choice."""
+    """A load failure must not discard the linked-account or player selection."""
 
     class RetrySession(_SetupSession):
         attempts = 0
@@ -301,38 +259,12 @@ async def test_finish_error_reopens_form_with_preserved_values() -> None:
 
     session = RetrySession(
         {"ym-main": {"domain": "yandex_music", "name": "Primary"}},
-        {
-            CONF_YM_INSTANCE: "ym-main",
-            CONF_MASS_PLAYER_ID: PLAYER_ID_AUTO,
-            CONF_PUBLISH_NAME: "Kitchen",
-        },
+        {CONF_YM_INSTANCE: "ym-main", CONF_MASS_PLAYER_ID: "living-room"},
     )
 
     await run_setup(session)
 
     assert session.attempts == 2
     assert session.shown_errors == [None, {"base": "invalid_auth"}]
-    assert session.finished_values is not None
-    assert session.finished_values[CONF_PUBLISH_NAME] == "Kitchen"
-
-
-async def test_legacy_player_and_display_name_are_preserved() -> None:
-    """Removing the old aliases must not reset non-auth identity during reconfigure."""
-    session = _SetupSession(
-        {"ym-main": {"domain": "yandex_music", "name": "Primary"}},
-        {
-            CONF_YM_INSTANCE: "ym-main",
-            CONF_MASS_PLAYER_ID: "kitchen",
-            CONF_PUBLISH_NAME: "Old kitchen",
-        },
-        values={"player": "kitchen", "display_name": "Old kitchen"},
-    )
-    player = MagicMock()
-    player.player_id = "kitchen"
-    player.display_name = "Kitchen"
-    session.set_players([player])
-
-    await run_setup(session)
-
-    assert _entry(session, CONF_MASS_PLAYER_ID).value == "kitchen"
-    assert _entry(session, CONF_PUBLISH_NAME).value == "Old kitchen"
+    assert _entry(session, CONF_YM_INSTANCE).value == "ym-main"
+    assert _entry(session, CONF_MASS_PLAYER_ID).value == "living-room"

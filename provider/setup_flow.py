@@ -13,23 +13,22 @@ from music_assistant.models.setup_flow import AbortFlow, SetupFlowError
 from .config_helpers import list_yandex_music_instances
 from .constants import (
     CONF_MASS_PLAYER_ID,
-    CONF_PUBLISH_NAME,
     CONF_YM_INSTANCE,
-    DEFAULT_DISPLAY_NAME,
     LEGACY_AUTH_KEYS,
     LEGACY_YM_INSTANCE_OWN,
-    PLAYER_ID_AUTO,
 )
 
 if TYPE_CHECKING:
     from music_assistant_models.config_entries import ConfigValueType
 
-    from music_assistant.mass import MusicAssistant
     from music_assistant.models.setup_flow import SetupSession
 
 
 async def run_setup(session: SetupSession) -> None:
-    """Collect the linked Yandex Music instance and Ynison device identity."""
+    """Collect the linked Yandex Music instance and concrete target player."""
+    if not session.mass.players.all_players(False, False):
+        raise AbortFlow("no_players")
+
     ym_instances = list_yandex_music_instances(session.mass)
     if not ym_instances:
         raise AbortFlow("missing_dependency")
@@ -46,12 +45,7 @@ async def run_setup(session: SetupSession) -> None:
         if len(ym_instances) == 1
         else None
     )
-    selected_player = str(
-        prefill.get(CONF_MASS_PLAYER_ID) or prefill.get("player") or PLAYER_ID_AUTO
-    )
-    selected_name = str(
-        prefill.get(CONF_PUBLISH_NAME) or prefill.get("display_name") or DEFAULT_DISPLAY_NAME
-    )
+    selected_player = prefill.get(CONF_MASS_PLAYER_ID) or prefill.get("player")
     legacy_present = existing_source == LEGACY_YM_INSTANCE_OWN or any(
         key in setup_data or key in original_values for key in LEGACY_AUTH_KEYS
     )
@@ -61,14 +55,7 @@ async def run_setup(session: SetupSession) -> None:
         submitted = await session.form(
             [
                 _source_entry(selected_source, ym_instances),
-                _player_entry(session.mass, selected_player),
-                ConfigEntry(
-                    key=CONF_PUBLISH_NAME,
-                    type=ConfigEntryType.STRING,
-                    required=True,
-                    default_value=selected_name,
-                    value=selected_name,
-                ),
+                create_player_selector(session.mass, CONF_MASS_PLAYER_ID, selected_player),
             ],
             step_id="user",
             errors=errors,
@@ -76,9 +63,10 @@ async def run_setup(session: SetupSession) -> None:
         )
         selected_source = str(submitted[CONF_YM_INSTANCE])
         selected_player = str(submitted[CONF_MASS_PLAYER_ID])
-        selected_name = str(submitted[CONF_PUBLISH_NAME])
-        collected = dict(setup_data)
-        collected.update(submitted)
+        collected: dict[str, ConfigValueType] = {
+            CONF_YM_INSTANCE: selected_source,
+            CONF_MASS_PLAYER_ID: selected_player,
+        }
         if legacy_present:
             collected.update(dict.fromkeys(LEGACY_AUTH_KEYS))
         try:
@@ -105,20 +93,3 @@ def _source_entry(
             for instance_id, name in ym_instances
         ],
     )
-
-
-def _player_entry(mass: MusicAssistant, selected_player: str) -> ConfigEntry:
-    """Build a player selector while retaining the provider's automatic option."""
-    entry = create_player_selector(mass, CONF_MASS_PLAYER_ID, selected_player)
-    entry.options = [
-        ConfigValueOption(value=PLAYER_ID_AUTO),
-        *(option for option in entry.options if option.value != PLAYER_ID_AUTO),
-    ]
-    selected = (
-        selected_player
-        if any(option.value == selected_player for option in entry.options)
-        else PLAYER_ID_AUTO
-    )
-    entry.default_value = selected
-    entry.value = selected
-    return entry

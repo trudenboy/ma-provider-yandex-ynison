@@ -17,7 +17,6 @@ from music_assistant_models.enums import (
     ContentType,
     EventType,
     MediaType,
-    PlaybackState,
     ProviderFeature,
     ProviderType,
     SourceControl,
@@ -31,6 +30,7 @@ from music_assistant_models.errors import (
     PlayerCommandFailed,
     ResourceTemporarilyUnavailable,
     RetriesExhausted,
+    SetupFailedError,
     UnsupportedFeaturedException,
 )
 from music_assistant_models.media_items import AudioSource, ProviderMapping
@@ -49,13 +49,11 @@ from .constants import (
     CONF_MASS_PLAYER_ID,
     CONF_OUTPUT_BIT_DEPTH,
     CONF_OUTPUT_SAMPLE_RATE,
-    CONF_PUBLISH_NAME,
     CONF_STREAM_MODE,
     CONF_YM_INSTANCE,
     DEFAULT_DISPLAY_NAME,
     LEGACY_YM_INSTANCE_OWN,
     OUTPUT_AUTO,
-    PLAYER_ID_AUTO,
     STREAM_MODE_MAX_QUALITY,
     STREAM_MODE_STABLE,
     YANDEX_MUSIC_LOSSLESS_QUALITIES,
@@ -174,12 +172,6 @@ class YandexYnisonProvider(PluginProvider):
     _dynamic_session_ended_event: asyncio.Event
     _dynamic_session_ended_at: float | None
 
-    @property
-    def instance_name_postfix(self) -> str | None:
-        """Return display name as instance postfix for multi-instance setups."""
-        name = self._display_name
-        return name if name != DEFAULT_DISPLAY_NAME else None
-
     def __init__(
         self,
         mass: MusicAssistant,
@@ -191,9 +183,9 @@ class YandexYnisonProvider(PluginProvider):
         super().__init__(mass, manifest, config, supported_features)
 
         # Setup-owned identity
-        self._default_player_id: str = (
-            cast("str", self.get_setup_value(CONF_MASS_PLAYER_ID)) or PLAYER_ID_AUTO
-        )
+        self._default_player_id: str = cast("str", self.get_setup_value(CONF_MASS_PLAYER_ID)) or ""
+        # Snapshot of the display name used by the active Ynison connection.
+        self._advertised_name: str | None = None
         allow_switch_value = self.config.get_value(CONF_ALLOW_PLAYER_SWITCH)
         self._allow_player_switch: bool = (
             cast("bool", allow_switch_value) if allow_switch_value is not None else True
@@ -208,10 +200,6 @@ class YandexYnisonProvider(PluginProvider):
         self._requested_stream_mode: str = requested_stream_mode or STREAM_MODE_STABLE
         self._effective_stream_mode: str = STREAM_MODE_STABLE
         self._stream_mode_warning_emitted = False
-        self._display_name: str = (
-            cast("str", self.get_setup_value(CONF_PUBLISH_NAME)) or DEFAULT_DISPLAY_NAME
-        )
-
         ym_instance_value = cast("str | None", self.get_setup_value(CONF_YM_INSTANCE))
         if not ym_instance_value or ym_instance_value == LEGACY_YM_INSTANCE_OWN:
             raise LoginFailed(
@@ -367,15 +355,22 @@ class YandexYnisonProvider(PluginProvider):
 
     async def handle_async_init(self) -> None:
         """Handle async initialization of the provider."""
+        if not self._default_player_id or self._default_player_id == "__auto__":
+            raise SetupFailedError(
+                "No connected Music Assistant player is configured",
+                translation_key="no_connected_player",
+                translation_owner=self.translation_owner,
+            )
         self.logger.info(
             "Using credentials from yandex_music instance '%s'",
             self._ym_instance_id,
         )
         token = await self._resolve_token()
 
+        self._advertised_name = self._display_name
         device_info = YnisonDeviceInfo(
             device_id=self._device_id,
-            title=self._display_name,
+            title=self._advertised_name,
         )
 
         self._ynison = YnisonClient(
@@ -394,6 +389,19 @@ class YandexYnisonProvider(PluginProvider):
             self.mass.subscribe(
                 self._on_provider_event,
                 EventType.PROVIDERS_UPDATED,
+            )
+        )
+        # Ynison snapshots its advertised name at connection time, so reload
+        # when the configured player's effective display name changes.
+        self._on_unload_callbacks.append(
+            self.mass.subscribe(
+                self._on_connected_player_event,
+                (
+                    EventType.PLAYER_ADDED,
+                    EventType.PLAYER_CONFIG_UPDATED,
+                    EventType.PLAYER_UPDATED,
+                ),
+                id_filter=self._default_player_id,
             )
         )
         # Initial check for matching provider
@@ -1504,6 +1512,28 @@ class YandexYnisonProvider(PluginProvider):
     # Player selection
     # ------------------------------------------------------------------
 
+    async def _on_connected_player_event(self, event: MassEvent) -> None:
+        """Reload when the connected player's effective display name changed."""
+        del event
+        if self._advertised_name is None or self._display_name == self._advertised_name:
+            return
+        self.logger.info(
+            "Connected player was renamed; reloading to re-advertise as '%s'",
+            self._display_name,
+        )
+        task_id = f"load_provider_{self.instance_id}"
+        self.mass.call_later(1, self.mass.load_provider_config, self.config, task_id=task_id)
+
+    @property
+    def _display_name(self) -> str:
+        """Return the connected player's current or stored display name."""
+        if player := self.mass.players.get_player(self._default_player_id):
+            return str(player.display_name)
+        stored_name = self.mass.config.get_raw_player_config_value(
+            self._default_player_id, "name"
+        ) or self.mass.config.get_raw_player_config_value(self._default_player_id, "default_name")
+        return stored_name if isinstance(stored_name, str) and stored_name else DEFAULT_DISPLAY_NAME
+
     def _get_target_player_id(self) -> str | None:
         """Determine the target player ID for playback."""
         # If there's an active player, validate it still exists
@@ -1512,20 +1542,7 @@ class YandexYnisonProvider(PluginProvider):
                 return self._active_player_id
             self._active_player_id = None
 
-        # Auto selection
-        if self._default_player_id == PLAYER_ID_AUTO:
-            all_players = list(self.mass.players.all_players(False, False))
-            # Prefer currently playing player
-            for player in all_players:
-                if player.state.playback_state == PlaybackState.PLAYING:
-                    self.logger.debug("Auto-selecting playing player: %s", player.display_name)
-                    return str(player.player_id)
-            # Fallback to first available
-            if all_players:
-                return str(all_players[0].player_id)
-            return None
-
-        # Specific configured player
+        # The configured player is mandatory; never redirect to another player.
         if self.mass.players.get_player(self._default_player_id):
             return self._default_player_id
 
