@@ -15,6 +15,8 @@ All notable changes to this project will be documented in this file.
 
 - Ynison playback now uses the exact linked Yandex Music account's shared stream-capacity slot
   and releases it immediately when the track, provider, or consuming stream changes.
+- Delayed Ynison cleanup is now scoped to its provider, source, and playback generation, so it
+  cannot release a newer live-source session on the same player.
 
 ## [4.1.2] - 2026-08-17
 
@@ -968,4 +970,3 @@ toggle restarted the track at 0".
 - Reconnection with exponential backoff
 - Cover art display from Ynison state
 - Docker Compose dev environment for local testing
-- Reverse-synced upstream PR #5944 (WIP)
