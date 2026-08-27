@@ -485,7 +485,7 @@ class TestSourceSelection:
         assert provider._active_session_id == "session_1"
 
     async def test_bridge_selection_does_not_stop_its_own_queue_player(self) -> None:
-        """Selecting a bridge consumer for the same queue must leave playback running."""
+        """Selecting a bridge consumer for the same owner must leave playback running."""
         provider = _make_provider()
         provider._active_player_id = "base-player"
 
@@ -497,6 +497,34 @@ class TestSourceSelection:
         )
 
         provider.mass.players.cmd_stop.assert_not_awaited()
+        assert provider._active_player_id == "spb_base-player"
+        assert provider._in_use_by_player == "base-player"
+
+    async def test_bridge_owner_is_allowed_when_player_switching_is_disabled(self) -> None:
+        """A configured owner remains valid when its physical consumer is a bridge."""
+        mass = _make_mock_mass()
+        config = _make_mock_config(
+            {
+                CONF_ALLOW_PLAYER_SWITCH: False,
+                CONF_MASS_PLAYER_ID: "base-player",
+            }
+        )
+        provider = YandexYnisonProvider(
+            mass,
+            _make_mock_manifest(),
+            config,
+            {ProviderFeature.AUDIO_SOURCE},
+        )
+        mass.players.get_player.return_value = MagicMock()
+
+        await provider.on_source_selected(
+            "main",
+            "spb_base-player",
+            "base-player",
+            "session_1",
+        )
+
+        mass.player_queues.play_media.assert_not_awaited()
         assert provider._active_player_id == "spb_base-player"
         assert provider._in_use_by_player == "base-player"
 
@@ -3370,7 +3398,7 @@ class TestDynamicSessionCoordinator:
         return details
 
     async def test_mixed_format_transition_restarts_once_after_applying_format(self) -> None:
-        """A changed signature must be installed before exactly one same-queue restart."""
+        """A changed signature must be installed before exactly one same-owner restart."""
         provider = _make_provider()
         self._enable(provider, [(44_100, 16), (96_000, 24)])
         provider._dynamic_session_signature = (ContentType.PCM_S16LE, 44_100, 16, 2)
@@ -3672,6 +3700,21 @@ class TestDynamicSessionCoordinator:
 
         assert launches == ["track42"]
 
+    async def test_dynamic_launch_keeps_owner_when_consumer_is_a_bridge(self) -> None:
+        """Dynamic work must target the stable owner rather than its physical bridge."""
+        provider = _make_provider("base-player")
+        self._enable(provider, [(96_000, 24)])
+        provider._active_player_id = "spb_base-player"
+        provider._in_use_by_player = "base-player"
+        provider.mass.players.get_player.return_value = MagicMock()
+        schedule = MagicMock()
+        _stub_attr(provider, "_schedule_dynamic_launch", schedule)
+        state = _make_active_state()
+
+        await provider._activate_playback(state)
+
+        schedule.assert_called_once_with("track42", state.progress_ms, "base-player")
+
     async def test_skip_replaces_pending_initial_dynamic_launch(self) -> None:
         """A skip before the first format resolves must launch the new current track."""
         provider = _make_provider()
@@ -3703,7 +3746,7 @@ class TestDynamicSessionCoordinator:
             await provider._cancel_dynamic_task(clear_prefetch=False)
 
     async def test_superseded_generator_cannot_end_current_dynamic_session(self) -> None:
-        """An old same-queue generator must not release the current restart handshake."""
+        """An old same-owner generator must not release the current restart handshake."""
         provider = _make_provider()
         self._enable(provider, [(96_000, 24)])
         provider._active_session_id = "session1"
@@ -3733,6 +3776,39 @@ class TestDynamicSessionCoordinator:
         finally:
             await old_stream.aclose()
             await current_stream.aclose()
+
+    async def test_stream_progress_refreshes_physical_bridge_not_owner(self) -> None:
+        """Live progress must refresh the player that actually consumes the PCM."""
+        provider = _make_provider("base-player")
+        provider._in_use_by_player = "base-player"
+        provider._active_player_id = "spb_base-player"
+        provider._active_session_id = "session1"
+        provider._yandex_provider = MagicMock()
+        provider._ynison = _mock_ynison(
+            _make_ynison_state(playable_list=[{"playable_id": "track1"}])
+        )
+        sync_progress = AsyncMock()
+        _stub_attr(provider, "_sync_progress", sync_progress)
+
+        async def _stream_track(*_args: object, **_kwargs: object) -> Any:
+            provider._stream_stop_event.set()
+            yield b"\x00" * 4
+
+        _stub_attr(provider, "_stream_track", _stream_track)
+        stream_details = await provider.get_stream_details("main", MediaType.AUDIO_SOURCE)
+        stream = provider.get_audio_stream(stream_details)
+
+        try:
+            with patch("provider.provider.time.monotonic", side_effect=[100.0, 106.0]):
+                assert await anext(stream) == b"\x00" * 4
+                with pytest.raises(StopAsyncIteration):
+                    await anext(stream)
+        finally:
+            await stream.aclose()
+
+        sync_progress.assert_awaited_once()
+        assert sync_progress.await_args is not None
+        assert sync_progress.await_args.args[2] == "spb_base-player"
 
     async def test_reconnect_during_format_restart_exits_before_streaming_old_pcm(self) -> None:
         """A replacement generator must join a pending restart without emitting old PCM."""

@@ -45,6 +45,8 @@ models 1.1.195.
 - Lifecycle focus: selection, bridge ownership, release, stale callbacks,
   capability refresh, pause, and slot release — 22 tests.
 - Dynamic PCM focus — 30 tests.
+- Aggregate pre-release review — 3 bridge/owner regressions covering locked
+  switching, dynamic restart ownership, and physical-consumer progress refresh.
 - `uv run pytest tests/test_provider.py` — 211 tests.
 - `uv run pytest` — 349 tests.
 - `uv lock --check`

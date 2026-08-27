@@ -25,7 +25,11 @@ if TYPE_CHECKING:
 
 
 async def run_setup(session: SetupSession) -> None:
-    """Collect the linked Yandex Music instance and concrete target player."""
+    """
+    Collect the linked Yandex Music instance and concrete target player.
+
+    :param session: Setup session that presents and persists the provider form.
+    """
     if not session.mass.players.all_players(False, False):
         raise AbortFlow("no_players")
 
