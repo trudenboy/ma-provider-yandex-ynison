@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.3.3] - 2026-09-01
+
+### Fixed
+
+- Queue advances authored by Music Assistant now apply their reset progress and duration while
+  normalized heartbeat echoes remain suppressed, preventing the next track from starting at the
+  previous track's position.
+
 ## [4.3.2] - 2026-09-01
 
 ### Fixed
