@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.3.1] - 2026-09-01
+
+### Fixed
+
+- Linked credentials now remain pinned to the configured Yandex Music account when that account
+  is temporarily unavailable, preventing fallback to another account.
+- Repeat and shuffle changes from Yandex Music are now reflected in the active Music Assistant
+  source controls, including after a new source session starts.
+- Temporary token-refresh failures now retry with normal reconnect backoff, while permanent
+  authentication failures remain bounded.
+- Dynamic-format playback now remains scoped to the current source owner and recovers cleanly
+  when a track transition or player restart fails.
+
 ## [4.3.0] - 2026-09-01
 
 ### Added
