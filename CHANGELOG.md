@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.3.2] - 2026-09-01
+
+### Fixed
+
+- Maximum-quality playback can start before the AudioSource claim arrives while still preventing
+  delayed work from returning playback to a previous owner.
+- Repeat-all now restarts immediately for single-item queues instead of waiting for an impossible
+  track or position change.
+- Unexpected token-refresh callback errors now propagate instead of being hidden behind endless
+  reconnect attempts with a rejected token.
+
 ## [4.3.1] - 2026-09-01
 
 ### Fixed
