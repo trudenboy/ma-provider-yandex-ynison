@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.3.0] - 2026-09-01
+
+### Added
+
+- Added repeat and shuffle controls for active Yandex Music Connect playback.
+- Added synchronized queue-edit support for adding, removing, and moving upcoming tracks.
+
+### Changed
+
+- Queue navigation, track metadata, dynamic prefetch, and radio replenishment now follow the
+  shuffled playback order published by Yandex Music.
+- Updated the shared Yandex authentication dependency to version 2.0.1.
+
+### Fixed
+
+- Progress heartbeats no longer cause false seeks or repeated track completion after a newer
+  playback update.
+- Repeat-one now restarts the current track at zero, repeat-all wraps the logical queue, and
+  repeat-off finishes finite queues without waiting for another track.
+- Playback ownership now clears when the active device disconnects, allowing reliable transfers
+  between Music Assistant and other Yandex devices.
+- Authentication now performs one bounded credential refresh when Ynison accepts a connection
+  but returns no redirect ticket.
+- Queue changes now preserve the current track and shuffled order, including duplicate tracks
+  and radio queue expansion.
+
 ## [4.2.0] - 2026-08-27
 
 ### Changed
