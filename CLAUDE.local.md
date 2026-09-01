@@ -58,12 +58,16 @@ per-track ffmpeg → session-fixed PCM → Music Assistant player
   Assistant owns realtime pacing and backpressure bounds read-ahead.
 - **Clamped progress.** Never send `progress_ms > duration_ms`; Ynison rejects
   it and tears down the WebSocket.
-- **Authorship-based echo detection.** A state update is our echo only when both
-  queue and status version blocks are authored by this device.
+- **Causal echo detection.** Fully authored state remains an echo; empty-version
+  status responses are echoes only when they match a recent successful outbound
+  status and any attached queue is unchanged. Authoritative peer state always wins.
 - **Reconnect settling.** Fresh empty/paused state is sent after reconnect and
   provider actions are suppressed for two seconds while retained state settles.
 - **Radio exception.** Normal queues are controlled by Yandex. For `RADIO`
   entities the active device fetches and appends rotor tracks near queue end.
+- **Logical queue order.** `current_playable_index` addresses the original
+  playable list; `shuffle_optional.playable_indices` defines playback order.
+  Metadata, streaming, navigation, prefetch, repeat, and edits use that same order.
 
 ## Module map
 
@@ -188,6 +192,8 @@ Transient failures reconnect indefinitely using 5, 10, 30, and 60 second
 saturated delays with ±20% jitter. Only one reconnect task may exist. Strict
 sends raise `YnisonSendError` for user commands and delivery-critical queue
 updates; periodic progress and prefetch publications remain best-effort.
+An empty redirect ticket shares a one-attempt credential-refresh budget with
+401/403 failures for each reconnect episode.
 
 ## Radio queues
 
@@ -195,7 +201,9 @@ When a `RADIO` queue reaches its final two items, the provider prefetches
 rotor tracks through the linked Yandex Music provider. It maps returned tracks
 to Ynison queue items and publishes the expanded list. At natural track end it
 uses prefetched data when available, otherwise fetches synchronously, advances
-the queue version/index, and waits for a different track id.
+the queue version/index, and waits for a different track id or queue position.
+Shuffle mappings are extended with the new original indices. Repeat ONE restarts
+the current item; repeat ALL wraps finite queues; repeat NONE stops at their end.
 
 ## Development and verification
 
