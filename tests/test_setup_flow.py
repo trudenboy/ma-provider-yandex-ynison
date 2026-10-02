@@ -207,6 +207,40 @@ async def test_reconfigure_clears_legacy_auth_and_drops_legacy_identity() -> Non
     }
 
 
+async def test_finish_retry_preserves_translated_error_metadata() -> None:
+    """The retry form receives the provider's full translated setup error."""
+    error = SetupFlowError(
+        "provider rejected setup",
+        translation_key="invalid_auth",
+        translation_args=["Living room"],
+        translation_owner="provider.yandex_ynison",
+    )
+
+    class RetrySession(_SetupSession):
+        attempts = 0
+
+        async def finish(self, values: dict[str, ConfigValueType]) -> dict[str, str]:
+            self.attempts += 1
+            if self.attempts == 1:
+                raise error
+            return await super().finish(values)
+
+    session = RetrySession(
+        {"ym-main": {"domain": "yandex_music", "name": "Primary"}},
+        {CONF_YM_INSTANCE: "ym-main", CONF_MASS_PLAYER_ID: "living-room"},
+    )
+
+    await run_setup(session)
+
+    retry_errors = session.shown_errors[1]
+    assert retry_errors is not None
+    assert retry_errors["base"] is error
+    assert session.finished_values == {
+        CONF_YM_INSTANCE: "ym-main",
+        CONF_MASS_PLAYER_ID: "living-room",
+    }
+
+
 async def test_new_setup_does_not_persist_legacy_auth_keys() -> None:
     """New instances must persist only the linked account and concrete player."""
     session = _SetupSession(
@@ -267,6 +301,11 @@ async def test_finish_error_reopens_form_with_preserved_values() -> None:
     await run_setup(session)
 
     assert session.attempts == 2
-    assert session.shown_errors == [None, {"base": "invalid_auth"}]
+    assert session.shown_errors[0] is None
+    retry_errors = session.shown_errors[1]
+    assert retry_errors is not None
+    retry_error = retry_errors["base"]
+    assert isinstance(retry_error, SetupFlowError)
+    assert retry_error.translation_key == "invalid_auth"
     assert _entry(session, CONF_YM_INSTANCE).value == "ym-main"
     assert _entry(session, CONF_MASS_PLAYER_ID).value == "living-room"

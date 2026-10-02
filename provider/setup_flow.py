@@ -54,7 +54,7 @@ async def run_setup(session: SetupSession) -> None:
         key in setup_data or key in original_values for key in LEGACY_AUTH_KEYS
     )
 
-    errors: dict[str, str] | None = None
+    errors: dict[str, str | SetupFlowError] | None = None
     while True:
         submitted = await session.form(
             [
@@ -77,7 +77,7 @@ async def run_setup(session: SetupSession) -> None:
             await session.finish(collected)
             return
         except SetupFlowError as err:
-            errors = {"base": err.translation_key or str(err)}
+            errors = {"base": err}
             setup_data = collected
 
 

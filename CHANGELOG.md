@@ -6,10 +6,13 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- Linked-account discovery uses Music Assistant's internal provider collection while
+  retaining the explicitly configured Yandex Music account.
 - Radio prefetch tasks identify their source instance in Music Assistant diagnostics.
 
 ### Fixed
 
+- Setup retries preserve translated error details and the selected account and player.
 - Playback requests retain priority over background work with current Music Assistant
   versions while remaining within the shared request budget.
 
