@@ -33,17 +33,10 @@ from music_assistant_models.streamdetails import StreamDetails
 from ya_passport_auth import SecretStr
 
 from music_assistant.controllers.streams.constants import STREAM_SLOT_PLAYBACK_WAIT_TIMEOUT
-<<<<<<< provider
-from music_assistant.helpers.throttle_retry import BYPASS_THROTTLER
-||||||| upstream-base
-from music_assistant.helpers.throttle_retry import BYPASS_THROTTLER, ThrottlerManager
-=======
 from music_assistant.helpers.throttle_retry import (
     RequestPriority,
-    ThrottlerManager,
     current_priority,
 )
->>>>>>> upstream-head
 from music_assistant.models.music_provider import MusicProvider, ProviderStreamLimitError
 from provider.config_helpers import list_yandex_music_instances
 from provider.constants import (

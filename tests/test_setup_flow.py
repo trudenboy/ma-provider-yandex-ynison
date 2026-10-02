@@ -18,6 +18,8 @@ from provider.constants import CONF_MASS_PLAYER_ID, CONF_YM_INSTANCE, LEGACY_AUT
 from provider.setup_flow import run_setup
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from music_assistant_models.config_entries import ConfigEntry, ConfigValueType
 
 
@@ -58,14 +60,14 @@ class _SetupSession(SetupSession):
         self._submitted = submitted
         self.entries: list[ConfigEntry] = []
         self.form_kwargs: dict[str, Any] = {}
-        self.shown_errors: list[dict[str, str] | None] = []
+        self.shown_errors: list[Mapping[str, str | SetupFlowError] | None] = []
         self.finished_values: dict[str, ConfigValueType] | None = None
 
     async def form(
         self,
         entries: list[ConfigEntry],
         step_id: str = "user",
-        errors: dict[str, str] | None = None,
+        errors: Mapping[str, str | SetupFlowError] | None = None,
         last_step: bool | None = None,
         expires_in: float | None = None,
         translation_params: list[str] | None = None,

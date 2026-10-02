@@ -17,6 +17,7 @@ test = [
   "syrupy>=5.0",
   "codespell>=2.4",
   "music-assistant @ git+https://github.com/music-assistant/server.git@dev",
+  "hass-client==1.3.1",
   "aiohttp>=3.9.0",
   "ruff>=0.15,<0.16",
   "mypy>=1.19",

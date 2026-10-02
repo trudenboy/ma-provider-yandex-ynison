@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.3.4] - 2026-10-02
+
+### Fixed
+
+- Playback requests retain priority over background work with current Music Assistant
+  versions while remaining within the shared request budget.
+
 ## [4.3.3] - 2026-09-01
 
 ### Fixed
@@ -1037,4 +1044,3 @@ toggle restarted the track at 0".
 - Reconnection with exponential backoff
 - Cover art display from Ynison state
 - Docker Compose dev environment for local testing
-- Reverse-synced upstream PR #6595 (WIP)
