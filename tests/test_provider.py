@@ -33,7 +33,10 @@ from music_assistant_models.streamdetails import StreamDetails
 from ya_passport_auth import SecretStr
 
 from music_assistant.controllers.streams.constants import STREAM_SLOT_PLAYBACK_WAIT_TIMEOUT
-from music_assistant.helpers.throttle_retry import BYPASS_THROTTLER
+from music_assistant.helpers.throttle_retry import (
+    RequestPriority,
+    current_priority,
+)
 from music_assistant.models.music_provider import MusicProvider, ProviderStreamLimitError
 from provider.config_helpers import list_yandex_music_instances
 from provider.constants import (
@@ -4818,18 +4821,18 @@ class TestLinkedSlotRelease:
         assert events == ["acquired-1", "released-1", "acquired-2", "released-2"]
 
 
-class TestBypassThrottlerScope:
-    """`BYPASS_THROTTLER` is set inside `_stream_track`, NOT inside prefetch."""
+class TestPlaybackPriorityScope:
+    """Playback priority is set inside `_stream_track`, NOT inside prefetch."""
 
-    async def test_bypass_active_during_in_flight_stream_fetch(self) -> None:
-        """The in-flight stream-details fetch runs with BYPASS_THROTTLER=True."""
+    async def test_playback_priority_during_in_flight_stream_fetch(self) -> None:
+        """The in-flight stream-details fetch runs with playback priority."""
         provider = _make_provider()
-        observed: list[bool] = []
+        observed: list[RequestPriority] = []
         mock_yandex = MagicMock()
         _set_stream_owner(mock_yandex)
 
         async def _fake_get_stream_details(_track_id: str, _media_type: Any) -> Any:
-            observed.append(BYPASS_THROTTLER.get())
+            observed.append(current_priority())
             sd = MagicMock()
             sd.expiration = 0
             sd.duration = 1
@@ -4861,20 +4864,20 @@ class TestBypassThrottlerScope:
             finally:
                 await gen.aclose()
 
-        assert observed == [True], (
-            f"BYPASS_THROTTLER should be True inside _stream_track, got {observed}"
+        assert observed == [RequestPriority.HIGH], (
+            f"playback priority should apply inside _stream_track, got {observed}"
         )
-        assert BYPASS_THROTTLER.get() is False
+        assert current_priority() is RequestPriority.NORMAL
 
-    async def test_bypass_not_active_during_prefetch(self) -> None:
-        """The prefetch path is intentionally NOT bypassed — opportunistic only."""
+    async def test_playback_priority_not_active_during_prefetch(self) -> None:
+        """The prefetch path intentionally keeps its caller's priority — opportunistic only."""
         provider = _make_provider()
-        observed: list[bool] = []
+        observed: list[RequestPriority] = []
         mock_yandex = MagicMock()
         _set_stream_owner(mock_yandex)
 
         async def _fake_get_stream_details(_track_id: str, _media_type: Any) -> Any:
-            observed.append(BYPASS_THROTTLER.get())
+            observed.append(current_priority())
             sd = MagicMock()
             sd.expiration = 0
             sd.audio_format = MagicMock()
@@ -4888,12 +4891,12 @@ class TestBypassThrottlerScope:
 
         await provider._prefetch_format_for_track("track1")
 
-        assert observed == [False], (
-            f"BYPASS_THROTTLER must NOT be set during prefetch, got {observed}"
+        assert observed == [RequestPriority.NORMAL], (
+            f"playback priority must NOT apply during prefetch, got {observed}"
         )
 
-    async def test_bypass_resets_on_exception(self) -> None:
-        """A raise inside the bypassed call must still reset the context-var."""
+    async def test_playback_priority_resets_on_exception(self) -> None:
+        """A raise inside the playback priority call must still reset the context-var."""
         provider = _make_provider()
         mock_yandex = MagicMock()
         mock_yandex.get_stream_details = AsyncMock(side_effect=RuntimeError("boom"))
@@ -4906,7 +4909,7 @@ class TestBypassThrottlerScope:
         with pytest.raises(RuntimeError, match="boom"):
             await anext(provider._stream_track("track1"))
 
-        assert BYPASS_THROTTLER.get() is False
+        assert current_priority() is RequestPriority.NORMAL
 
 
 # ------------------------------------------------------------------
