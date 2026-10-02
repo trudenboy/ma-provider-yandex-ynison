@@ -135,7 +135,7 @@ def _make_mock_mass() -> MagicMock:
 
     mass.create_task = MagicMock(side_effect=_create_task)
     mass.subscribe = MagicMock(return_value=MagicMock())
-    mass.get_providers = MagicMock(return_value=[])
+    mass.providers = []
     mass.config.set_raw_provider_config_value = MagicMock()
     mass.config.decrypt_string = MagicMock(side_effect=lambda value: value)
 
@@ -727,7 +727,7 @@ class TestProviderMatching:
         mock_ym.instance_id = "ym-inst"
         mock_ym.domain = "yandex_music"
         mock_ym.type = ProviderType.MUSIC
-        provider.mass.get_providers.return_value = [mock_ym]  # type: ignore[attr-defined]
+        provider.mass.providers = [mock_ym]  # type: ignore[attr-defined]
 
         await provider._check_yandex_provider_match()
 
@@ -741,7 +741,7 @@ class TestProviderMatching:
         """No linked provider disables playback control."""
         provider = _make_provider()
 
-        provider.mass.get_providers.return_value = []  # type: ignore[attr-defined]
+        provider.mass.providers = []  # type: ignore[attr-defined]
         await provider._check_yandex_provider_match()
 
         assert provider._yandex_provider is None
@@ -2280,7 +2280,7 @@ class TestYandexProviderMatch:
         provider = _make_provider()
         provider._ym_instance_id = "wanted"
         other = _make_ym_provider_stub(instance_id="other")
-        _stub_attr(provider.mass, "get_providers", MagicMock(return_value=[other]))
+        _stub_attr(provider.mass, "providers", [other])
 
         await provider._check_yandex_provider_match()
 
@@ -2292,7 +2292,7 @@ class TestYandexProviderMatch:
         provider._ym_instance_id = "wanted"
         wanted = _make_ym_provider_stub(instance_id="wanted")
         other = _make_ym_provider_stub(instance_id="other")
-        _stub_attr(provider.mass, "get_providers", MagicMock(return_value=[other, wanted]))
+        _stub_attr(provider.mass, "providers", [other, wanted])
 
         await provider._check_yandex_provider_match()
 
