@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [4.3.4] - 2026-10-02
 
+### Changed
+
+- Linked-account discovery uses Music Assistant's internal provider collection while
+  retaining the explicitly configured Yandex Music account.
+
 ### Fixed
 
 - Playback requests retain priority over background work with current Music Assistant
@@ -1044,4 +1049,3 @@ toggle restarted the track at 0".
 - Reconnection with exponential backoff
 - Cover art display from Ynison state
 - Docker Compose dev environment for local testing
-- Reverse-synced upstream PR #6255 (WIP)
