@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
+from functools import partial
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -37,6 +38,7 @@ from music_assistant.helpers.throttle_retry import (
     RequestPriority,
     current_priority,
 )
+from music_assistant.mass import MusicAssistant
 from music_assistant.models.music_provider import MusicProvider, ProviderStreamLimitError
 from provider.config_helpers import list_yandex_music_instances
 from provider.constants import (
@@ -1398,10 +1400,9 @@ class TestYnisonStateHandling:
         )
         provider._yandex_provider = mock_ym_provider
 
-        # Use real create_task so prefetch coroutine actually runs
-        provider.mass.create_task = lambda coro, *_a, **_kw: asyncio.get_event_loop().create_task(  # type: ignore[method-assign, assignment, misc]
-            coro
-        )
+        _stub_attr(provider.mass, "loop", asyncio.get_running_loop())
+        _stub_attr(provider.mass, "_tracked_tasks", {})
+        _stub_attr(provider.mass, "create_task", partial(MusicAssistant.create_task, provider.mass))
 
         # Trigger prefetch
         provider._maybe_prefetch(
@@ -1411,6 +1412,7 @@ class TestYnisonStateHandling:
             "RADIO",
         )
         assert provider._prefetch_task is not None
+        assert provider._prefetch_task.get_name() == f"ynison_prefetch_{provider.instance_id}"
         await provider._prefetch_task
 
         # Prefetched list should contain old + new
