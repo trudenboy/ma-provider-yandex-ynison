@@ -148,8 +148,8 @@ target-player rate; explicit rates are preserved.
 both output overrides set to `auto`. It accepts real source rates from 8 through
 384 kHz, maps source precision to PCM16/24/32, and selects the highest player
 rate not above the source when possible. The effective signature is frozen per
-session and recalculated for the actual player/bridge/group in
-`on_source_selected`.
+session and resolved from the owner's `resolve_output_player()` capabilities
+before `play_media`. `on_source_selected` retains the advertised PCM format.
 
 `get_audio_stream` follows Ynison track changes in one long-lived AudioSource
 session. It fetches cached StreamDetails, runs one ffmpeg decoder per track,
@@ -173,9 +173,12 @@ track is never advanced accidentally.
 Dynamic mode prefetches the current and immediate next playable ID in the
 background. Equal effective signatures continue the current generator. A
 changed signature ends it on a PCM-frame boundary without signalling natural
-completion, rebuilds the AudioSource format, and reissues `play_media` for the
+completion, waits for the matching core `on_source_unselected` callback, rebuilds
+the AudioSource format, and reissues `play_media` for the
 same queue from the latest Ynison progress. A mixed-format boundary may be
 audible and can skip elapsed time because the Ynison clock keeps running.
+The restart retains a generation-scoped owner intent across claim release.
+Pause, handoff, and unload invalidate that intent.
 
 ## Ynison transport and recovery
 
@@ -196,6 +199,14 @@ An empty redirect ticket shares a one-attempt credential-refresh budget with
 401/403 failures for each reconnect episode.
 
 ## Radio queues
+
+Repeat, shuffle, queue advance, and RADIO replenishment use one serialized
+queue mutation path. A successful send supplies the next mutation's queue base
+until its echo, peer replacement, disconnect/reconnect, or a 30-second timeout.
+Older own queue versions cannot overwrite a newer sent version. Server state
+remains authoritative; pending queue edits do not optimistically change status.
+Outgoing add/remove/move helpers are deferred until MA exposes an AudioSource API
+for those controls. Incoming peer queue edits remain supported.
 
 When a `RADIO` queue reaches its final two items, the provider prefetches
 rotor tracks through the linked Yandex Music provider. It maps returned tracks

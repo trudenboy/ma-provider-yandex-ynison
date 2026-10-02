@@ -21,8 +21,13 @@ seeks at track boundaries.
 Use recent successful outbound status watermarks to distinguish server-normalized
 heartbeats from authoritative client actions, and introduce one validated logical
 queue model shared by playback, metadata, navigation, prefetch, repeat, shuffle, and
-queue edits. Expose the supported repeat and shuffle controls through the existing
+incoming peer queue edits. Expose the supported repeat and shuffle controls through the existing
 Music Assistant AudioSource contract.
+
+Outgoing add-next/add-last/remove/move operations are deferred until Music
+Assistant exposes an AudioSource control path for them. They are not public
+provider capabilities. Repeat, shuffle, queue advance, and RADIO replenishment
+share a serialized mutation path with a bounded pending queue until acknowledgement.
 
 ## Acceptance Criteria
 

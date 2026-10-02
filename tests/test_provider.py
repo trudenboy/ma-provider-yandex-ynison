@@ -4,7 +4,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from collections.abc import AsyncGenerator
 from contextlib import suppress
+from copy import deepcopy
 from functools import partial
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -34,6 +37,7 @@ from music_assistant_models.streamdetails import StreamDetails
 from ya_passport_auth import SecretStr
 
 from music_assistant.controllers.streams.constants import STREAM_SLOT_PLAYBACK_WAIT_TIMEOUT
+from music_assistant.controllers.streams.controller import StreamsController
 from music_assistant.helpers.throttle_retry import (
     RequestPriority,
     current_priority,
@@ -63,7 +67,13 @@ from provider.streaming import (
     PCM_LOSSY_PARAMS,
     make_pcm_format,
 )
-from provider.ynison_client import YnisonSendError, YnisonState
+from provider.ynison_client import (
+    YnisonClient,
+    YnisonDeviceInfo,
+    YnisonSendError,
+    YnisonState,
+    make_version_block,
+)
 
 
 def _arm_play_media_recorder(provider: YandexYnisonProvider) -> list[tuple[str, str]]:
@@ -181,7 +191,9 @@ def _make_provider(player_id: str = "player1") -> YandexYnisonProvider:
     mass = _make_mock_mass()
     config = _make_mock_config({CONF_MASS_PLAYER_ID: player_id})
     manifest = _make_mock_manifest()
-    return YandexYnisonProvider(mass, manifest, config, {ProviderFeature.AUDIO_SOURCE})
+    provider = YandexYnisonProvider(mass, manifest, config, {ProviderFeature.AUDIO_SOURCE})
+    provider._credential_source = YandexMusicCredentialSource(mass, provider._ym_instance_id)
+    return provider
 
 
 # ------------------------------------------------------------------
@@ -220,8 +232,8 @@ class TestProviderInit:
         assert provider._default_player_id == "living-room"
         assert provider._display_name == "Living room"
 
-    def test_rejects_missing_or_legacy_own_source(self) -> None:
-        """Keeping own-mode fallback must not let legacy credentials load silently."""
+    async def test_rejects_missing_or_legacy_own_source(self) -> None:
+        """Invalid setup is reported during async initialization, not construction."""
         for source in (None, "__own__"):
             mass = _make_mock_mass()
             mass.config.get.return_value = {
@@ -229,13 +241,14 @@ class TestProviderInit:
                 CONF_MASS_PLAYER_ID: "living-room",
             }
 
+            provider = YandexYnisonProvider(
+                mass,
+                _make_mock_manifest(),
+                _make_mock_config(),
+                {ProviderFeature.AUDIO_SOURCE},
+            )
             with pytest.raises(LoginFailed, match="Reconfigure this Ynison instance"):
-                YandexYnisonProvider(
-                    mass,
-                    _make_mock_manifest(),
-                    _make_mock_config(),
-                    {ProviderFeature.AUDIO_SOURCE},
-                )
+                await provider.handle_async_init()
 
     async def test_load_rejects_missing_connected_player(self) -> None:
         """A legacy setup without a concrete player must fail with a stable typed error."""
@@ -1020,7 +1033,7 @@ class TestYnisonStateHandling:
     async def test_signal_track_completion_advances_index(self) -> None:
         """Track completion advances index and reports status."""
         provider = _make_provider()
-        mock_ynison = MagicMock()
+        mock_ynison = _mock_ynison()
         mock_ynison.state = YnisonState(
             active_device_id=provider._device_id,
             player_state={
@@ -1055,7 +1068,7 @@ class TestYnisonStateHandling:
     async def test_repeat_one_restarts_current_track(self) -> None:
         """Natural completion under repeat-one restarts the same queue item."""
         provider = _make_provider()
-        mock_ynison = MagicMock()
+        mock_ynison = _mock_ynison()
         mock_ynison.connected = True
         mock_ynison.device_id = provider._device_id
         mock_ynison.state = YnisonState(
@@ -1083,7 +1096,7 @@ class TestYnisonStateHandling:
     async def test_repeat_all_wraps_in_shuffle_order(self) -> None:
         """Repeat-all wraps from the logical shuffled tail to its first item."""
         provider = _make_provider()
-        mock_ynison = MagicMock()
+        mock_ynison = _mock_ynison()
         mock_ynison.connected = True
         mock_ynison.device_id = provider._device_id
         mock_ynison.state = YnisonState(
@@ -1129,7 +1142,7 @@ class TestYnisonStateHandling:
     async def test_explicit_next_ignores_repeat_one(self) -> None:
         """A user next command advances even when natural completion repeats one."""
         provider = _make_provider()
-        mock_ynison = MagicMock()
+        mock_ynison = _mock_ynison()
         mock_ynison.connected = True
         mock_ynison.device_id = provider._device_id
         mock_ynison.state = YnisonState(
@@ -1207,7 +1220,7 @@ class TestYnisonStateHandling:
     async def test_signal_track_completion_no_send_full_state(self) -> None:
         """Track completion never sends full state reset."""
         provider = _make_provider()
-        mock_ynison = MagicMock()
+        mock_ynison = _mock_ynison()
         mock_ynison.state = YnisonState(
             active_device_id=provider._device_id,
             player_state={
@@ -1233,7 +1246,7 @@ class TestYnisonStateHandling:
         """Track completion prefers _actual_duration_ms over stale state.duration_ms."""
         provider = _make_provider()
         provider._actual_duration_ms = 300000
-        mock_ynison = MagicMock()
+        mock_ynison = _mock_ynison()
         mock_ynison.state = YnisonState(
             active_device_id=provider._device_id,
             player_state={
@@ -1257,7 +1270,7 @@ class TestYnisonStateHandling:
     async def test_signal_track_completion_radio_replenishes_queue(self) -> None:
         """At end of RADIO queue, fetches more tracks via YM API and advances."""
         provider = _make_provider()
-        mock_ynison = MagicMock()
+        mock_ynison = _mock_ynison()
         mock_ynison.state = YnisonState(
             active_device_id=provider._device_id,
             player_state={
@@ -1334,7 +1347,7 @@ class TestYnisonStateHandling:
     async def test_signal_track_completion_radio_no_provider(self) -> None:
         """At end of queue without YM provider, does not crash."""
         provider = _make_provider()
-        mock_ynison = MagicMock()
+        mock_ynison = _mock_ynison()
         mock_ynison.state = YnisonState(
             active_device_id=provider._device_id,
             player_state={
@@ -1365,7 +1378,7 @@ class TestYnisonStateHandling:
     async def test_prefetch_on_second_to_last_track(self) -> None:
         """Pre-fetches tracks when playing second-to-last item in queue."""
         provider = _make_provider()
-        mock_ynison = MagicMock()
+        mock_ynison = _mock_ynison()
         mock_ynison.connected = True
         mock_ynison.update_player_state = AsyncMock()
         # 4 tracks, currently at index 2 (second-to-last)
@@ -1423,7 +1436,7 @@ class TestYnisonStateHandling:
     async def test_signal_completion_uses_prefetched(self) -> None:
         """Track completion uses pre-fetched data instead of making API call."""
         provider = _make_provider()
-        mock_ynison = MagicMock()
+        mock_ynison = _mock_ynison()
         mock_ynison.state = YnisonState(
             active_device_id=provider._device_id,
             player_state={
@@ -2169,6 +2182,7 @@ class TestPlayerRateSnap:
         provider = _make_provider()
         player = self._link_player(provider, [])
         player.get_supported_sample_rates.side_effect = RuntimeError("bug")
+        player.resolve_output_player.return_value = player
 
         with pytest.raises(RuntimeError, match="bug"):
             provider._update_normalized_format(hint=self._hint(96000))
@@ -2412,6 +2426,18 @@ def _make_ynison_state(
     )
 
 
+def _wire_queue_mutation(mock: MagicMock) -> None:
+    """Adapt transport doubles to the client's synchronous queue-edit callback."""
+
+    async def mutate(mutation: Any) -> None:
+        player_state = deepcopy(mock.state.player_state)
+        mutation(player_state)
+        player_state["player_queue"]["version"] = make_version_block(mock.device_id)
+        await mock.update_player_state(player_state=player_state, strict=True)
+
+    mock.mutate_player_state = AsyncMock(side_effect=mutate)
+
+
 def _mock_ynison(
     state: YnisonState | None = None,
     connected: bool = True,
@@ -2424,11 +2450,45 @@ def _mock_ynison(
     mock.device_id = device_id
     mock.update_playing_status = AsyncMock()
     mock.update_player_state = AsyncMock()
+
+    _wire_queue_mutation(mock)
     return mock
 
 
 class TestPlaybackControls:
     """Tests for _on_play, _on_pause, _on_next, _on_previous, _on_seek."""
+
+    @pytest.mark.parametrize("shuffle_first", [False, True])
+    async def test_queue_controls_preserve_each_other_before_echo(
+        self, shuffle_first: bool
+    ) -> None:
+        """Rapid repeat and shuffle commands retain both options on the wire."""
+        provider = _make_provider()
+        client = YnisonClient(
+            SecretStr("test-token"),
+            YnisonDeviceInfo(device_id="dev1", title="Test"),
+            AsyncMock(),
+            MagicMock(),
+        )
+        client.state = _make_ynison_state(
+            playable_list=[{"playable_id": "t1"}, {"playable_id": "t2"}],
+        )
+        client._connected = True
+        ws = AsyncMock(closed=False)
+        client._ws = ws
+        provider._ynison = client
+        provider._yandex_provider = MagicMock(available=True)
+        commands: list[tuple[SourceControl, bool | RepeatMode]] = [
+            (SourceControl.REPEAT, RepeatMode.ALL),
+            (SourceControl.SHUFFLE, True),
+        ]
+        if shuffle_first:
+            commands.reverse()
+        for action, value in commands:
+            await provider.on_source_control(AUDIO_SOURCE_ID, action, value)
+        sent = json.loads(ws.send_str.call_args.args[0])["update_player_state"]["player_state"]
+        assert sent["player_queue"]["options"]["repeat_mode"] == "ALL"
+        assert sent["player_queue"]["shuffle_optional"]["playable_indices"] == [0, 1]
 
     @pytest.mark.parametrize("value", [True, False])
     async def test_source_control_does_not_treat_boolean_as_seek_position(
@@ -3696,6 +3756,7 @@ class TestDynamicSessionCoordinator:
         provider._in_use_by_player = "player1"
         player = MagicMock()
         player.get_supported_sample_rates.return_value = rates
+        player.resolve_output_player.return_value = player
         provider.mass.players.get_player.return_value = player
 
     @staticmethod
@@ -3708,6 +3769,127 @@ class TestDynamicSessionCoordinator:
             channels=2,
         )
         return details
+
+    @pytest.mark.parametrize("bridge", [False, True])
+    @pytest.mark.parametrize("cancel", [None, "pause", "handoff", "unload"])
+    async def test_format_change_restarts_after_real_core_teardown(  # noqa: PLR0915
+        self,
+        bridge: bool,
+        cancel: str | None,
+    ) -> None:
+        """A native-format change survives selected, stream end and unselected."""
+        provider = _make_provider()
+        self._enable(provider, [(44_100, 16), (96_000, 24)])
+        owner = provider.mass.players.get_player.return_value
+        owner.resolve_output_player.return_value = owner
+        if bridge:
+            output = MagicMock()
+            output.get_supported_sample_rates.return_value = [(44_100, 16), (96_000, 24)]
+            owner.get_supported_sample_rates.return_value = [(44_100, 16)]
+            owner.resolve_output_player.return_value = output
+        provider._dynamic_session_signature = (ContentType.PCM_S16LE, 44_100, 16, 2)
+        provider._in_use_by_player = None
+        state = _make_ynison_state(
+            playable_list=[{"playable_id": "track1"}, {"playable_id": "track2"}],
+        )
+        state.active_device_id = provider._device_id
+        provider._ynison = _mock_ynison(state)
+        linked = _make_ym_provider_stub("ym-inst")
+        provider._ynison.in_post_reconnect_settle = False
+        provider._ynison.disconnect = AsyncMock()
+        provider.mass.players.deselect_source = AsyncMock()
+        provider.mass.create_task = asyncio.create_task
+        details = StreamDetails(
+            provider="ym-inst",
+            item_id="track1",
+            audio_format=AudioFormat(
+                content_type=ContentType.FLAC,
+                sample_rate=44_100,
+                bit_depth=16,
+            ),
+            media_type=MediaType.TRACK,
+        )
+        next_details = StreamDetails(
+            provider="ym-inst",
+            item_id="track2",
+            audio_format=AudioFormat(
+                content_type=ContentType.FLAC,
+                sample_rate=96_000,
+                bit_depth=24,
+            ),
+            media_type=MediaType.TRACK,
+        )
+        linked.get_stream_details = AsyncMock(side_effect=[details, next_details])
+
+        async def cdn_stream(_details: StreamDetails) -> AsyncGenerator[bytes]:
+            yield b"encoded-cdn-frame"
+
+        linked.get_audio_stream = cdn_stream
+        provider._yandex_provider = linked
+        provider.mass.get_provider.return_value = provider
+        first_frame = asyncio.Event()
+        release_decoder = asyncio.Event()
+
+        async def decoder(**_kwargs: object) -> AsyncGenerator[bytes]:
+            yield b"\x00" * 4
+            first_frame.set()
+            await provider._track_changed_event.wait()
+            await release_decoder.wait()
+            yield b"\x00" * 4
+
+        item = MagicMock(queue_id="player1")
+        item.media_item = provider._audio_source
+        controller = MagicMock(mass=provider.mass)
+
+        async def consume() -> None:
+            stream_details = await provider.get_stream_details(
+                AUDIO_SOURCE_ID, MediaType.AUDIO_SOURCE
+            )
+            async for _chunk in StreamsController._wrap_with_audio_source_lifecycle(
+                controller, provider.get_audio_stream(stream_details), item, "player1"
+            ):
+                pass
+
+        with patch("provider.provider.get_ffmpeg_stream", side_effect=decoder):
+            consumer = asyncio.create_task(consume())
+            try:
+                await asyncio.wait_for(first_frame.wait(), timeout=2)
+                state.player_state["player_queue"]["current_playable_index"] = 1
+                await provider._handle_ynison_state(state)
+                await asyncio.wait_for(provider._track_changed_event.wait(), timeout=2)
+                assert provider._dynamic_task is not None
+                transition = provider._dynamic_task
+                if cancel == "pause":
+                    await provider.on_source_control(AUDIO_SOURCE_ID, SourceControl.PAUSE)
+                elif cancel == "handoff":
+                    state.active_device_id = "peer-device"
+                    await provider._handle_ynison_state(state)
+                elif cancel == "unload":
+                    await provider.unload()
+                if cancel:
+                    consumer.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await consumer
+                    with suppress(asyncio.CancelledError):
+                        await transition
+                else:
+                    release_decoder.set()
+                    await asyncio.wait_for(consumer, timeout=2)
+                    await asyncio.wait_for(transition, timeout=2)
+            finally:
+                consumer.cancel()
+                with suppress(asyncio.CancelledError):
+                    await consumer
+
+        if cancel:
+            provider.mass.player_queues.play_media.assert_not_awaited()
+            return
+        provider.mass.player_queues.play_media.assert_awaited_once_with(
+            "player1", str(provider._audio_source.uri)
+        )
+        stream_details = await provider.get_stream_details(AUDIO_SOURCE_ID, MediaType.AUDIO_SOURCE)
+        assert stream_details.audio_format.sample_rate == 96_000
+        assert stream_details.audio_format.bit_depth == 24
 
     async def test_mixed_format_transition_restarts_once_after_applying_format(self) -> None:
         """A changed signature must be installed before exactly one same-owner restart."""
@@ -3933,6 +4115,7 @@ class TestDynamicSessionCoordinator:
         provider = _make_provider()
         player = MagicMock()
         player.get_supported_sample_rates.side_effect = RuntimeError("bug")
+        player.resolve_output_player.return_value = player
         provider.mass.players.get_player.return_value = player
 
         with pytest.raises(RuntimeError, match="bug"):
@@ -4331,6 +4514,7 @@ class TestDynamicSessionCoordinator:
                 await anext(replacement_stream)
             with pytest.raises(StopAsyncIteration):
                 await anext(old_stream)
+            await provider.on_source_unselected("main", "player1", "session2")
             await asyncio.wait_for(transition, timeout=1)
 
             provider.mass.player_queues.play_media.assert_awaited_once()
@@ -5143,7 +5327,7 @@ class TestStrictModeDeliverySignal:
                 },
             },
         )
-        mock_ynison = MagicMock()
+        mock_ynison = _mock_ynison()
         mock_ynison.state = state
         mock_ynison.connected = True
         mock_ynison.device_id = provider._device_id
