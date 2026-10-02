@@ -11,6 +11,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Setup retries preserve translated error details and the selected account and player.
 - Playback requests retain priority over background work with current Music Assistant
   versions while remaining within the shared request budget.
 
