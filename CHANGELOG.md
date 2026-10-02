@@ -6,6 +6,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Setup retries preserve translated error details and the selected account and player.
 - Playback requests retain priority over background work with current Music Assistant
   versions while remaining within the shared request budget.
 
@@ -1044,4 +1045,3 @@ toggle restarted the track at 0".
 - Reconnection with exponential backoff
 - Cover art display from Ynison state
 - Docker Compose dev environment for local testing
-- Reverse-synced upstream PR #6382 (WIP)
