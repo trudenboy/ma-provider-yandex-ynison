@@ -2592,8 +2592,7 @@ class YandexYnisonProvider(PluginProvider):
         client = self._require_connected_ynison()
         if not self._idempotent("on_pause", None):
             return
-        if self._dynamic_restart is not None:
-            await self._cancel_dynamic_task(clear_prefetch=False)
+        await self._cancel_dynamic_task(clear_prefetch=False)
         state = client.state
         try:
             await self._send_progress_to_ynison(

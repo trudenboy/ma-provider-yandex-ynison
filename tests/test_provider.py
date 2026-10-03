@@ -3979,6 +3979,7 @@ class TestDynamicSessionCoordinator:
             "during_play_pause",
             "during_play_handoff",
             "during_play_unload",
+            "resolving_pause",
         ],
     )
     async def test_format_change_restarts_after_real_core_teardown(  # noqa: PLR0915
@@ -4052,7 +4053,17 @@ class TestDynamicSessionCoordinator:
             ),
             media_type=MediaType.TRACK,
         )
-        linked.get_stream_details = AsyncMock(side_effect=[details, next_details])
+        format_requested = asyncio.Event()
+
+        async def resolve_details(item_id: str, *_args: object, **_kwargs: object) -> StreamDetails:
+            if item_id == "track1":
+                return details
+            if cancel == "resolving_pause":
+                format_requested.set()
+                await asyncio.Event().wait()
+            return next_details
+
+        linked.get_stream_details = AsyncMock(side_effect=resolve_details)
 
         async def cdn_stream(_details: StreamDetails) -> AsyncGenerator[bytes]:
             yield b"encoded-cdn-frame"
@@ -4089,7 +4100,10 @@ class TestDynamicSessionCoordinator:
                 await asyncio.wait_for(first_frame.wait(), timeout=2)
                 state.player_state["player_queue"]["current_playable_index"] = 1
                 await provider._handle_ynison_state(state)
-                await asyncio.wait_for(provider._track_changed_event.wait(), timeout=2)
+                if cancel == "resolving_pause":
+                    await asyncio.wait_for(format_requested.wait(), timeout=2)
+                else:
+                    await asyncio.wait_for(provider._track_changed_event.wait(), timeout=2)
                 assert provider._dynamic_task is not None
                 transition = provider._dynamic_task
                 if cancel and cancel.startswith(("late_", "during_play_")):
@@ -4111,7 +4125,7 @@ class TestDynamicSessionCoordinator:
                     if cancel
                     else None
                 )
-                if action == "pause":
+                if action in ("pause", "resolving_pause"):
                     await provider.on_source_control(AUDIO_SOURCE_ID, SourceControl.PAUSE)
                 elif action == "handoff":
                     state.active_device_id = "peer-device"
@@ -4123,7 +4137,7 @@ class TestDynamicSessionCoordinator:
                     with suppress(asyncio.CancelledError):
                         await consumer
                     with suppress(asyncio.CancelledError, PlayerCommandFailed):
-                        await transition
+                        await asyncio.wait_for(transition, timeout=2)
                 else:
                     release_decoder.set()
                     await asyncio.wait_for(consumer, timeout=2)
