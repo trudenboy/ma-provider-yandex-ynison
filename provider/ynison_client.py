@@ -216,7 +216,6 @@ class YnisonClient:
         self._ws: aiohttp.ClientWebSocketResponse | None = None
         self._session: aiohttp.ClientSession | None = None
         self._send_lock = asyncio.Lock()
-        self._queue_lock = asyncio.Lock()
         self._pending_queue: dict[str, Any] | None = None
         self._pending_queue_until = 0.0
         self._last_queue_version: int | None = None
@@ -258,6 +257,18 @@ class YnisonClient:
     def device_id(self) -> str:
         """Return our Ynison device_id (used when authoring outgoing state)."""
         return self._device_info.device_id
+
+    @property
+    def queue_generation(self) -> int:
+        """Return the generation invalidated by peer replacement or reconnect."""
+        return self._queue_epoch
+
+    def queue_snapshot(self) -> dict[str, Any]:
+        """Return the latest queue base for local navigation and mutations."""
+        queue = self.state.player_state.get("player_queue", {})
+        if self._pending_queue is not None and time.monotonic() < self._pending_queue_until:
+            queue = self._pending_queue
+        return deepcopy(queue)
 
     async def connect(self) -> None:
         """
@@ -443,37 +454,31 @@ class YnisonClient:
             Delivery-critical callers (queue advance after track end)
             opt in; queue-list-replenish heartbeats leave the default.
         """
-        queue = player_state.get("player_queue", {})
-        self._logger.info(
-            "→ update_player_state: index=%s queue_len=%d entity_type=%s",
-            queue.get("current_playable_index"),
-            len(queue.get("playable_list", [])),
-            queue.get("entity_type", ""),
-        )
-        msg = {
-            "update_player_state": {
-                "player_state": player_state,
-            },
-            **self._message_meta(),
-        }
-        self._logger.debug("Sending player state: %s", json.dumps(msg)[:500])
-        await self._send(msg, strict=strict)
+        await self._send(self._player_state_message(player_state), strict=strict)
 
-    async def mutate_player_state(self, mutation: Callable[[dict[str, Any]], None]) -> None:
+    async def mutate_player_state(
+        self,
+        mutation: Callable[[dict[str, Any]], None],
+        *,
+        expected_generation: int | None = None,
+    ) -> None:
         """
         Serialize a queue change against the latest successfully sent queue.
 
         :param mutation: Synchronous edit of a private complete player-state copy.
+        :param expected_generation: Queue generation that an asynchronous result belongs to.
         """
-        async with self._queue_lock:
+        requested_epoch = self._queue_epoch if expected_generation is None else expected_generation
+        async with self._send_lock:
+            if requested_epoch != self._queue_epoch:
+                raise ResourceTemporarilyUnavailable("Ynison queue changed before command was sent")
             player_state = deepcopy(self.state.player_state)
-            if self._pending_queue is not None and time.monotonic() < self._pending_queue_until:
-                player_state["player_queue"] = deepcopy(self._pending_queue)
+            player_state["player_queue"] = self.queue_snapshot()
             mutation(player_state)
             queue = player_state.get("player_queue", {})
             queue["version"] = make_version_block(self.device_id)
             epoch = self._queue_epoch
-            await self.update_player_state(player_state=player_state, strict=True)
+            await self._send_locked(self._player_state_message(player_state), strict=True)
             if epoch != self._queue_epoch:
                 return
             self._pending_queue = deepcopy(queue)
@@ -803,6 +808,7 @@ class YnisonClient:
     def _parse_state(self, data: dict[str, Any]) -> None:
         """Parse PutYnisonStateResponse into YnisonState."""
         old_track = self.state.current_track_id
+        old_active_device = self.state.active_device_id
         old_index = self.state.player_state.get("player_queue", {}).get(
             "current_playable_index", -1
         )
@@ -824,7 +830,8 @@ class YnisonClient:
                 if key == "player_queue":
                     version = value.get("version", {})
                     if version.get("device_id") != self.device_id:
-                        self._reset_pending_queue()
+                        if value != existing_ps.get("player_queue"):
+                            self._reset_pending_queue()
                     elif self._last_queue_version is not None:
                         number = str(version.get("version", ""))
                         if number.isdigit() and int(number) < self._last_queue_version:
@@ -850,6 +857,8 @@ class YnisonClient:
             self.state.active_device_id = data.get(
                 "active_device_id_optional", self.state.active_device_id
             )
+        if self.state.active_device_id != old_active_device:
+            self._reset_pending_queue()
         self.state.devices = data.get("devices", self.state.devices)
 
         new_track = self.state.current_track_id
@@ -941,6 +950,24 @@ class YnisonClient:
             except aiohttp.ClientError, OSError, TimeoutError, ResourceTemporarilyUnavailable:
                 self._logger.warning("Ynison reconnect attempt %d failed", attempt, exc_info=True)
 
+    def _player_state_message(self, player_state: dict[str, Any]) -> dict[str, Any]:
+        """Build a complete queue update envelope."""
+        queue = player_state.get("player_queue", {})
+        self._logger.info(
+            "→ update_player_state: index=%s queue_len=%d entity_type=%s",
+            queue.get("current_playable_index"),
+            len(queue.get("playable_list", [])),
+            queue.get("entity_type", ""),
+        )
+        msg = {
+            "update_player_state": {
+                "player_state": player_state,
+            },
+            **self._message_meta(),
+        }
+        self._logger.debug("Sending player state: %s", json.dumps(msg)[:500])
+        return msg
+
     async def _send(self, msg: dict[str, Any], *, strict: bool = False) -> bool:
         """
         Send a JSON message to the state service (thread-safe).
@@ -952,21 +979,25 @@ class YnisonClient:
             log + schedule reconnect + return.
         """
         async with self._send_lock:
-            if self._ws is None or self._ws.closed:
-                self._logger.debug("Cannot send to Ynison — not connected")
-                if strict:
-                    raise YnisonSendError("Ynison WebSocket not connected")
-                return False
-            try:
-                await self._ws.send_str(json.dumps(msg))
-                return True
-            except (ConnectionError, aiohttp.ClientError, RuntimeError, OSError) as exc:
-                self._logger.warning("Failed to send message to Ynison, scheduling reconnect")
-                self._connected = False
-                self._schedule_reconnect()
-                if strict:
-                    raise YnisonSendError("Ynison send failed") from exc
-                return False
+            return await self._send_locked(msg, strict=strict)
+
+    async def _send_locked(self, msg: dict[str, Any], *, strict: bool) -> bool:
+        """Send one envelope while the caller holds the transport lock."""
+        if self._ws is None or self._ws.closed:
+            self._logger.debug("Cannot send to Ynison — not connected")
+            if strict:
+                raise YnisonSendError("Ynison WebSocket not connected")
+            return False
+        try:
+            await self._ws.send_str(json.dumps(msg))
+            return True
+        except (ConnectionError, aiohttp.ClientError, RuntimeError, OSError) as exc:
+            self._logger.warning("Failed to send message to Ynison, scheduling reconnect")
+            self._connected = False
+            self._schedule_reconnect()
+            if strict:
+                raise YnisonSendError("Ynison send failed") from exc
+            return False
 
     def _schedule_reconnect(self) -> None:
         """

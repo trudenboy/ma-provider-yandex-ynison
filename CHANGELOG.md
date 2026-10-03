@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.3.5] - 2026-10-03
+
+### Changed
+
+- Maximum-quality playback resolves the consuming player's output capabilities before
+  advertising the native PCM format.
+- Linked-account validation runs during initialization and preserves the configured account.
+
+### Removed
+
+- Unreachable outgoing add, remove, and move queue operations are deferred until Music
+  Assistant provides AudioSource queue-edit controls. Incoming queue edits remain supported.
+
+### Fixed
+
+- Native-format transitions retain their playback owner through stream teardown and cancel
+  pending replacements on pause, handoff, or unload, including interrupted player commands.
+- Rapid repeat, shuffle, next, and previous controls preserve earlier unacknowledged commands
+  and use the current logical order for repeat and end-of-queue decisions.
+- Remote queue replacement discards delayed commands and obsolete radio results, while
+  unchanged peer heartbeats preserve pending controls.
+- Reconfiguration clears obsolete credentials and display settings and rejects setup when
+  no eligible playback player is available.
+- Unexpected transport or callback defects propagate instead of entering recovery loops.
+
 ## [4.3.4] - 2026-10-02
 
 ### Changed

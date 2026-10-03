@@ -178,7 +178,9 @@ the AudioSource format, and reissues `play_media` for the
 same queue from the latest Ynison progress. A mixed-format boundary may be
 audible and can skip elapsed time because the Ynison clock keeps running.
 The restart retains a generation-scoped owner intent across claim release.
-Pause, handoff, and unload invalidate that intent.
+Pause, handoff, and unload invalidate that intent. If `play_media` has returned
+before the renderer claims the replacement, cancellation deselects its exact MA
+playback session so a late HTTP fetch cannot reacquire the source.
 
 ## Ynison transport and recovery
 
@@ -205,6 +207,11 @@ queue mutation path. A successful send supplies the next mutation's queue base
 until its echo, peer replacement, disconnect/reconnect, or a 30-second timeout.
 Older own queue versions cannot overwrite a newer sent version. Server state
 remains authoritative; pending queue edits do not optimistically change status.
+Next/previous and terminal repeat/stop decisions use the mutation's queue base
+under the send lock. A navigation lock also orders RADIO fetches. Peer queue or
+active-device changes invalidate queued mutations; unchanged peer heartbeats do
+not discard unacknowledged commands. RADIO API results and prefetch caches carry
+their originating queue generation and are discarded after replacement.
 Outgoing add/remove/move helpers are deferred until MA exposes an AudioSource API
 for those controls. Incoming peer queue edits remain supported.
 
