@@ -1324,12 +1324,14 @@ def _make_ws_msg(
 class TestMessageLoop:
     """Tests for _message_loop."""
 
+    @pytest.mark.parametrize("during_send", [False, True])
     async def test_peer_queue_supersedes_command_waiting_for_transport(
         self,
         client: YnisonClient,
         mock_state_callback: AsyncMock,
+        during_send: bool,
     ) -> None:
-        """A peer replacement cancels a queued command before stale data is sent."""
+        """A peer replacement rejects queued and in-flight mutations as obsolete."""
         client.state.player_state = {
             "player_queue": {
                 "playable_list": [{"playable_id": "old"}],
@@ -1347,14 +1349,19 @@ class TestMessageLoop:
         ws.send_str.side_effect = slow_send
         client._ws = ws
         client._connected = True
-        heartbeat = asyncio.create_task(client.update_playing_status(0, 0, False))
-        await asyncio.wait_for(entered.wait(), timeout=1)
+        heartbeat = None
+        if not during_send:
+            heartbeat = asyncio.create_task(client.update_playing_status(0, 0, False))
+            await asyncio.wait_for(entered.wait(), timeout=1)
         command = asyncio.create_task(
             client.mutate_player_state(
                 lambda ps: ps["player_queue"].update(options={"repeat_mode": "ALL"})
             )
         )
-        await asyncio.sleep(0)
+        if during_send:
+            await asyncio.wait_for(entered.wait(), timeout=1)
+        else:
+            await asyncio.sleep(0)
         mock_state_callback.side_effect = lambda _state: client._stop_event.set()
         try:
             await self._run_loop_with_messages(
@@ -1381,14 +1388,17 @@ class TestMessageLoop:
                 ],
             )
             release.set()
-            await heartbeat
+            if heartbeat is not None:
+                await heartbeat
             with pytest.raises(ResourceTemporarilyUnavailable, match="queue changed"):
                 await command
             client._ws.send_str.assert_not_awaited()
             assert client.state.current_track_id == "peer-new"
+            assert client.queue_snapshot()["playable_list"] == [{"playable_id": "peer-new"}]
         finally:
             release.set()
-            await asyncio.gather(heartbeat, command, return_exceptions=True)
+            tasks = [command] if heartbeat is None else [heartbeat, command]
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def test_callback_programming_error_propagates(
         self,

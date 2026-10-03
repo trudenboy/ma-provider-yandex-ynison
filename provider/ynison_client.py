@@ -480,7 +480,7 @@ class YnisonClient:
             epoch = self._queue_epoch
             await self._send_locked(self._player_state_message(player_state), strict=True)
             if epoch != self._queue_epoch:
-                return
+                raise ResourceTemporarilyUnavailable("Ynison queue changed while command was sent")
             self._pending_queue = deepcopy(queue)
             self._pending_queue_until = time.monotonic() + 30
             self._last_queue_version = int(queue["version"]["version"])
