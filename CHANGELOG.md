@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.3.6] - 2026-10-05
+
+### Changed
+
+- Requires `ya-passport-auth` 2.1.0, aligning the shared Yandex authentication library with the other Yandex providers (Yandex Station 1.5.18).
+
 ## [4.3.5] - 2026-10-03
 
 ### Changed
