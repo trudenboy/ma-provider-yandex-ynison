@@ -1,0 +1,157 @@
+{
+  "pr": 5589,
+  "repo": "music-assistant/server",
+  "release": "4.3.7",
+  "note": "OzGav entries are drafts only: rewrite them in your own words (AI policy rule 3), then set approved=true. Copilot entries may stay AI-drafted (rule 4) once you have read them.",
+  "replies": [
+    {
+      "comment_id": 4175659757,
+      "reviewer": "OzGav",
+      "kind": "human",
+      "approved": false,
+      "body": "Agreed. I added the disabled-instance check to the shared helper in ya-passport-auth (trudenboy/ya-passport-auth#84), so Ynison, Station and Smart Home will all skip disabled Yandex Music instances. Until that release is available, this PR uses `mass.config.get_provider_configs(provider_domain=\"yandex_music\")` as you suggested, rather than reading the raw providers dict. Once the library is released, the local helper goes and Ynison calls the shared one."
+    },
+    {
+      "comment_id": 4175662425,
+      "reviewer": "OzGav",
+      "kind": "human",
+      "approved": false,
+      "body": "You're right about `__auto__` and `publish_name`. `migrate_connected_player_plugins` already clears both, so I removed the provider-side checks; the provider now only checks for a missing player. For the own-credentials leftovers (`__own__`, token, x_token, account_login, remember_session), the setup flow clears those keys on reconfigure, and the provider rejects `__own__` with a message asking the user to reconfigure."
+    },
+    {
+      "comment_id": 4175664304,
+      "reviewer": "OzGav",
+      "kind": "human",
+      "approved": false,
+      "body": "Removed. `owner.get_setup_value(...)` is now called directly, without the `getattr`/`callable` guard or the unreachable upgrade error."
+    },
+    {
+      "comment_id": 4175667965,
+      "reviewer": "OzGav",
+      "kind": "human",
+      "approved": false,
+      "body": "`format_policy.py` is gone along with dynamic mode, so the copy in that file no longer exists. One copy is left in `_snap_rate_to_player`. The provider needs the rate before streaming starts so that the format it declares matches the stream and core doesn't add a second resampling step."
+    },
+    {
+      "comment_id": 4175669880,
+      "reviewer": "OzGav",
+      "kind": "human",
+      "approved": false,
+      "body": "Removed together with dynamic mode. The range checks and their `ValueError`s are gone, and so is the related validation in provider.py."
+    },
+    {
+      "comment_id": 4175672428,
+      "reviewer": "OzGav",
+      "kind": "human",
+      "approved": false,
+      "body": "Done as you suggested. `mutate_player_state` now accepts a `False` return from the callback to mean \"don't send\". The RADIO path sets the outcome through the nonlocal and returns `False`. `_RadioQueueNeedsTracks` is removed."
+    },
+    {
+      "comment_id": 4175679288,
+      "reviewer": "OzGav",
+      "kind": "human",
+      "approved": false,
+      "body": "The `LEGACY_AUTOMATIC_PLAYER` check is removed; only the missing-player check is left. The `__own__` check stays, so an old own-credentials setup fails with a message asking the user to reconfigure."
+    },
+    {
+      "comment_id": 4175683994,
+      "reviewer": "OzGav",
+      "kind": "human",
+      "approved": false,
+      "body": "Removed. `_snap_rate_to_player` no longer catches anything, so capability errors propagate. The second lookup (old line 2455) was part of dynamic mode and is gone."
+    },
+    {
+      "comment_id": 4175686304,
+      "reviewer": "OzGav",
+      "kind": "human",
+      "approved": false,
+      "body": "I agree the format-change handling belongs in core. I removed dynamic mode from the provider completely: no generations, no `_FormatRestart`, no reading core's session records. The old stream-mode setting is ignored, and each session uses one PCM format, so this PR now covers only linked accounts, the lifecycle fixes and queue controls."
+    },
+    {
+      "comment_id": 4175687667,
+      "reviewer": "OzGav",
+      "kind": "human",
+      "approved": false,
+      "body": "Both waits were part of the dynamic restart coordinator, which I removed with dynamic mode. `_dynamic_target_track_id` is gone too."
+    },
+    {
+      "comment_id": 4175688810,
+      "reviewer": "OzGav",
+      "kind": "human",
+      "approved": false,
+      "body": "The outer loop is gone with dynamic mode. Stream details are now fetched with one bounded retry (three attempts with backoff), and playback of that track stops if it still fails."
+    },
+    {
+      "comment_id": 4175690255,
+      "reviewer": "OzGav",
+      "kind": "human",
+      "approved": false,
+      "body": "Removed together with `format_policy.py`, including the clear-and-refetch on failure."
+    },
+    {
+      "comment_id": 4175691958,
+      "reviewer": "OzGav",
+      "kind": "human",
+      "approved": false,
+      "body": "Removed. That function was part of dynamic mode, and nothing raises `CancelledError` by hand any more."
+    },
+    {
+      "comment_id": 4175693730,
+      "reviewer": "OzGav",
+      "kind": "human",
+      "approved": false,
+      "body": "The `previous` flag is gone. `_on_previous` passes the index it computed, and the queue generation is checked when the update is sent. When there's no previous track, `_on_previous` now does nothing instead of raising `ResourceTemporarilyUnavailable`."
+    },
+    {
+      "comment_id": 4175696071,
+      "reviewer": "OzGav",
+      "kind": "human",
+      "approved": false,
+      "body": "I removed the `player` key from the prefill and from the cleanup, and also `publish_name`, since the core migration already drops it. The rest of the cleanup only clears own-credential keys on reconfigure."
+    },
+    {
+      "comment_id": 4175697325,
+      "reviewer": "OzGav",
+      "kind": "human",
+      "approved": false,
+      "body": "Removed."
+    },
+    {
+      "comment_id": 4175698742,
+      "reviewer": "OzGav",
+      "kind": "human",
+      "approved": false,
+      "body": "An empty ticket means the token was rejected, so both the first connect and the reconnect loop now raise `LoginFailed` directly. `YnisonEmptyRedirectError` is removed."
+    },
+    {
+      "comment_id": 4175699910,
+      "reviewer": "OzGav",
+      "kind": "human",
+      "approved": false,
+      "body": "Fixed. A missing or non-numeric field is now skipped in the comparison instead of being compared against a stand-in value, and `int()` can no longer raise out of `_parse_state`. There's a regression test with a malformed heartbeat."
+    },
+    {
+      "comment_id": 4175701333,
+      "reviewer": "OzGav",
+      "kind": "human",
+      "approved": false,
+      "body": "Fixed. Closing the socket and scheduling the reconnect now happen in the `finally`, so an unexpected error is logged with its traceback and the connection recovers. The old loop only cleans up its own socket, so it can't close a newer connection. This is covered by a test that runs against a real local WebSocket."
+    },
+    {
+      "comment_id": 4196454536,
+      "reviewer": "copilot-pull-request-reviewer",
+      "kind": "bot",
+      "approved": false,
+      "resolve": true,
+      "body": "Fixed in provider v4.3.7, which is now synced into this PR. Natural track completion no longer treats a transient outage as terminal. Before each queue publication it waits up to ten seconds for the same Ynison client to reconnect and finish its post-reconnect settle window. A failed publication is retried once. If the queue, active device or pause state changes during the wait, or the client is replaced or the stream is stopped, the pending completion is dropped, so a replacement queue or another device's playback is never advanced. Regression tests cover an outage before the send and during it."
+    },
+    {
+      "comment_id": 4196454668,
+      "reviewer": "copilot-pull-request-reviewer",
+      "kind": "bot",
+      "approved": false,
+      "resolve": true,
+      "body": "The title and description now say v4.3.7, which matches the `VERSION` synced into this PR."
+    }
+  ]
+}
