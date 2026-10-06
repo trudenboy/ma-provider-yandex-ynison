@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.3.8] - 2026-10-06
+
+### Changed
+
+- Requires `ya-passport-auth` 2.2.0. Account selection uses the shared Yandex Music instance list, which skips disabled instances.
+
 ## [4.3.7] - 2026-10-06
 
 ### Changed
