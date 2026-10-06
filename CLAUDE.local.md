@@ -99,15 +99,16 @@ The native setup flow stores these values in setup data:
 With one Yandex Music instance, setup selects it automatically. With several,
 the user must choose. No configured Yandex Music provider aborts setup with
 `missing_dependency`; no available player aborts with `no_players`. Reconfigure
-clears legacy auth keys rather than transferring credentials. Legacy `__auto__`
-setups fail with `no_connected_player` until a concrete player is selected.
+clears legacy auth keys rather than transferring credentials. Core migration
+(`migrate_connected_player_plugins`) clears legacy `__auto__` players and
+`publish_name`; the provider only sees an empty player and fails with
+`no_connected_player` until a concrete player is selected.
 
 ### Runtime values
 
 | Key | Default | Meaning |
 |-----|---------|---------|
 | `allow_player_switch` | `true` | Allow this source to move to another player |
-| `stream_mode` | `stable` | `stable` or per-track `max_quality_dynamic` PCM sessions |
 | `output_sample_rate` | `auto` | `auto`, 44100, 48000, or 96000 Hz |
 | `output_bit_depth` | `auto` | `auto`, 16, or 24 bit |
 | `device_id` | generated | Hidden persistent 16-character Ynison device id |
@@ -144,12 +145,9 @@ stream hint may promote rate/depth, including 96 kHz. Explicit configuration
 wins over hints. Automatic rates are snapped down to the nearest supported
 target-player rate; explicit rates are preserved.
 
-`max_quality_dynamic` is eligible only for Yandex Music `Superb` quality with
-both output overrides set to `auto`. It accepts real source rates from 8 through
-384 kHz, maps source precision to PCM16/24/32, and selects the highest player
-rate not above the source when possible. The effective signature is frozen per
-session and resolved from the owner's `resolve_output_player()` capabilities
-before `play_media`. `on_source_selected` retains the advertised PCM format.
+PCM remains fixed across every track in one source session. The dynamic mode
+and its coordinator have been removed. Old `stream_mode` settings are ignored;
+they cannot affect setup, format selection, or playback.
 
 `get_audio_stream` follows Ynison track changes in one long-lived AudioSource
 session. It fetches cached StreamDetails, runs one ffmpeg decoder per track,
@@ -170,18 +168,6 @@ local track generator at the requested offset. Natural end, pause, track
 change, and stale session teardown are classified separately so an interrupted
 track is never advanced accidentally.
 
-Dynamic mode prefetches the current and immediate next playable ID in the
-background. Equal effective signatures continue the current generator. A
-changed signature ends it on a PCM-frame boundary without signalling natural
-completion, waits for the matching core `on_source_unselected` callback, rebuilds
-the AudioSource format, and reissues `play_media` for the
-same queue from the latest Ynison progress. A mixed-format boundary may be
-audible and can skip elapsed time because the Ynison clock keeps running.
-The restart retains a generation-scoped owner intent across claim release.
-Pause, handoff, and unload invalidate that intent. If `play_media` has returned
-before the renderer claims the replacement, cancellation deselects its exact MA
-playback session so a late HTTP fetch cannot reacquire the source.
-
 ## Ynison transport and recovery
 
 The transport performs:
@@ -197,8 +183,9 @@ Transient failures reconnect indefinitely using 5, 10, 30, and 60 second
 saturated delays with ±20% jitter. Only one reconnect task may exist. Strict
 sends raise `YnisonSendError` for user commands and delivery-critical queue
 updates; periodic progress and prefetch publications remain best-effort.
-An empty redirect ticket shares a one-attempt credential-refresh budget with
-401/403 failures for each reconnect episode.
+An empty redirect ticket is a `LoginFailed`, like 401/403. During reconnect,
+these failures share a one-attempt credential-refresh budget. Unexpected
+parser/callback errors propagate after socket cleanup and reconnect scheduling.
 
 ## Radio queues
 
@@ -214,6 +201,11 @@ not discard unacknowledged commands. RADIO API results and prefetch caches carry
 their originating queue generation and are discarded after replacement.
 Outgoing add/remove/move helpers are deferred until MA exposes an AudioSource API
 for those controls. Incoming peer queue edits remain supported.
+
+Natural completion waits at most ten seconds for transport recovery and retries
+one failed queue publication. A changed queue, active device, or pause state
+invalidates the pending completion. RADIO decisions can return `False` from
+the mutation callback to fetch tracks without sending unchanged state.
 
 When a `RADIO` queue reaches its final two items, the provider prefetches
 rotor tracks through the linked Yandex Music provider. It maps returned tracks

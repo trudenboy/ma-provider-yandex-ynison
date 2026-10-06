@@ -6,7 +6,7 @@ from pathlib import Path
 
 from provider.streaming import PCM_LOSSLESS_PARAMS
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_claude_local_md_documents_lossless_profile_correctly() -> None:

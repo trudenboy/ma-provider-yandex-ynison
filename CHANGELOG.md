@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.3.7] - 2026-10-06
+
+### Changed
+
+- Account selection uses Music Assistant's supported configuration API and excludes
+  disabled Yandex Music instances.
+- Player capability errors are reported instead of silently selecting a fallback format.
+
+### Removed
+
+- Removed maximum-quality dynamic playback and the stream-mode setting. Existing
+  instances use continuous playback with one PCM format per session.
+
+### Fixed
+
+- Track completion waits for a temporary connection outage to recover and retries a
+  failed queue update without advancing a replacement queue or another device's playback.
+- Unexpected message-processing failures close their WebSocket and schedule recovery
+  without interrupting a newer connection.
+- Incomplete or malformed progress responses no longer break heartbeat echo detection.
+- Empty redirect responses are consistently classified as authentication failures.
+
 ## [4.3.6] - 2026-10-05
 
 ### Changed
