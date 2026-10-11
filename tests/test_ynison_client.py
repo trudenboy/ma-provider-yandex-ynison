@@ -27,6 +27,7 @@ from provider.ynison_client import (
     YnisonDeviceInfo,
     YnisonSendError,
     YnisonState,
+    YnisonVolume,
     generate_device_id,
     make_version_block,
 )
@@ -157,6 +158,38 @@ class TestYnisonState:
         assert state.progress_ms == 30000
         assert state.duration_ms == 180000
 
+    def test_device_volume_reads_value_and_authorship(self) -> None:
+        """The requested device's volume and its authoring version are exposed."""
+        state = YnisonState(devices=_fixture("peer_volume.json")["devices"])
+
+        assert state.device_volume("DEVICE_MA") == YnisonVolume(
+            volume=0.35, author="DEVICE_PHONE", version="8"
+        )
+
+    def test_device_volume_treats_omitted_value_as_zero(self) -> None:
+        """Proto3 JSON omits a zero volume while keeping its version."""
+        devices = _fixture("peer_volume.json")["devices"]
+        del devices[1]["volume_info"]["volume"]
+
+        volume = YnisonState(devices=devices).device_volume("DEVICE_MA")
+
+        assert volume is not None
+        assert volume.volume == 0.0
+
+    @pytest.mark.parametrize(
+        "devices",
+        [
+            [],
+            [{"info": {"device_id": "DEVICE_MA"}}],
+            [{"info": {"device_id": "DEVICE_MA"}, "volume_info": None}],
+            [{"info": {"device_id": "DEVICE_MA"}, "volume_info": {"volume": "loud"}}],
+            [{"info": None}],
+        ],
+    )
+    def test_device_volume_missing_or_malformed_is_none(self, devices: list[Any]) -> None:
+        """Absent or malformed volume data is not reported as a volume."""
+        assert YnisonState(devices=devices).device_volume("DEVICE_MA") is None
+
 
 # ------------------------------------------------------------------
 # YnisonClient internals
@@ -196,6 +229,17 @@ class TestYnisonClientBuildMethods:
         assert device["info"]["device_id"] == "test-device-id"
         assert device["capabilities"]["can_be_player"] is True
         assert device["capabilities"]["can_be_remote_controller"] is False
+
+    def test_build_device_dict_advertises_volume_control(self, client: YnisonClient) -> None:
+        """Registration advertises a 100-step volume scale and the local volume."""
+        device = client._build_device_dict()
+
+        assert device["capabilities"]["volume_granularity"] == 100
+        assert device["volume_info"]["volume"] == 1.0
+        version = device["volume_info"]["version"]
+        assert version["device_id"] == "test-device-id"
+        assert isinstance(version["version"], str)
+        assert isinstance(version["timestamp_ms"], str)
 
     def test_build_initial_state(self, client: YnisonClient) -> None:
         """Initial state is paused with empty queue."""
@@ -1070,6 +1114,39 @@ class TestMessageBuildingMethods:
         assert ufs["player_state"]["status"]["paused"] is True
         assert ufs["is_currently_active"] is False
         assert "rid" in call_data
+
+    async def test_update_volume_info(self, client: YnisonClient) -> None:
+        """update_volume_info targets this device with a rounded authored volume."""
+        assert await client.update_volume_info(0.123456) is True
+
+        call_data = json.loads(self.mock_ws.send_str.call_args[0][0])
+        update = call_data["update_volume_info"]
+        assert update["device_id"] == "test-device-id"
+        assert update["volume_info"]["volume"] == 0.1235
+        assert update["volume_info"]["version"]["device_id"] == "test-device-id"
+        assert isinstance(update["volume_info"]["version"]["version"], str)
+        assert "rid" in call_data
+        assert isinstance(call_data["player_action_timestamp_ms"], str)
+
+    @pytest.mark.parametrize(("requested", "sent"), [(-0.5, 0.0), (1.7, 1.0)])
+    async def test_update_volume_info_clamps(
+        self, client: YnisonClient, requested: float, sent: float
+    ) -> None:
+        """Out-of-range volumes are clamped to Ynison's 0..1 scale."""
+        await client.update_volume_info(requested)
+
+        call_data = json.loads(self.mock_ws.send_str.call_args[0][0])
+        assert call_data["update_volume_info"]["volume_info"]["volume"] == sent
+
+    async def test_full_state_after_volume_update_publishes_latest_volume(
+        self, client: YnisonClient
+    ) -> None:
+        """A later registration (reconnect) carries the latest local volume."""
+        await client.update_volume_info(0.42)
+        await client.send_full_state()
+
+        call_data = json.loads(self.mock_ws.send_str.call_args[0][0])
+        assert call_data["update_full_state"]["device"]["volume_info"]["volume"] == 0.42
 
     async def test_send_full_state_custom(self, client: YnisonClient) -> None:
         """send_full_state with custom player_state uses it."""
@@ -2393,6 +2470,17 @@ class TestSendStrictMode:
 
         assert client._connected is False
         mock_rc.assert_awaited_once()
+
+    async def test_update_volume_info_disconnected_keeps_value_for_registration(
+        self, client: YnisonClient
+    ) -> None:
+        """A disconnected send fails softly but the value is used on reconnect."""
+        client._ws = None
+
+        assert await client.update_volume_info(0.3) is False
+        with pytest.raises(YnisonSendError):
+            await client.update_volume_info(0.3, strict=True)
+        assert client._build_device_dict()["volume_info"]["volume"] == 0.3
 
     async def test_send_non_strict_swallows_and_schedules_reconnect(
         self, client: YnisonClient

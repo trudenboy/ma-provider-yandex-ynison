@@ -38,6 +38,7 @@ from .constants import (
     YNISON_RECONNECT_ERROR_CODES,
     YNISON_REDIRECT_URL,
     YNISON_STATE_PATH,
+    YNISON_VOLUME_GRANULARITY,
 )
 
 
@@ -124,6 +125,15 @@ class _StatusWatermark:
     sent_at: float
 
 
+@dataclass(frozen=True)
+class YnisonVolume:
+    """Volume of one Ynison device and the device that last changed it."""
+
+    volume: float
+    author: str | None
+    version: str | None
+
+
 @dataclass
 class YnisonState:
     """Parsed Ynison state from the server."""
@@ -165,6 +175,35 @@ class YnisonState:
     def duration_ms(self) -> int:
         """Return current track duration in milliseconds."""
         return int(self.player_state.get("status", {}).get("duration_ms", 0))
+
+    def device_volume(self, device_id: str) -> YnisonVolume | None:
+        """
+        Return the published volume of one device, or ``None`` when unknown.
+
+        :param device_id: Ynison device id to look up in the device list.
+        """
+        for device in self.devices:
+            info = device.get("info")
+            if not isinstance(info, dict) or info.get("device_id") != device_id:
+                continue
+            volume_info = device.get("volume_info")
+            if not isinstance(volume_info, dict):
+                return None
+            # Proto3 JSON omits a zero volume while keeping its version.
+            value = volume_info.get("volume", 0.0)
+            if isinstance(value, bool) or not isinstance(value, int | float):
+                return None
+            version = volume_info.get("version")
+            if not isinstance(version, dict):
+                version = {}
+            author = version.get("device_id")
+            number = version.get("version")
+            return YnisonVolume(
+                volume=float(value),
+                author=author if isinstance(author, str) else None,
+                version=None if number is None else str(number),
+            )
+        return None
 
 
 # Type alias for the state update callback
@@ -222,6 +261,8 @@ class YnisonClient:
         self._connected = False
         self._has_connected_once = False
         self._status_watermarks: deque[_StatusWatermark] = deque(maxlen=8)
+        # Latest local volume (0..1), re-published by every device registration.
+        self._volume = 1.0
 
         # Latest state from server
         self.state = YnisonState()
@@ -383,6 +424,28 @@ class YnisonClient:
                         sent_at=time.monotonic(),
                     )
                 )
+
+    async def update_volume_info(self, volume: float, *, strict: bool = False) -> bool:
+        """
+        Publish this device's volume to Ynison.
+
+        The value is also kept for later device registrations, even when the
+        send fails.
+
+        :param volume: Volume on Ynison's ``0.0..1.0`` scale; clamped.
+        :param strict: Raise :class:`YnisonSendError` on transport failure.
+        :return: ``True`` when the update was written to the WebSocket.
+        """
+        self._volume = round(max(0.0, min(1.0, volume)), 4)
+        msg = {
+            "update_volume_info": {
+                "device_id": self.device_id,
+                "volume_info": self._build_volume_info(),
+            },
+            **self._message_meta(),
+        }
+        self._logger.debug("→ update_volume_info: volume=%.4f", self._volume)
+        return await self._send(msg, strict=strict)
 
     async def update_active_device(self, device_id: str) -> None:
         """Request playback transfer to this device."""
@@ -608,8 +671,17 @@ class YnisonClient:
             "capabilities": {
                 "can_be_player": True,
                 "can_be_remote_controller": False,
+                "volume_granularity": YNISON_VOLUME_GRANULARITY,
             },
+            "volume_info": self._build_volume_info(),
             "is_shadow": False,
+        }
+
+    def _build_volume_info(self) -> dict[str, Any]:
+        """Build this device's volume block with a fresh authored version."""
+        return {
+            "volume": self._volume,
+            "version": make_version_block(self.device_id),
         }
 
     def _build_initial_state(self) -> dict[str, Any]:

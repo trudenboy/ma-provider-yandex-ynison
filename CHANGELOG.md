@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.4.0] - 2026-10-11
+
+### Added
+
+- Volume synchronization with Yandex Music: the app's volume slider for this device
+  controls the Music Assistant player or sync group playing the source, and volume
+  changes in Music Assistant update the slider. The player's own volume is kept when
+  playback starts.
+
 ## [4.3.9] - 2026-10-11
 
 ### Fixed

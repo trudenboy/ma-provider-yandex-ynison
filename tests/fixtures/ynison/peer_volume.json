@@ -1,0 +1,50 @@
+{
+  "active_device_id_optional": "DEVICE_MA",
+  "devices": [
+    {
+      "info": {
+        "device_id": "DEVICE_PHONE",
+        "title": "Phone",
+        "type": "ANDROID",
+        "app_name": "Yandex Music",
+        "app_version": "1.0"
+      },
+      "capabilities": {
+        "can_be_player": true,
+        "can_be_remote_controller": true,
+        "volume_granularity": 16
+      },
+      "volume_info": {
+        "volume": 0.8,
+        "version": {
+          "device_id": "DEVICE_PHONE",
+          "version": "7",
+          "timestamp_ms": "1000"
+        }
+      }
+    },
+    {
+      "info": {
+        "device_id": "DEVICE_MA",
+        "title": "Living Room",
+        "type": "WEB",
+        "app_name": "Music Assistant",
+        "app_version": "1.0"
+      },
+      "capabilities": {
+        "can_be_player": true,
+        "can_be_remote_controller": false,
+        "volume_granularity": 100
+      },
+      "volume_info": {
+        "volume": 0.35,
+        "version": {
+          "device_id": "DEVICE_PHONE",
+          "version": "8",
+          "timestamp_ms": "2000"
+        }
+      },
+      "is_offline": false
+    }
+  ]
+}
