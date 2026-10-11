@@ -101,6 +101,10 @@ _PREFETCH_FORMAT_TIMEOUT = 2.5
 # Idempotency cache TTL for outbound peer-commands.
 _COMMAND_IDEMPOTENCY_TTL = 1.0
 
+# Inbound Ynison volume is ignored for this long after this device becomes
+# active or the source is selected, so the MA player's own volume wins.
+_VOLUME_GRACE_PERIOD = 3.0
+
 # stable id for the single AudioSource this provider exposes;
 # combined with the provider instance_id this forms the persistent uri
 AUDIO_SOURCE_ID = "main"
@@ -283,6 +287,14 @@ class YandexYnisonProvider(PluginProvider):
         self._token_cache: dict[str, _CachedToken] = {}
         self._token_refresh_lock = asyncio.Lock()
         self._now: Callable[[], float] = time.monotonic
+
+        # Volume sync: last 0..100 level exchanged in either direction (echo
+        # suppression), the last processed Ynison (author, version) pair, and
+        # the window in which inbound volume yields to the MA player's volume.
+        self._last_volume_level: int | None = None
+        self._volume_fingerprint: tuple[str | None, str | None] | None = None
+        self._volume_grace_until = 0.0
+        self._ynison_device_active = False
 
     async def get_config_entries(self) -> tuple[ConfigEntry, ...]:
         """Return runtime playback configuration entries for this provider."""
@@ -715,6 +727,7 @@ class YandexYnisonProvider(PluginProvider):
         self._active_player_id = player_id
         self.logger.debug("Active player set to: %s", player_id)
         self._publish_source_options(owner_player_id)
+        await self._push_player_volume(owner_player_id)
 
     async def on_source_unselected(
         self, source_id: str, owner_player_id: str, stream_session_id: str
@@ -732,6 +745,12 @@ class YandexYnisonProvider(PluginProvider):
         self._active_session_id = None
         if self._in_use_by_player == owner_player_id:
             self._in_use_by_player = None
+
+    async def on_volume_change(self, source_id: str, volume: int) -> None:
+        """Mirror the session owner's new volume to the Yandex Music volume slider."""
+        if source_id != AUDIO_SOURCE_ID or volume == self._last_volume_level:
+            return
+        await self._publish_volume(volume)
 
     async def _wait_for_track_change(
         self, old_track: str | tuple[str, int], timeout: float = 30.0
@@ -1119,6 +1138,9 @@ class YandexYnisonProvider(PluginProvider):
     async def _handle_ynison_state(self, state: YnisonState) -> None:
         """Handle state update from Ynison."""
         is_our_device = state.active_device_id == self._device_id
+        if is_our_device and not self._ynison_device_active:
+            self._volume_grace_until = time.monotonic() + _VOLUME_GRACE_PERIOD
+        self._ynison_device_active = is_our_device
 
         # Detailed queue logging for diagnostics
         queue = state.player_state.get("player_queue", {})
@@ -1155,6 +1177,9 @@ class YandexYnisonProvider(PluginProvider):
                 state.is_paused,
             )
             return
+
+        if is_our_device:
+            await self._apply_ynison_volume(state)
 
         if is_our_device and not state.is_paused:
             self._remember_and_publish_source_options(queue)
@@ -1291,6 +1316,68 @@ class YandexYnisonProvider(PluginProvider):
                 target_player_id, force_update=significant_change
             )
             self._last_player_update_time = now_mono
+
+    async def _apply_ynison_volume(self, state: YnisonState) -> None:
+        """Apply a peer's change of this device's Ynison volume to the session owner."""
+        volume = state.device_volume(self._device_id)
+        if volume is None:
+            return
+        fingerprint = (volume.author, volume.version)
+        if fingerprint == self._volume_fingerprint:
+            return
+        # Record before filtering so a value seen while ignored (own echo,
+        # grace window, no owner) is not applied by a later repeated broadcast.
+        self._volume_fingerprint = fingerprint
+        owner_player_id = self._in_use_by_player
+        if (
+            volume.author == self._device_id
+            or owner_player_id is None
+            or time.monotonic() < self._volume_grace_until
+        ):
+            return
+        level = round(volume.volume * 100)
+        if level == self._last_volume_level:
+            return
+        previous_level = self._last_volume_level
+        # Recorded before the command: MA reports the change back through
+        # on_volume_change, which must not echo it to Ynison.
+        self._last_volume_level = level
+        try:
+            await self.mass.players.cmd_volume_set(owner_player_id, level)
+        except MusicAssistantError as err:
+            self._last_volume_level = previous_level
+            self.logger.debug("Could not apply Ynison volume to %s: %s", owner_player_id, err)
+
+    async def _push_player_volume(self, player_id: str) -> None:
+        """
+        Publish a player's current volume to Ynison, bypassing deduplication.
+
+        :param player_id: Session owner whose volume (or group volume) is published.
+        """
+        self._volume_grace_until = time.monotonic() + _VOLUME_GRACE_PERIOD
+        if (player := self.mass.players.get_player(player_id)) is None:
+            return
+        level = player.state.volume_level
+        if not isinstance(level, int):
+            level = player.state.group_volume
+        if not isinstance(level, int):
+            return
+        await self._publish_volume(max(0, min(100, level)))
+
+    async def _publish_volume(self, level: int) -> None:
+        """
+        Send a 0..100 volume to Ynison as best effort.
+
+        :param level: Music Assistant volume level.
+        """
+        if self._ynison is None:
+            return
+        previous_level = self._last_volume_level
+        # Recorded before the send so the server's echo, which can arrive
+        # while the send is awaited, is recognised.
+        self._last_volume_level = level
+        if not await self._ynison.update_volume_info(level / 100):
+            self._last_volume_level = previous_level
 
     def _update_metadata(self, state: YnisonState) -> None:
         """Update AudioSource metadata from Ynison state."""

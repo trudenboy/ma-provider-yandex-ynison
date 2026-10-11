@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from contextlib import suppress
 from copy import deepcopy
 from functools import partial
@@ -4752,3 +4753,202 @@ class TestStableOnlySource:
         )
         assert not hasattr(provider, "_dynamic_task")
         assert provider._normalized_format.content_type == ContentType.PCM_S16LE
+
+
+# ------------------------------------------------------------------
+# Volume synchronization
+# ------------------------------------------------------------------
+
+
+def _volume_device(device_id: str, volume: float, author: str, version: str) -> dict[str, Any]:
+    """Build one Ynison device entry carrying a volume_info block."""
+    return {
+        "info": {"device_id": device_id},
+        "volume_info": {
+            "volume": volume,
+            "version": {"device_id": author, "version": version, "timestamp_ms": "0"},
+        },
+    }
+
+
+class TestVolumeSync:
+    """Bidirectional volume synchronization between MA and Ynison."""
+
+    def _setup(self) -> tuple[YandexYnisonProvider, AsyncMock]:
+        """Create a provider with a connected real client and an owned session."""
+        provider = _make_provider()
+        client = YnisonClient(
+            SecretStr("test"),
+            YnisonDeviceInfo(provider._device_id, "Test"),
+            AsyncMock(),
+            MagicMock(),
+        )
+        ws = AsyncMock(closed=False)
+        client._ws = ws
+        client._connected = True
+        provider._ynison = client
+        provider._in_use_by_player = "player1"
+        provider._ynison_device_active = True
+        return provider, ws
+
+    def _peer_state(
+        self,
+        provider: YandexYnisonProvider,
+        volume: float,
+        version: str = "1",
+        *,
+        author: str = "phone",
+        active: str | None = None,
+    ) -> YnisonState:
+        """Build a paused state in which a peer published this device's volume."""
+        return YnisonState(
+            active_device_id=active or provider._device_id,
+            player_state={"status": {"paused": True}, "player_queue": {"playable_list": []}},
+            devices=[_volume_device(provider._device_id, volume, author, version)],
+        )
+
+    @staticmethod
+    def _sent_volumes(ws: AsyncMock) -> list[float]:
+        """Return every volume published through update_volume_info."""
+        volumes = []
+        for call in ws.send_str.call_args_list:
+            message = json.loads(call.args[0])
+            if "update_volume_info" in message:
+                volumes.append(message["update_volume_info"]["volume_info"]["volume"])
+        return volumes
+
+    async def test_ma_volume_change_is_published_once(self) -> None:
+        """A changed MA volume reaches Ynison; repeating it sends nothing."""
+        provider, ws = self._setup()
+
+        await provider.on_volume_change(AUDIO_SOURCE_ID, 42)
+        await provider.on_volume_change(AUDIO_SOURCE_ID, 42)
+
+        assert self._sent_volumes(ws) == [0.42]
+
+    async def test_foreign_source_volume_change_is_ignored(self) -> None:
+        """Only this plugin's AudioSource publishes volume."""
+        provider, ws = self._setup()
+
+        await provider.on_volume_change("other-source", 42)
+
+        assert self._sent_volumes(ws) == []
+
+    async def test_failed_send_does_not_dedupe_retry(self) -> None:
+        """A send failure neither raises nor suppresses the next identical change."""
+        provider, ws = self._setup()
+        provider._ynison._ws = None  # type: ignore[union-attr]
+
+        await provider.on_volume_change(AUDIO_SOURCE_ID, 42)
+        provider._ynison._ws = ws  # type: ignore[union-attr]
+        await provider.on_volume_change(AUDIO_SOURCE_ID, 42)
+
+        assert self._sent_volumes(ws) == [0.42]
+
+    async def test_peer_volume_sets_owner_volume_without_echoing_back(self) -> None:
+        """A peer change drives the session owner; MA's callback is not re-sent."""
+        provider, ws = self._setup()
+
+        async def volume_set(_player_id: str, level: int) -> None:
+            await provider.on_volume_change(AUDIO_SOURCE_ID, level)
+
+        provider.mass.players.cmd_volume_set.side_effect = volume_set
+
+        await provider._handle_ynison_state(self._peer_state(provider, 0.35))
+
+        provider.mass.players.cmd_volume_set.assert_awaited_once_with("player1", 35)
+        assert self._sent_volumes(ws) == []
+
+    async def test_repeated_peer_broadcast_applies_once(self) -> None:
+        """The same (author, version) carried by later broadcasts is not re-applied."""
+        provider, _ws = self._setup()
+        state = self._peer_state(provider, 0.35)
+
+        await provider._handle_ynison_state(state)
+        provider.mass.players.cmd_volume_set.reset_mock()
+        await provider.on_volume_change(AUDIO_SOURCE_ID, 60)
+        await provider._handle_ynison_state(state)
+
+        provider.mass.players.cmd_volume_set.assert_not_awaited()
+
+    async def test_own_echo_is_ignored(self) -> None:
+        """Volume authored by this device is never applied back to MA."""
+        provider, _ws = self._setup()
+
+        await provider._handle_ynison_state(
+            self._peer_state(provider, 0.9, author=provider._device_id)
+        )
+
+        provider.mass.players.cmd_volume_set.assert_not_awaited()
+
+    @pytest.mark.parametrize("case", ["other_device_active", "no_owner", "settle", "grace"])
+    async def test_peer_volume_ignored_without_live_ownership(self, case: str) -> None:
+        """Inbound volume is a no-op unless this device owns a settled session."""
+        provider, _ws = self._setup()
+        state = self._peer_state(provider, 0.35)
+        if case == "other_device_active":
+            state.active_device_id = "phone"
+        elif case == "no_owner":
+            provider._in_use_by_player = None
+        elif case == "settle":
+            provider._ynison._post_reconnect_settle_until = time.monotonic() + 5  # type: ignore[union-attr]
+        else:
+            provider._ynison_device_active = False
+
+        await provider._handle_ynison_state(state)
+
+        provider.mass.players.cmd_volume_set.assert_not_awaited()
+
+    async def test_stale_volume_from_activation_is_not_applied_later(self) -> None:
+        """The value seen during the activation grace window stays ignored afterwards."""
+        provider, _ws = self._setup()
+        provider._ynison_device_active = False
+        state = self._peer_state(provider, 0.35)
+
+        await provider._handle_ynison_state(state)
+        provider._volume_grace_until = 0.0
+        await provider._handle_ynison_state(state)
+
+        provider.mass.players.cmd_volume_set.assert_not_awaited()
+
+    async def test_failed_player_command_allows_retry_of_same_level(self) -> None:
+        """A failed volume command is swallowed and does not dedupe a later attempt."""
+        provider, _ws = self._setup()
+        provider.mass.players.cmd_volume_set.side_effect = [PlayerCommandFailed("x"), None]
+
+        await provider._handle_ynison_state(self._peer_state(provider, 0.35, "1"))
+        await provider._handle_ynison_state(self._peer_state(provider, 0.35, "2"))
+
+        assert provider.mass.players.cmd_volume_set.await_count == 2
+
+    @pytest.mark.parametrize(
+        ("volume_level", "group_volume", "expected"),
+        [(42, None, 0.42), (None, 25, 0.25), (130, None, 1.0)],
+    )
+    async def test_source_selection_pushes_owner_volume(
+        self, volume_level: int | None, group_volume: int | None, expected: float
+    ) -> None:
+        """Selecting the source publishes the owner's (or group's) volume unconditionally."""
+        provider, ws = self._setup()
+        provider._last_volume_level = round(expected * 100)
+        player = MagicMock()
+        player.state.volume_level = volume_level
+        player.state.group_volume = group_volume
+        provider.mass.players.get_player.return_value = player
+
+        await provider.on_source_selected(AUDIO_SOURCE_ID, "player1", "player1", "session-1")
+
+        assert self._sent_volumes(ws) == [expected]
+        assert provider._volume_grace_until > time.monotonic()
+
+    async def test_source_selection_without_known_volume_sends_nothing(self) -> None:
+        """A player without any volume level leaves Ynison's slider alone."""
+        provider, ws = self._setup()
+        player = MagicMock()
+        player.state.volume_level = None
+        player.state.group_volume = None
+        provider.mass.players.get_player.return_value = player
+
+        await provider.on_source_selected(AUDIO_SOURCE_ID, "player1", "player1", "session-1")
+
+        assert self._sent_volumes(ws) == []

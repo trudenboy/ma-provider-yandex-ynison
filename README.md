@@ -107,6 +107,9 @@ ignored, and existing instances use continuous playback without reconfiguration.
   interpreting its own state broadcasts as user seeks.
 - RADIO queues are replenished through the linked Yandex Music provider near
   the queue tail, then the expanded queue is published back to Ynison.
+- Volume is synchronized both ways: the Yandex Music slider controls the player
+  (or sync group) that owns the source, and Music Assistant volume changes move
+  the slider. The Music Assistant volume wins when the source is selected.
 
 ## Connection recovery
 

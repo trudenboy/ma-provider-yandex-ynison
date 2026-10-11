@@ -47,6 +47,9 @@ DEFAULT_APP_VERSION: Final[str] = "1.0.0"
 DEVICE_TYPE_WEB: Final[str] = "WEB"
 YNISON_DEVICE_SERVER_DISCONNECT: Final[str] = "server-paused-on-active-device-disconnecting"
 
+# Remote volume control: steps advertised to Ynison (maps 1:1 onto MA's 0..100)
+YNISON_VOLUME_GRANULARITY: Final[int] = 100
+
 # Reconnect settings — indexed by attempt number; attempts past the tuple
 # saturate at the last entry (so reconnect continues forever at 60 s intervals).
 RECONNECT_DELAYS: Final[tuple[float, ...]] = (5.0, 10.0, 30.0, 60.0)
