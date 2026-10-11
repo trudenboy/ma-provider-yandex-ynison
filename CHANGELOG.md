@@ -1110,3 +1110,4 @@ toggle restarted the track at 0".
 - Reconnection with exponential backoff
 - Cover art display from Ynison state
 - Docker Compose dev environment for local testing
+- Reverse-synced upstream PR #6887 (WIP)
