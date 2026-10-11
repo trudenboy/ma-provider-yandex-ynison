@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.3.9] - 2026-10-11
+
+### Fixed
+
+- Repeat in Music Assistant resets to off when a Yandex Music client clears it by omitting
+  the repeat option, instead of keeping the previous repeat-one or repeat-all state.
+
 ## [4.3.8] - 2026-10-07
 
 ### Changed

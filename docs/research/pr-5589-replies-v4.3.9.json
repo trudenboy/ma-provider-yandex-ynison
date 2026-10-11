@@ -1,0 +1,16 @@
+{
+  "pr": 5589,
+  "repo": "music-assistant/server",
+  "release": "4.3.9",
+  "note": "Copilot entries may stay AI-drafted (rule 4) once you have read them; set approved=true before posting. Thread 4199538693 (legacy credential cleanup) is intentionally absent: it needs a maintainer decision and a human-authored reply.",
+  "replies": [
+    {
+      "comment_id": 4199538555,
+      "reviewer": "copilot-pull-request-reviewer",
+      "kind": "bot",
+      "approved": false,
+      "resolve": true,
+      "body": "Fixed in provider v4.3.9, which is now synced into this PR. A missing `repeat_mode` now defaults to `NONE` before mapping, so it is mirrored as `RepeatMode.OFF`, matching queue navigation. A peer that clears repeat by omitting the option resets the AudioSource session instead of leaving repeat-one/all visible. A regression test covers a session that previously showed repeat-one."
+    }
+  ]
+}
