@@ -2511,14 +2511,22 @@ class TestScheduleReconnect:
         self, client: YnisonClient, cancelled: bool
     ) -> None:
         """Normal completion and cancellation cannot be reported as reconnect defects."""
-        with patch.object(
-            client, "_reconnect", side_effect=asyncio.CancelledError() if cancelled else None
-        ):
-            client._schedule_reconnect()
-            task = client._reconnect_task
-            assert task is not None
-            await asyncio.gather(task, return_exceptions=True)
+        loop = asyncio.get_running_loop()
+        previous_handler = loop.get_exception_handler()
+        loop_errors: list[dict[str, Any]] = []
+        loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
+        try:
+            with patch.object(
+                client, "_reconnect", side_effect=asyncio.CancelledError() if cancelled else None
+            ):
+                client._schedule_reconnect()
+                task = client._reconnect_task
+                assert task is not None
+                await asyncio.gather(task, return_exceptions=True)
+        finally:
+            loop.set_exception_handler(previous_handler)
         client._logger.error.assert_not_called()
+        assert not loop_errors
 
     async def test_unexpected_refresh_failure_is_logged_before_task_is_awaited(
         self, client: YnisonClient
