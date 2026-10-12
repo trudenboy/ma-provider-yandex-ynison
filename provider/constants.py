@@ -14,6 +14,18 @@ YNISON_STATE_PATH: Final[str] = "/ynison_state.YnisonStateService/PutYnisonState
 YNISON_ORIGIN: Final[str] = "https://music.yandex.ru"
 
 # Configuration keys
+<<<<<<< provider
+||||||| upstream-base
+CONF_TOKEN: Final[str] = "token"
+CONF_X_TOKEN: Final[str] = "x_token"
+CONF_ACCOUNT_LOGIN: Final[str] = "account_login"
+CONF_REMEMBER_SESSION: Final[str] = "remember_session"
+=======
+CONF_TOKEN: Final[str] = "token"  # noqa: S105 - config key
+CONF_X_TOKEN: Final[str] = "x_token"  # noqa: S105 - config key
+CONF_ACCOUNT_LOGIN: Final[str] = "account_login"
+CONF_REMEMBER_SESSION: Final[str] = "remember_session"
+>>>>>>> upstream-head
 CONF_YM_INSTANCE: Final[str] = "ym_instance"
 CONF_MASS_PLAYER_ID: Final[str] = "mass_player_id"
 CONF_ALLOW_PLAYER_SWITCH: Final[str] = "allow_player_switch"
@@ -33,9 +45,21 @@ LEGACY_AUTH_KEYS: Final[tuple[str, ...]] = (
     "remember_session",
 )
 
+<<<<<<< provider
 # yandex_music provider config keys
 YANDEX_MUSIC_CONF_TOKEN: Final[str] = "token"
 YANDEX_MUSIC_CONF_X_TOKEN: Final[str] = "x_token"
+||||||| upstream-base
+# yandex_music provider config keys (read via provider.config.get_value)
+YANDEX_MUSIC_CONF_QUALITY: Final[str] = "quality"
+YANDEX_MUSIC_CONF_TOKEN: Final[str] = "token"
+YANDEX_MUSIC_CONF_X_TOKEN: Final[str] = "x_token"
+=======
+# yandex_music provider config keys (read via provider.config.get_value)
+YANDEX_MUSIC_CONF_QUALITY: Final[str] = "quality"
+YANDEX_MUSIC_CONF_TOKEN: Final[str] = "token"  # noqa: S105 - config key
+YANDEX_MUSIC_CONF_X_TOKEN: Final[str] = "x_token"  # noqa: S105 - config key
+>>>>>>> upstream-head
 YANDEX_MUSIC_LOSSLESS_QUALITIES: Final[frozenset[str]] = frozenset({"superb", "lossless"})
 
 # Defaults
