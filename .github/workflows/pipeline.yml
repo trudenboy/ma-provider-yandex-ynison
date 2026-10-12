@@ -112,7 +112,7 @@ jobs:
     with:
       manifest_path: provider/manifest.json
       provider_path: provider/
-      upstream_guard_baseline: 5456607e50f70fe7b5d9446d6909121c8487f952
+      upstream_guard_baseline: e5c6f36e70cf7cdd3b23b9371b209d9253a29df8
       target_branch: integration/dev
 
       version: ${{ needs.prepare.outputs.version_changed == 'true' && format('v{0}', needs.prepare.outputs.version) || '' }}
@@ -130,7 +130,7 @@ jobs:
     with:
       manifest_path: provider/manifest.json
       provider_path: provider/
-      upstream_guard_baseline: 5456607e50f70fe7b5d9446d6909121c8487f952
+      upstream_guard_baseline: e5c6f36e70cf7cdd3b23b9371b209d9253a29df8
 
       target_branch: upstream/${{ needs.prepare.outputs.domain }}
       version: ${{ format('v{0}', needs.prepare.outputs.version) }}
