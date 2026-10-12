@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.3.12] - 2026-10-12
+
+### Fixed
+
+- An expired token during the initial connection now enters automatic recovery
+  when the linked account can refresh it, instead of leaving the device disconnected.
+- Next restarts playback from zero in a one-track repeat-all queue.
+- Unexpected background message-processing failures are logged immediately with
+  their traceback while connection recovery continues.
+
+### Changed
+
+- Troubleshooting guidance now describes linked-account authentication and
+  configuring several accounts through separate provider instances.
+
 ## [4.3.11] - 2026-10-12
 
 ### Fixed
