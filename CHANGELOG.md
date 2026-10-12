@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.3.10] - 2026-10-12
+
+### Fixed
+
+- Ynison messages that are valid JSON but not an object are skipped instead of
+  interrupting the connection.
+
 ## [4.3.9] - 2026-10-12
 
 ### Fixed
