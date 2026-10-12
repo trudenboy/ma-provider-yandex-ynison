@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.3.11] - 2026-10-12
+
+### Fixed
+
+- Switching playback to a new player no longer fails when the previous player
+  disappeared during the handoff, and an external pause on an unavailable player
+  is handled like any other failed stop.
+
 ## [4.3.10] - 2026-10-12
 
 ### Fixed
