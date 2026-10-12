@@ -18,7 +18,7 @@ jobs:
     with:
       manifest_path: provider/manifest.json
       provider_path: provider/
-      upstream_guard_baseline: e5c6f36e70cf7cdd3b23b9371b209d9253a29df8
+      upstream_guard_baseline: 92ccd256cebc9fa2a714001856004bccb2cad995
       target_branch: stable
       version: ${{ inputs.version }}
       create_pr: true
