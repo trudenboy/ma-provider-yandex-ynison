@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.3.13] - 2026-10-12
+
+### Fixed
+
+- Next at the end of a finite repeat-off queue no longer reports a command failure
+  after successfully publishing the terminal pause. Failed queue updates still report errors.
+- Unexpected token-refresh failures during background reconnection are logged immediately
+  with their original traceback.
+
 ## [4.3.12] - 2026-10-12
 
 ### Fixed
