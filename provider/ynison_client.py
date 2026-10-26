@@ -32,6 +32,8 @@ from .constants import (
     DEVICE_TYPE_WEB,
     RECONNECT_DELAYS,
     RECONNECT_IDLE_DELAY,
+    STATUS_DEDUP_WINDOW_MS,
+    STRICT_SEND_WAIT,
     WS_CONNECT_TIMEOUT,
     WS_HEARTBEAT,
     YNISON_DEVICE_SERVER_DISCONNECT,
@@ -231,6 +233,9 @@ class YnisonClient:
         self._policy = ReconnectPolicy(RECONNECT_DELAYS, RECONNECT_IDLE_DELAY)
         self._heartbeat = WS_HEARTBEAT
         self._status_watermarks: deque[_StatusWatermark] = deque(maxlen=8)
+        # (progress_ms, duration_ms, paused, monotonic time) of the newest
+        # status known to the server: received from it or sent by us.
+        self._status_baseline: tuple[int, int, bool, float] | None = None
 
         # Latest state from server
         self.state = YnisonState()
@@ -332,6 +337,58 @@ class YnisonClient:
         """Replace the stored OAuth token (e.g. after a refresh)."""
         self._token = token
 
+    async def wait_connected(self, timeout: float) -> bool:
+        """
+        Wait until the state channel is usable.
+
+        :param timeout: Maximum seconds to wait.
+        :return: ``True`` when connected, ``False`` on timeout or disconnect().
+        """
+        deadline = time.monotonic() + timeout
+        while not self._channel_ready():
+            if self._stop_event.is_set() or time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(0.05)
+        return True
+
+    async def report_status(
+        self,
+        progress_ms: int,
+        duration_ms: int,
+        paused: bool,
+        *,
+        strict: bool = False,
+    ) -> bool:
+        """
+        Publish this device's playback position when Ynison needs to know it.
+
+        Progress is clamped to the duration, which falls back to the server's
+        duration when unknown locally. Best-effort reports (``strict=False``)
+        are skipped while another device is active or when they match the
+        newest server-known status within two seconds; strict reports are
+        always sent.
+
+        :param progress_ms: Playback position in milliseconds.
+        :param duration_ms: Track duration in milliseconds, or 0 when unknown.
+        :param paused: Whether playback is paused.
+        :param strict: Raise :class:`YnisonSendError` instead of dropping the
+            report when no duration is known or the channel stays unavailable
+            for :data:`STRICT_SEND_WAIT` seconds.
+        :return: ``True`` when the status was sent.
+        """
+        duration_ms = duration_ms if duration_ms > 0 else self.state.duration_ms
+        if duration_ms <= 0:
+            if strict:
+                raise YnisonSendError("Ynison track duration is unknown")
+            return False
+        progress_ms = max(0, min(progress_ms, duration_ms))
+        if not strict and (
+            self.state.active_device_id != self.device_id
+            or self._matches_status_baseline(progress_ms, duration_ms, paused)
+        ):
+            return False
+        return await self.update_playing_status(progress_ms, duration_ms, paused, strict=strict)
+
     # ------------------------------------------------------------------
     # Send methods
     # ------------------------------------------------------------------
@@ -343,9 +400,11 @@ class YnisonClient:
         paused: bool,
         *,
         strict: bool = False,
-    ) -> None:
+    ) -> bool:
         """
-        Send playback status update to Ynison.
+        Send exactly this playback status to Ynison.
+
+        Prefer :meth:`report_status`, which decides whether a status is needed.
 
         :param progress_ms: Current playback position in milliseconds.
         :param duration_ms: Current track duration in milliseconds.
@@ -354,6 +413,7 @@ class YnisonClient:
             transport failure instead of silently scheduling a reconnect.
             Delivery-critical callers (user commands, end-of-track signal)
             opt in; heartbeat callers leave the default.
+        :return: ``True`` when the status was sent.
         """
         self._logger.debug(
             "→ update_playing_status: progress=%dms duration=%dms paused=%s",
@@ -370,8 +430,13 @@ class YnisonClient:
                     "playback_speed": 1.0,
                 },
             },
+            **self._message_meta(
+                "DO_NOT_INTERCEPT_BY_DEFAULT" if paused else "INTERCEPT_IF_NO_ONE_ACTIVE"
+            ),
         }
-        if await self._send(msg, strict=strict):
+        sent = await self._send(msg, strict=strict)
+        if sent:
+            self._status_baseline = (progress_ms, duration_ms, paused, time.monotonic())
             track_id = self.state.current_track_id
             if track_id is not None:
                 self._status_watermarks.append(
@@ -383,6 +448,7 @@ class YnisonClient:
                         sent_at=time.monotonic(),
                     )
                 )
+        return sent
 
     async def update_active_device(self, device_id: str) -> None:
         """Request playback transfer to this device."""
@@ -390,6 +456,7 @@ class YnisonClient:
             "update_active_device": {
                 "device_id_optional": device_id,
             },
+            **self._message_meta(),
         }
         await self._send(msg)
 
@@ -407,6 +474,7 @@ class YnisonClient:
             "update_session_params": {
                 "mute_events_if_passive": mute_events_if_passive,
             },
+            **self._message_meta(),
         }
         self._logger.info(
             "→ update_session_params: mute_events_if_passive=%s", mute_events_if_passive
@@ -501,17 +569,52 @@ class YnisonClient:
         await self._send(msg)
 
     @staticmethod
-    def _message_meta() -> dict[str, Any]:
+    def _message_meta(interception: str = "DO_NOT_INTERCEPT_BY_DEFAULT") -> dict[str, Any]:
         """
-        Return common envelope fields for state-mutating messages.
+        Return the request envelope every outbound message carries.
 
         Ynison expects string-typed timestamps; integers cause 500 responses.
+
+        :param interception: ``activity_interception_type`` for this request.
         """
         return {
             "rid": str(uuid.uuid4()),
             "player_action_timestamp_ms": str(int(time.time() * 1000)),
-            "activity_interception_type": "DO_NOT_INTERCEPT_BY_DEFAULT",
+            "activity_interception_type": interception,
         }
+
+    def _remember_server_status(self, status: Any) -> None:
+        """Record a server-authoritative status as the dedup baseline."""
+        if not isinstance(status, dict):
+            return
+        try:
+            progress = int(status.get("progress_ms", 0))
+            duration = int(status.get("duration_ms", 0))
+        except TypeError, ValueError:
+            self._status_baseline = None
+            return
+        self._status_baseline = (
+            progress,
+            duration,
+            bool(status.get("paused", True)),
+            time.monotonic(),
+        )
+
+    def _channel_ready(self) -> bool:
+        """Return whether the state WebSocket can accept a message."""
+        return self._connected and self._ws is not None and not self._ws.closed
+
+    def _matches_status_baseline(self, progress_ms: int, duration_ms: int, paused: bool) -> bool:
+        """Return whether a status equals the newest server-known one within the dedup window."""
+        if self._status_baseline is None:
+            return False
+        base_progress, base_duration, base_paused, at = self._status_baseline
+        if base_paused != paused or base_duration != duration_ms:
+            return False
+        expected = base_progress
+        if not base_paused:
+            expected += int((time.monotonic() - at) * 1000)
+        return abs(expected - progress_ms) <= STATUS_DEDUP_WINDOW_MS
 
     def _classify_state_as_echo(self, incoming_ps: dict[str, Any]) -> tuple[bool, bool]:
         """
@@ -580,7 +683,13 @@ class YnisonClient:
         """Build Sec-WebSocket-Protocol header value."""
         proto: dict[str, Any] = {
             "Ynison-Device-Id": self._device_info.device_id,
-            "Ynison-Device-Info": json.dumps({"app_name": self._device_info.app_name, "type": 1}),
+            "Ynison-Device-Info": json.dumps(
+                {
+                    "app_name": self._device_info.app_name,
+                    "app_version": self._device_info.app_version,
+                    "type": 1,
+                }
+            ),
         }
         if redirect_ticket is not None:
             proto["Ynison-Redirect-Ticket"] = redirect_ticket
@@ -609,7 +718,6 @@ class YnisonClient:
                 "can_be_player": True,
                 "can_be_remote_controller": False,
             },
-            "is_shadow": False,
         }
 
     def _build_initial_state(self) -> dict[str, Any]:
@@ -781,47 +889,12 @@ class YnisonClient:
                         continue
 
                     if "error" in data:
-                        error_info = data["error"]
-                        details = error_info.get("details", {})
-                        error_code = details.get("ynison-error-code", "")
-                        self._logger.warning(
-                            "Ynison error response: %s",
-                            json.dumps(error_info)[:300],
-                        )
-                        go_away = parse_seconds(details.get("ynison-go-away-for-seconds"))
-                        grpc_code = error_info.get("grpc_code")
-                        self._policy.on_server_error(
-                            error_code,
-                            grpc_code=grpc_code if isinstance(grpc_code, int) else None,
-                            go_away=go_away,
-                            ladder=details.get("ynison-backoff-millis"),
-                        )
                         server_directive = True
-                        if go_away:
-                            self._logger.warning(
-                                "Yandex rejected the Ynison connection (error %s) and asked "
-                                "to wait %.0f s. This device will not appear in the Yandex "
-                                "Music app until the next attempt at %s; reconnecting "
-                                "earlier would extend the wait",
-                                error_code,
-                                go_away,
-                                _local_time(time.time() + go_away),
-                            )
-                            break
-                        if error_code in YNISON_RECONNECT_ERROR_CODES:
-                            self._logger.info(
-                                "Ynison re-balance error %s — breaking for immediate reconnect",
-                                error_code,
-                            )
+                        if self._apply_error_frame(data["error"]):
                             break
                         continue
 
-                    self._parse_state(data)
-                    self._policy.on_healthy()
-                    try:
-                        await self._on_state_update(self.state)
-                    except MusicAssistantError:
-                        self._logger.exception("Error in Ynison state update callback")
+                    await self._dispatch_state(data)
                 elif msg.type == aiohttp.WSMsgType.BINARY:
                     self._logger.debug(
                         "Ynison binary message (%d bytes)", len(msg.data) if msg.data else 0
@@ -857,6 +930,54 @@ class YnisonClient:
                     self._policy.on_transport_failure()
                 self._schedule_reconnect()
         self._logger.debug("Ynison message loop exited")
+
+    def _apply_error_frame(self, error_info: dict[str, Any]) -> bool:
+        """
+        Hand a Ynison error response to the reconnect policy.
+
+        :param error_info: The ``error`` object of the response.
+        :return: ``True`` when the session must end now.
+        """
+        details = error_info.get("details", {})
+        error_code = details.get("ynison-error-code", "")
+        self._logger.warning("Ynison error response: %s", json.dumps(error_info)[:300])
+        go_away = parse_seconds(details.get("ynison-go-away-for-seconds"))
+        grpc_code = error_info.get("grpc_code")
+        self._policy.on_server_error(
+            error_code,
+            grpc_code=grpc_code if isinstance(grpc_code, int) else None,
+            go_away=go_away,
+            ladder=details.get("ynison-backoff-millis"),
+        )
+        if go_away:
+            self._logger.warning(
+                "Yandex rejected the Ynison connection (error %s) and asked to wait %.0f s. "
+                "This device will not appear in the Yandex Music app until the next attempt "
+                "at %s; reconnecting earlier would extend the wait",
+                error_code,
+                go_away,
+                _local_time(time.time() + go_away),
+            )
+            return True
+        if error_code in YNISON_RECONNECT_ERROR_CODES:
+            self._logger.info(
+                "Ynison re-balance error %s — breaking for immediate reconnect", error_code
+            )
+            return True
+        return False
+
+    async def _dispatch_state(self, data: dict[str, Any]) -> None:
+        """Apply one state frame and notify the state callback."""
+        was_active = self.state.active_device_id == self.device_id
+        self._parse_state(data)
+        self._policy.on_healthy()
+        if was_active and self.state.active_device_id != self.device_id:
+            # The server clears this flag when the device activates.
+            await self.update_session_params(mute_events_if_passive=True)
+        try:
+            await self._on_state_update(self.state)
+        except MusicAssistantError:
+            self._logger.exception("Error in Ynison state update callback")
 
     def _reset_pending_queue(self) -> None:
         """Discard outbound queue edits when a peer or a new connection takes over."""
@@ -899,6 +1020,8 @@ class YnisonClient:
                         self._pending_queue = None
                 if suppress_status and key == "status":
                     continue
+                if key == "status":
+                    self._remember_server_status(value)
                 existing_ps[key] = value
             self.state.last_update_is_echo = is_echo
         else:
@@ -927,6 +1050,11 @@ class YnisonClient:
         queue_len = len(queue.get("playable_list", []))
         entity_type = queue.get("entity_type", "")
 
+        if (old_track != new_track or old_index != new_index) and not (
+            incoming_ps and "status" in incoming_ps
+        ):
+            # A new item without its own status must not inherit the old baseline.
+            self._status_baseline = None
         if old_track != new_track or old_index != new_index:
             self._logger.info(
                 "Ynison queue change: track %s→%s index %d→%d queue_len=%d entity_type=%s",
@@ -1046,6 +1174,8 @@ class YnisonClient:
             reconnect. Default is the legacy fire-and-forget behaviour:
             log + schedule reconnect + return.
         """
+        if strict and not self._channel_ready():
+            await self.wait_connected(STRICT_SEND_WAIT)
         async with self._send_lock:
             return await self._send_locked(msg, strict=strict)
 

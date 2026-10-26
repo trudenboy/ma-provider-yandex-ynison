@@ -59,6 +59,7 @@ from .constants import (
     DEFAULT_DISPLAY_NAME,
     LEGACY_YM_INSTANCE_OWN,
     OUTPUT_AUTO,
+    STRICT_SEND_WAIT,
     YANDEX_MUSIC_LOSSLESS_QUALITIES,
 )
 from .credential_source import YandexMusicCredentialSource
@@ -1336,7 +1337,7 @@ class YandexYnisonProvider(PluginProvider):
             # the correct value (we send duration_ms=0 on advance to
             # prevent stale propagation, so this corrects it).
             if self._ynison:
-                await self._send_progress_to_ynison(
+                await self._ynison.report_status(
                     progress_ms=seek_ms,
                     duration_ms=self._actual_duration_ms,
                     paused=self._ynison.state.is_paused,
@@ -1347,46 +1348,6 @@ class YandexYnisonProvider(PluginProvider):
         # protocol bridge when present), rather than the source-session owner.
         if self._active_player_id:
             self.mass.players.trigger_player_update(self._active_player_id, force_update=True)
-
-    async def _send_progress_to_ynison(
-        self,
-        progress_ms: int,
-        duration_ms: int,
-        paused: bool,
-        *,
-        strict: bool = False,
-    ) -> None:
-        """
-        Send progress to Ynison.
-
-        Progress is clamped to duration because Ynison rejects updates where
-        progress > duration (error 400030001) and disconnects the WebSocket.
-        The byte counter can slightly overshoot duration at end-of-stream.
-
-        Echo detection is done upstream via YnisonState.last_update_is_echo,
-        which is set when Ynison rebroadcasts an update we authored.
-
-        :param progress_ms: Current playback position in milliseconds.
-        :param duration_ms: Current track duration in milliseconds.
-        :param paused: Whether playback is paused.
-        :param strict: When ``True``, propagate transport failures as
-            :class:`provider.ynison_client.YnisonSendError`. Used by user-command
-            and end-of-track callers. Heartbeat callers leave the default.
-        """
-        if duration_ms <= 0:
-            # Ynison rejects progress > duration; skip until duration is known.
-            return
-        if not self._ynison or not self._ynison.connected:
-            if strict:
-                raise YnisonSendError("Ynison not connected")
-            return
-        progress_ms = min(progress_ms, duration_ms)
-        await self._ynison.update_playing_status(
-            progress_ms=progress_ms,
-            duration_ms=duration_ms,
-            paused=paused,
-            strict=strict,
-        )
 
     def _bytes_to_ms(self, byte_count: int, fmt: AudioFormat | None = None) -> int:
         """Convert PCM byte count to milliseconds using the given format."""
@@ -1412,12 +1373,11 @@ class YandexYnisonProvider(PluginProvider):
             meta.elapsed_time_last_updated = time.time()
         if player_id:
             self.mass.players.trigger_player_update(player_id)
-        # Update Ynison so the Yandex app shows correct position
-        await self._send_progress_to_ynison(
-            progress_ms=elapsed_ms,
-            duration_ms=self._best_duration_ms(),
-            paused=False,
-        )
+        # The client publishes only when Ynison's extrapolated position drifted.
+        if self._ynison:
+            await self._ynison.report_status(
+                progress_ms=elapsed_ms, duration_ms=self._best_duration_ms(), paused=False
+            )
 
     async def _pause_playback(self) -> None:
         """
@@ -1894,32 +1854,34 @@ class YandexYnisonProvider(PluginProvider):
             return self._ynison.state.duration_ms
         return 0
 
-    def _require_connected_ynison(self) -> YnisonClient:
+    async def _require_connected_ynison(self) -> YnisonClient:
         """
         Return the live Ynison client or raise an MA player-control error.
+
+        A reconnecting channel gets :data:`STRICT_SEND_WAIT` seconds to return,
+        as the official client allows before dropping a command.
 
         :raises UnsupportedFeaturedException: When the provider's Ynison
             client has not been initialised yet (pre-`handle_async_init`
             or post-`unload`).
-        :raises PlayerCommandFailed: When the Ynison WebSocket is currently
-            disconnected (e.g. mid-reconnect after a transient network
-            error). Surface to MA so the UI shows a clear failure toast
+        :raises PlayerCommandFailed: When the Ynison WebSocket stays
+            disconnected. Surface to MA so the UI shows a clear failure toast
             instead of accepting the command and stalling.
         """
         if not self._ynison:
             raise UnsupportedFeaturedException("Ynison client not initialized")
-        if not self._ynison.connected:
+        if not self._ynison.connected and not await self._ynison.wait_connected(STRICT_SEND_WAIT):
             raise PlayerCommandFailed("Ynison WebSocket disconnected")
         return self._ynison
 
     async def _on_play(self) -> None:
         """Handle play command — send resume to Ynison."""
-        client = self._require_connected_ynison()
+        client = await self._require_connected_ynison()
         if not self._idempotent("on_play", None):
             return
         state = client.state
         try:
-            await self._send_progress_to_ynison(
+            await client.report_status(
                 progress_ms=state.progress_ms,
                 duration_ms=self._best_duration_ms(),
                 paused=False,
@@ -1931,12 +1893,12 @@ class YandexYnisonProvider(PluginProvider):
 
     async def _on_pause(self) -> None:
         """Handle pause command — send pause to Ynison."""
-        client = self._require_connected_ynison()
+        client = await self._require_connected_ynison()
         if not self._idempotent("on_pause", None):
             return
         state = client.state
         try:
-            await self._send_progress_to_ynison(
+            await client.report_status(
                 progress_ms=state.progress_ms,
                 duration_ms=self._best_duration_ms(),
                 paused=True,
@@ -2117,14 +2079,14 @@ class YandexYnisonProvider(PluginProvider):
         self._actual_duration_ms = 0
 
         # 1. Report that playback reached the end.
-        # Echo tracking is handled by _send_progress_to_ynison.
+        # Echo tracking is handled by the client's status watermarks.
         # `strict=True`: a dropped end-of-track signal stalls the YM app on
         # the just-finished track. We log and continue — the reconnect is
         # already scheduled and the queue-advance below sees the same WS state
         # — but we don't reraise (this is end-of-stream, there's no command to
         # fail back to the user).
         try:
-            await self._send_progress_to_ynison(
+            await self._ynison.report_status(
                 progress_ms=duration, duration_ms=duration, paused=False, strict=True
             )
         except YnisonSendError:
@@ -2367,7 +2329,7 @@ class YandexYnisonProvider(PluginProvider):
 
     async def _on_next(self) -> None:
         """Handle next track command — signal track end so Yandex advances."""
-        self._require_connected_ynison()
+        await self._require_connected_ynison()
         outcome = await self._signal_track_completion(natural=False)
         if outcome == "failed":
             raise PlayerCommandFailed("Ynison queue advance failed")
@@ -2378,7 +2340,7 @@ class YandexYnisonProvider(PluginProvider):
     async def _on_previous(self) -> None:
         """Handle previous track command — update queue index in Ynison."""
         async with self._queue_navigation_lock:
-            client = self._require_connected_ynison()
+            client = await self._require_connected_ynison()
             queue = client.queue_snapshot()
             previous_index = YnisonQueueView(queue).previous_index()
             if previous_index is not None:
@@ -2394,11 +2356,11 @@ class YandexYnisonProvider(PluginProvider):
 
         :param position: Position in seconds from Music Assistant.
         """
-        client = self._require_connected_ynison()
+        client = await self._require_connected_ynison()
         seek_ms = position * 1000
         state = client.state
         try:
-            await self._send_progress_to_ynison(
+            await client.report_status(
                 progress_ms=seek_ms,
                 duration_ms=self._best_duration_ms(),
                 paused=state.is_paused,
@@ -2416,7 +2378,7 @@ class YandexYnisonProvider(PluginProvider):
 
     async def _on_repeat(self, repeat_mode: RepeatMode) -> None:
         """Publish a Music Assistant repeat mode to the Ynison queue."""
-        client = self._require_connected_ynison()
+        client = await self._require_connected_ynison()
         if not self._yandex_provider or not self._yandex_provider.available:
             raise PlayerCommandFailed("Linked Yandex Music provider unavailable")
         if repeat_mode == RepeatMode.UNKNOWN:
@@ -2440,7 +2402,7 @@ class YandexYnisonProvider(PluginProvider):
 
     async def _on_shuffle(self, enabled: bool) -> None:
         """Publish a shuffle index mapping while preserving the current item."""
-        client = self._require_connected_ynison()
+        client = await self._require_connected_ynison()
         if not self._yandex_provider or not self._yandex_provider.available:
             raise PlayerCommandFailed("Linked Yandex Music provider unavailable")
 

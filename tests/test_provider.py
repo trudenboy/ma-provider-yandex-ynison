@@ -980,7 +980,7 @@ class TestYnisonStateHandling:
         provider._active_player_id = "spb_bridge1"
         provider._in_use_by_player = "player1"
         mock_ynison = MagicMock()
-        mock_ynison.update_playing_status = AsyncMock()
+        mock_ynison.report_status = AsyncMock()
         mock_ynison.state.is_paused = False
         provider._ynison = mock_ynison
 
@@ -999,8 +999,8 @@ class TestYnisonStateHandling:
             "spb_bridge1", force_update=True
         )
         # Real duration pushed to Ynison (heartbeat — no `strict`).
-        mock_ynison.update_playing_status.assert_awaited_once_with(
-            progress_ms=30000, duration_ms=185000, paused=False, strict=False
+        mock_ynison.report_status.assert_awaited_once_with(
+            progress_ms=30000, duration_ms=185000, paused=False
         )
 
     async def test_signal_track_completion_advances_index(self) -> None:
@@ -1019,14 +1019,14 @@ class TestYnisonStateHandling:
                 },
             },
         )
-        mock_ynison.update_playing_status = AsyncMock()
+        mock_ynison.report_status = AsyncMock()
         mock_ynison.update_player_state = AsyncMock()
         provider._ynison = mock_ynison
 
         await provider._signal_track_completion()
 
         # 1. Reports progress=duration (`strict=True` — end-of-track signal).
-        mock_ynison.update_playing_status.assert_awaited_once_with(
+        mock_ynison.report_status.assert_awaited_once_with(
             progress_ms=200000, duration_ms=200000, paused=False, strict=True
         )
         # 2. Advances current_playable_index by 1
@@ -1055,7 +1055,7 @@ class TestYnisonStateHandling:
                 },
             },
         )
-        mock_ynison.update_playing_status = AsyncMock()
+        mock_ynison.report_status = AsyncMock()
         mock_ynison.update_player_state = AsyncMock()
         provider._ynison = mock_ynison
 
@@ -1088,7 +1088,7 @@ class TestYnisonStateHandling:
                 },
             },
         )
-        mock_ynison.update_playing_status = AsyncMock()
+        mock_ynison.report_status = AsyncMock()
         mock_ynison.update_player_state = AsyncMock()
         provider._ynison = mock_ynison
 
@@ -1129,7 +1129,7 @@ class TestYnisonStateHandling:
                 },
             },
         )
-        mock_ynison.update_playing_status = AsyncMock()
+        mock_ynison.report_status = AsyncMock()
         mock_ynison.update_player_state = AsyncMock()
         provider._ynison = mock_ynison
 
@@ -1293,7 +1293,7 @@ class TestYnisonStateHandling:
                 },
             },
         )
-        mock_ynison.update_playing_status = AsyncMock()
+        mock_ynison.report_status = AsyncMock()
         mock_ynison.update_player_state = AsyncMock()
         mock_ynison.send_full_state = AsyncMock()
         provider._ynison = mock_ynison
@@ -1318,13 +1318,13 @@ class TestYnisonStateHandling:
                 },
             },
         )
-        mock_ynison.update_playing_status = AsyncMock()
+        mock_ynison.report_status = AsyncMock()
         mock_ynison.update_player_state = AsyncMock()
         provider._ynison = mock_ynison
 
         await provider._signal_track_completion()
 
-        mock_ynison.update_playing_status.assert_awaited_once_with(
+        mock_ynison.report_status.assert_awaited_once_with(
             progress_ms=300000, duration_ms=300000, paused=False, strict=True
         )
 
@@ -1347,7 +1347,7 @@ class TestYnisonStateHandling:
                 },
             },
         )
-        mock_ynison.update_playing_status = AsyncMock()
+        mock_ynison.report_status = AsyncMock()
         mock_ynison.update_player_state = AsyncMock()
         provider._ynison = mock_ynison
 
@@ -1424,7 +1424,7 @@ class TestYnisonStateHandling:
                 },
             },
         )
-        mock_ynison.update_playing_status = AsyncMock()
+        mock_ynison.report_status = AsyncMock()
         mock_ynison.update_player_state = AsyncMock()
         provider._ynison = mock_ynison
         provider._yandex_provider = None
@@ -1432,7 +1432,7 @@ class TestYnisonStateHandling:
         await provider._signal_track_completion()
 
         # Status reported
-        mock_ynison.update_playing_status.assert_awaited_once()
+        mock_ynison.report_status.assert_awaited_once()
         # Cannot advance — no provider to fetch tracks
         mock_ynison.update_player_state.assert_not_called()
 
@@ -1515,7 +1515,7 @@ class TestYnisonStateHandling:
                 },
             },
         )
-        mock_ynison.update_playing_status = AsyncMock()
+        mock_ynison.report_status = AsyncMock()
         mock_ynison.update_player_state = AsyncMock()
         provider._ynison = mock_ynison
 
@@ -1712,7 +1712,7 @@ class TestPCMNormalization:
         provider._yandex_provider = mock_yandex
 
         mock_ynison = MagicMock()
-        mock_ynison.update_playing_status = AsyncMock()
+        mock_ynison.report_status = AsyncMock()
         mock_ynison.state.is_paused = False
         provider._ynison = mock_ynison
 
@@ -1810,7 +1810,7 @@ class TestPCMNormalization:
         provider._yandex_provider = mock_yandex
 
         mock_ynison = MagicMock()
-        mock_ynison.update_playing_status = AsyncMock()
+        mock_ynison.report_status = AsyncMock()
         mock_ynison.state.is_paused = False
         provider._ynison = mock_ynison
 
@@ -1863,7 +1863,7 @@ class TestPCMNormalization:
         provider._yandex_provider = mock_yandex
 
         mock_ynison = MagicMock()
-        mock_ynison.update_playing_status = AsyncMock()
+        mock_ynison.report_status = AsyncMock()
         mock_ynison.state.is_paused = False
         provider._ynison = mock_ynison
 
@@ -1986,7 +1986,7 @@ class TestPCMNormalization:
         provider._yandex_provider = mock_yandex
 
         mock_ynison = MagicMock()
-        mock_ynison.update_playing_status = AsyncMock()
+        mock_ynison.report_status = AsyncMock()
         mock_ynison.state.is_paused = False
         provider._ynison = mock_ynison
 
@@ -2490,7 +2490,7 @@ def _mock_ynison(
     mock.in_post_reconnect_settle = False
     mock.state = state or _make_ynison_state()
     mock.device_id = device_id
-    mock.update_playing_status = AsyncMock()
+    mock.report_status = AsyncMock()
     mock.update_player_state = AsyncMock()
 
     _wire_queue_mutation(mock)
@@ -2728,7 +2728,7 @@ class TestPlaybackControls:
 
         assert provider._seek_position_ms == 0
         assert not provider._track_changed_event.is_set()
-        mock_ynison.update_playing_status.assert_not_awaited()
+        mock_ynison.report_status.assert_not_awaited()
 
     async def test_source_control_normalizes_float_seek_position(self) -> None:
         """An internal fractional seek is truncated before reaching Ynison."""
@@ -2746,7 +2746,7 @@ class TestPlaybackControls:
         )
 
         assert provider._seek_position_ms == 12000
-        mock_ynison.update_playing_status.assert_awaited_once_with(
+        mock_ynison.report_status.assert_awaited_once_with(
             progress_ms=12000,
             duration_ms=200000,
             paused=False,
@@ -2801,7 +2801,7 @@ class TestPlaybackControls:
         assert source.can_shuffle is False
 
     async def test_on_play_sends_progress_unpaused(self) -> None:
-        """_on_play sends update_playing_status with paused=False."""
+        """_on_play sends report_status with paused=False."""
         provider = _make_provider()
         provider._actual_duration_ms = 120000
         state = _make_ynison_state(progress_ms=5000, duration_ms=120000, paused=True)
@@ -2810,7 +2810,7 @@ class TestPlaybackControls:
 
         await provider._on_play()
 
-        mock_yn.update_playing_status.assert_awaited_once_with(
+        mock_yn.report_status.assert_awaited_once_with(
             progress_ms=5000, duration_ms=120000, paused=False, strict=True
         )
 
@@ -2823,7 +2823,7 @@ class TestPlaybackControls:
             await provider._on_play()
 
     async def test_on_pause_sends_progress_paused(self) -> None:
-        """_on_pause sends update_playing_status with paused=True."""
+        """_on_pause sends report_status with paused=True."""
         provider = _make_provider()
         provider._actual_duration_ms = 120000
         state = _make_ynison_state(progress_ms=5000, duration_ms=120000, paused=False)
@@ -2832,7 +2832,7 @@ class TestPlaybackControls:
 
         await provider._on_pause()
 
-        mock_yn.update_playing_status.assert_awaited_once_with(
+        mock_yn.report_status.assert_awaited_once_with(
             progress_ms=5000, duration_ms=120000, paused=True, strict=True
         )
 
@@ -2858,7 +2858,7 @@ class TestPlaybackControls:
         await provider._on_next()
 
         # Should have reported completion and advanced
-        mock_yn.update_playing_status.assert_awaited_once()
+        mock_yn.report_status.assert_awaited_once()
         mock_yn.update_player_state.assert_awaited_once()
 
     async def test_on_next_no_ynison_raises(self) -> None:
@@ -2920,7 +2920,7 @@ class TestPlaybackControls:
 
         assert provider._seek_position_ms == 30000
         assert provider._track_changed_event.is_set()
-        mock_yn.update_playing_status.assert_awaited_once_with(
+        mock_yn.report_status.assert_awaited_once_with(
             progress_ms=30000, duration_ms=200000, paused=False, strict=True
         )
 
@@ -2933,54 +2933,6 @@ class TestPlaybackControls:
             await provider._on_seek(10)
 
 
-# ------------------------------------------------------------------
-# _send_progress_to_ynison
-# ------------------------------------------------------------------
-
-
-class TestSendProgressToYnison:
-    """Tests for _send_progress_to_ynison."""
-
-    async def test_clamps_to_duration(self) -> None:
-        """Progress is clamped to duration_ms."""
-        provider = _make_provider()
-        provider._ynison = _mock_ynison()
-
-        await provider._send_progress_to_ynison(150000, 100000, False)
-
-        provider._ynison.update_playing_status.assert_awaited_once_with(
-            progress_ms=100000, duration_ms=100000, paused=False, strict=False
-        )
-
-    async def test_zero_duration_no_send(self) -> None:
-        """Does not send when duration is 0."""
-        provider = _make_provider()
-        provider._ynison = _mock_ynison()
-
-        await provider._send_progress_to_ynison(5000, 0, False)
-
-        provider._ynison.update_playing_status.assert_not_called()
-
-    async def test_not_connected_no_send(self) -> None:
-        """Does not send when Ynison is disconnected."""
-        provider = _make_provider()
-        provider._ynison = _mock_ynison(connected=False)
-
-        await provider._send_progress_to_ynison(5000, 10000, False)
-
-        provider._ynison.update_playing_status.assert_not_called()
-
-    async def test_no_ynison_no_send(self) -> None:
-        """Does not crash when _ynison is None."""
-        provider = _make_provider()
-        provider._ynison = None
-
-        await provider._send_progress_to_ynison(5000, 10000, False)
-        # No assertion — just verify no crash.
-
-
-# ------------------------------------------------------------------
-# _pause_playback
 # ------------------------------------------------------------------
 
 
@@ -3214,7 +3166,7 @@ class TestSyncProgress:
         # live progress lives on _stream_metadata, pushed through streamdetails
         assert provider._stream_metadata.elapsed_time == 5
         provider.mass.players.trigger_player_update.assert_called_with("player1")  # type: ignore[attr-defined]
-        provider._ynison.update_playing_status.assert_awaited_once()
+        provider._ynison.report_status.assert_awaited_once()
 
     async def test_with_seek_offset(self) -> None:
         """Seek offset is added to byte-based progress."""
@@ -3795,46 +3747,19 @@ class TestIdempotencyTTL:
             assert provider._idempotent("on_pause", None) is True
 
     async def test_on_pause_double_call_sends_one_update(self) -> None:
-        """Two _on_pause() within 1 s → exactly one update_playing_status."""
+        """Two _on_pause() within 1 s → exactly one report_status."""
         provider = _make_provider()
         provider._ynison = MagicMock()
         provider._ynison.connected = True
         provider._ynison.state.progress_ms = 1000
         provider._ynison.state.duration_ms = 60000
-        provider._ynison.update_playing_status = AsyncMock()
+        provider._ynison.report_status = AsyncMock()
 
         with patch("provider.provider.time.monotonic", side_effect=[100.0, 100.5]):
             await provider._on_pause()
             await provider._on_pause()
 
-        assert provider._ynison.update_playing_status.await_count == 1
-
-
-class TestProgressClamp:
-    """`_send_progress_to_ynison` clamps progress_ms to duration_ms."""
-
-    async def test_progress_clamped_to_duration(self) -> None:
-        """progress_ms above duration_ms is clamped before WS send."""
-        provider = _make_provider()
-        provider._ynison = MagicMock()
-        provider._ynison.connected = True
-        provider._ynison.update_playing_status = AsyncMock()
-
-        await provider._send_progress_to_ynison(progress_ms=5000, duration_ms=4000, paused=False)
-        called_kwargs = provider._ynison.update_playing_status.await_args.kwargs
-        assert called_kwargs["progress_ms"] == 4000
-        assert called_kwargs["duration_ms"] == 4000
-
-    async def test_progress_below_duration_passes_through(self) -> None:
-        """Healthy progress values are forwarded unchanged."""
-        provider = _make_provider()
-        provider._ynison = MagicMock()
-        provider._ynison.connected = True
-        provider._ynison.update_playing_status = AsyncMock()
-
-        await provider._send_progress_to_ynison(progress_ms=3000, duration_ms=4000, paused=False)
-        called_kwargs = provider._ynison.update_playing_status.await_args.kwargs
-        assert called_kwargs["progress_ms"] == 3000
+        assert provider._ynison.report_status.await_count == 1
 
 
 class TestDriftClassifier:
@@ -4141,7 +4066,7 @@ class TestNaturalEndDifferentiation:
         ynison.state.is_paused = False
         ynison.state.current_track_id = "track42"
         ynison.state.player_state = {"status": {"paused": False}}
-        ynison.update_playing_status = AsyncMock()
+        ynison.report_status = AsyncMock()
         provider._ynison = ynison
         return provider
 
@@ -4417,7 +4342,7 @@ class TestPlaybackPriorityScope:
         provider._yandex_provider = mock_yandex
 
         mock_ynison = MagicMock()
-        mock_ynison.update_playing_status = AsyncMock()
+        mock_ynison.report_status = AsyncMock()
         mock_ynison.state.is_paused = False
         provider._ynison = mock_ynison
 
@@ -4655,7 +4580,7 @@ class TestStrictModeDeliverySignal:
         provider._actual_duration_ms = 120000
         state = _make_ynison_state(progress_ms=5000, duration_ms=120000, paused=True)
         mock_yn = _mock_ynison(state)
-        mock_yn.update_playing_status = AsyncMock(side_effect=YnisonSendError("ws down"))
+        mock_yn.report_status = AsyncMock(side_effect=YnisonSendError("ws down"))
         provider._ynison = mock_yn
 
         with pytest.raises(PlayerCommandFailed):
@@ -4667,7 +4592,7 @@ class TestStrictModeDeliverySignal:
         provider._actual_duration_ms = 120000
         state = _make_ynison_state(progress_ms=5000, duration_ms=120000, paused=False)
         mock_yn = _mock_ynison(state)
-        mock_yn.update_playing_status = AsyncMock(side_effect=YnisonSendError("ws down"))
+        mock_yn.report_status = AsyncMock(side_effect=YnisonSendError("ws down"))
         provider._ynison = mock_yn
 
         with pytest.raises(PlayerCommandFailed):
@@ -4681,7 +4606,7 @@ class TestStrictModeDeliverySignal:
         provider._track_changed_event.clear()
         state = _make_ynison_state(progress_ms=5000, duration_ms=200000, paused=False)
         mock_yn = _mock_ynison(state)
-        mock_yn.update_playing_status = AsyncMock(side_effect=YnisonSendError("ws down"))
+        mock_yn.report_status = AsyncMock(side_effect=YnisonSendError("ws down"))
         provider._ynison = mock_yn
 
         with pytest.raises(PlayerCommandFailed):
@@ -4711,7 +4636,7 @@ class TestStrictModeDeliverySignal:
         mock_ynison.state = state
         mock_ynison.connected = True
         mock_ynison.device_id = provider._device_id
-        mock_ynison.update_playing_status = AsyncMock(side_effect=YnisonSendError("ws down"))
+        mock_ynison.report_status = AsyncMock(side_effect=YnisonSendError("ws down"))
         mock_ynison.update_player_state = AsyncMock()
         provider._ynison = mock_ynison
 
@@ -4756,27 +4681,9 @@ class TestStrictModeDeliverySignal:
 
         await provider._sync_progress(seek_ms=0, bytes_yielded=0, player_id=None)
 
-        mock_yn.update_playing_status.assert_awaited_once()
-        _args, kwargs = mock_yn.update_playing_status.call_args
+        mock_yn.report_status.assert_awaited_once()
+        _args, kwargs = mock_yn.report_status.call_args
         assert kwargs.get("strict", False) is False
-
-    async def test_send_progress_strict_raises_when_not_connected(self) -> None:
-        """`_send_progress_to_ynison(strict=True)` raises when Ynison is disconnected."""
-        provider = _make_provider()
-        provider._ynison = _mock_ynison(connected=False)
-
-        with pytest.raises(YnisonSendError):
-            await provider._send_progress_to_ynison(
-                progress_ms=1000, duration_ms=2000, paused=False, strict=True
-            )
-
-    async def test_send_progress_non_strict_silent_when_not_connected(self) -> None:
-        """`_send_progress_to_ynison` default behaviour stays silent when disconnected."""
-        provider = _make_provider()
-        provider._ynison = _mock_ynison(connected=False)
-
-        # Must not raise
-        await provider._send_progress_to_ynison(progress_ms=1000, duration_ms=2000, paused=False)
 
 
 # ------------------------------------------------------------------
@@ -4787,29 +4694,40 @@ class TestStrictModeDeliverySignal:
 class TestRequireConnectedYnison:
     """Tests for the extracted `_require_connected_ynison` helper."""
 
-    def test_raises_unsupported_when_client_missing(self) -> None:
+    async def test_raises_unsupported_when_client_missing(self) -> None:
         """`_ynison is None` raises `UnsupportedFeaturedException`."""
         provider = _make_provider()
         provider._ynison = None
 
         with pytest.raises(UnsupportedFeaturedException, match="not initialized"):
-            provider._require_connected_ynison()
+            await provider._require_connected_ynison()
 
-    def test_raises_command_failed_when_disconnected(self) -> None:
-        """`_ynison.connected is False` raises `PlayerCommandFailed`."""
+    async def test_raises_command_failed_when_disconnected(self) -> None:
+        """A channel that does not return within the wait raises `PlayerCommandFailed`."""
         provider = _make_provider()
         provider._ynison = _mock_ynison(connected=False)
+        provider._ynison.wait_connected = AsyncMock(return_value=False)
 
         with pytest.raises(PlayerCommandFailed, match="disconnected"):
-            provider._require_connected_ynison()
+            await provider._require_connected_ynison()
+        provider._ynison.wait_connected.assert_awaited_once_with(5.0)
 
-    def test_returns_client_when_ready(self) -> None:
+    async def test_waits_for_reconnecting_channel(self) -> None:
+        """A command waits for a reconnecting channel instead of failing at once."""
+        provider = _make_provider()
+        mock_yn = _mock_ynison(connected=False)
+        mock_yn.wait_connected = AsyncMock(return_value=True)
+        provider._ynison = mock_yn
+
+        assert await provider._require_connected_ynison() is mock_yn
+
+    async def test_returns_client_when_ready(self) -> None:
         """Happy path returns the live client unchanged."""
         provider = _make_provider()
         mock_yn = _mock_ynison(connected=True)
         provider._ynison = mock_yn
 
-        result = provider._require_connected_ynison()
+        result = await provider._require_connected_ynison()
         assert result is mock_yn
 
 

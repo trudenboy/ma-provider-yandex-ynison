@@ -54,6 +54,13 @@ RECONNECT_DELAYS: Final[tuple[float, ...]] = (1.0, 5.0, 30.0)
 # trigger; a long-running plugin has none, so it keeps trying slowly.
 RECONNECT_IDLE_DELAY: Final[float] = 300.0
 
+# How long a delivery-critical send waits for a reconnecting channel (official
+# client: 5 s before an event is dropped).
+STRICT_SEND_WAIT: Final[float] = 5.0
+# A best-effort status within this distance of the extrapolated server status
+# is not re-sent (official client: ±2000 ms).
+STATUS_DEDUP_WINDOW_MS: Final[int] = 2000
+
 # WebSocket timeouts
 WS_CONNECT_TIMEOUT: Final[float] = 15.0
 WS_HEARTBEAT: Final[float] = 30.0

@@ -6,7 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import suppress
 from copy import deepcopy
 from pathlib import Path
@@ -38,6 +38,12 @@ FIXTURES = Path(__file__).parent / "fixtures" / "ynison"
 def _fixture(name: str) -> dict[str, Any]:
     """Load a sanitized Ynison protocol fixture."""
     return cast("dict[str, Any]", json.loads((FIXTURES / name).read_text()))
+
+
+@pytest.fixture(autouse=True)
+def _short_strict_send_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep strict sends on a dead channel from waiting the production 5 s."""
+    monkeypatch.setattr("provider.ynison_client.STRICT_SEND_WAIT", 0.2)
 
 
 @pytest.fixture
@@ -197,6 +203,40 @@ class TestYnisonClientBuildMethods:
         assert device["info"]["device_id"] == "test-device-id"
         assert device["capabilities"]["can_be_player"] is True
         assert device["capabilities"]["can_be_remote_controller"] is False
+
+    def test_device_header_carries_app_version(self, client: YnisonClient) -> None:
+        """The device-info header names the app version, as the official header proto does."""
+        data = json.loads(client._build_ws_protocol_header()[len("Bearer, v2, ") :])
+
+        assert json.loads(data["Ynison-Device-Info"])["app_version"] == "1.0.0"
+
+    def test_device_registration_has_only_update_device_fields(self, client: YnisonClient) -> None:
+        """Registration sends only fields the UpdateDevice message defines."""
+        assert set(client._build_device_dict()) == {"info", "capabilities"}
+
+    async def test_losing_activity_mutes_passive_events_again(self, client: YnisonClient) -> None:
+        """The server clears mute_events_if_passive on activation, so it is re-sent on loss."""
+        mock_ws = AsyncMock()
+        mock_ws.closed = False
+        client._ws = mock_ws
+        client._connected = True
+        frames = [
+            {"active_device_id_optional": "test-device-id"},
+            {"active_device_id_optional": "phone"},
+        ]
+
+        async def _aiter(_self: Any) -> Any:
+            for frame in frames:
+                yield _make_ws_msg(aiohttp.WSMsgType.TEXT, json.dumps(frame))
+
+        mock_ws.__aiter__ = _aiter
+        with patch.object(client, "_reconnect", new_callable=AsyncMock):
+            await client._message_loop()
+
+        sent = [json.loads(call.args[0]) for call in mock_ws.send_str.call_args_list]
+        assert [msg["update_session_params"] for msg in sent if "update_session_params" in msg] == [
+            {"mute_events_if_passive": True}
+        ]
 
     def test_build_initial_state(self, client: YnisonClient) -> None:
         """Initial state is paused with empty queue."""
@@ -668,6 +708,167 @@ class TestYnisonClientSend:
         client._ws = None
         await client.update_active_device("test")
         # No exception raised
+
+    @pytest.mark.parametrize(
+        "send",
+        [
+            lambda c: c.update_playing_status(1000, 5000, paused=True),
+            lambda c: c.update_active_device("device-123"),
+            lambda c: c.update_session_params(mute_events_if_passive=True),
+        ],
+    )
+    async def test_every_message_carries_request_envelope(
+        self, client: YnisonClient, send: Callable[[YnisonClient], Awaitable[Any]]
+    ) -> None:
+        """Status, active-device and session-params messages carry the request envelope."""
+        await send(client)
+        msg = json.loads(self.mock_ws.send_str.call_args[0][0])
+
+        assert msg["rid"]
+        assert msg["player_action_timestamp_ms"].isdigit()
+        assert msg["activity_interception_type"] == "DO_NOT_INTERCEPT_BY_DEFAULT"
+
+    async def test_own_unpaused_status_intercepts_if_no_one_active(
+        self, client: YnisonClient
+    ) -> None:
+        """An unpaused status claims activity only when no device is active."""
+        await client.update_playing_status(1000, 5000, paused=False)
+        msg = json.loads(self.mock_ws.send_str.call_args[0][0])
+
+        assert msg["activity_interception_type"] == "INTERCEPT_IF_NO_ONE_ACTIVE"
+
+
+class TestReportStatus:
+    """Tests for the status reporter policy in front of update_playing_status."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, client: YnisonClient) -> None:
+        """Connect a mock socket and make this device active on a known track."""
+        self.mock_ws = AsyncMock()
+        self.mock_ws.closed = False
+        client._ws = self.mock_ws
+        client._connected = True
+        client._parse_state(
+            {
+                "active_device_id_optional": "test-device-id",
+                "player_state": {
+                    "player_queue": {
+                        "current_playable_index": 0,
+                        "playable_list": [{"playable_id": "t1"}],
+                    },
+                    "status": {
+                        "progress_ms": "10000",
+                        "duration_ms": "200000",
+                        "paused": False,
+                        "version": {"device_id": "peer", "version": "1", "timestamp_ms": "0"},
+                    },
+                },
+            }
+        )
+
+    def _sent(self) -> list[dict[str, Any]]:
+        """Return the playing-status payloads sent so far."""
+        return [
+            json.loads(call.args[0])["update_playing_status"]["playing_status"]
+            for call in self.mock_ws.send_str.call_args_list
+        ]
+
+    async def test_clamps_progress_to_duration(self, client: YnisonClient) -> None:
+        """Progress never exceeds duration on the wire."""
+        assert await client.report_status(250000, 200000, paused=False, strict=True)
+
+        assert self._sent()[-1]["progress_ms"] == "200000"
+
+    async def test_falls_back_to_server_duration(self, client: YnisonClient) -> None:
+        """An unknown local duration uses the server's duration."""
+        assert await client.report_status(50000, 0, paused=True, strict=True)
+
+        assert self._sent()[-1]["duration_ms"] == "200000"
+
+    async def test_unknown_duration_strict_raises(self, client: YnisonClient) -> None:
+        """A strict report without any known duration fails instead of succeeding silently."""
+        client.state.player_state["status"]["duration_ms"] = "0"
+
+        with pytest.raises(YnisonSendError):
+            await client.report_status(1000, 0, paused=True, strict=True)
+        assert self._sent() == []
+
+    async def test_unknown_duration_best_effort_skips(self, client: YnisonClient) -> None:
+        """A best-effort report without a duration is skipped."""
+        client.state.player_state["status"]["duration_ms"] = "0"
+
+        assert await client.report_status(1000, 0, paused=False) is False
+        assert self._sent() == []
+
+    async def test_best_effort_matching_server_status_is_skipped(
+        self, client: YnisonClient
+    ) -> None:
+        """A heartbeat within 2 s of the extrapolated server status is not sent."""
+        with patch("provider.ynison_client.time.monotonic", return_value=time.monotonic() + 5):
+            sent = await client.report_status(15500, 200000, paused=False)
+
+        assert sent is False
+        assert self._sent() == []
+
+    @pytest.mark.parametrize(
+        ("progress", "duration", "paused"),
+        [(40000, 200000, False), (15000, 200000, True), (15000, 180000, False)],
+    )
+    async def test_best_effort_change_is_sent(
+        self, client: YnisonClient, progress: int, duration: int, paused: bool
+    ) -> None:
+        """Drift above 2 s, a pause change, or a duration change is published."""
+        with patch("provider.ynison_client.time.monotonic", return_value=time.monotonic() + 5):
+            assert await client.report_status(progress, duration, paused=paused)
+
+        assert self._sent()[-1]["progress_ms"] == str(progress)
+
+    async def test_own_send_becomes_dedup_baseline(self, client: YnisonClient) -> None:
+        """After publishing a seek, a matching heartbeat is not sent again."""
+        assert await client.report_status(90000, 200000, paused=False, strict=True)
+        assert await client.report_status(90500, 200000, paused=False) is False
+
+        assert len(self._sent()) == 1
+
+    async def test_best_effort_skipped_while_other_device_active(
+        self, client: YnisonClient
+    ) -> None:
+        """Best-effort status is not published for a session another device owns."""
+        client.state.active_device_id = "phone"
+
+        assert await client.report_status(90000, 200000, paused=False) is False
+        assert self._sent() == []
+
+    async def test_strict_report_is_not_gated(self, client: YnisonClient) -> None:
+        """User commands are delivered even while another device is active."""
+        client.state.active_device_id = "phone"
+
+        assert await client.report_status(90000, 200000, paused=False, strict=True)
+
+    async def test_strict_waits_for_reconnect(self, client: YnisonClient) -> None:
+        """A strict report waits for the channel to come back."""
+        client._connected = False
+        client._ws = None
+
+        async def reconnect() -> None:
+            await asyncio.sleep(0.05)
+            client._ws = self.mock_ws
+            client._connected = True
+
+        task = asyncio.create_task(reconnect())
+        assert await client.report_status(90000, 200000, paused=True, strict=True)
+        await task
+
+    async def test_strict_raises_after_wait(self, client: YnisonClient) -> None:
+        """A strict report raises when the channel does not return in time."""
+        client._connected = False
+        client._ws = None
+
+        with (
+            patch("provider.ynison_client.STRICT_SEND_WAIT", 0.05),
+            pytest.raises(YnisonSendError),
+        ):
+            await client.report_status(90000, 200000, paused=True, strict=True)
 
 
 # ------------------------------------------------------------------
@@ -1451,7 +1652,9 @@ class TestMessageLoop:
             assert client.queue_snapshot()["playable_list"] == [{"playable_id": "peer-new"}]
         finally:
             release.set()
-            tasks = [command] if heartbeat is None else [heartbeat, command]
+            tasks: list[asyncio.Task[Any]] = (
+                [command] if heartbeat is None else [heartbeat, command]
+            )
             await asyncio.gather(*tasks, return_exceptions=True)
 
     async def test_callback_programming_error_propagates(
