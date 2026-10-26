@@ -111,14 +111,21 @@ ignored, and existing instances use continuous playback without reconfiguration.
 ## Connection recovery
 
 The client performs the Ynison redirector and state-service handshakes, then
-keeps the state WebSocket alive. Transient disconnects reconnect indefinitely
-with saturated 1, 5, and 30 second delays plus jitter, or with the delay
-ladder the server supplies. When Ynison asks the client to stay away
-(`ynison-go-away-for-seconds`), no reconnect is attempted until that window has
-passed, matching the official Yandex Music client. Authentication
-rejections trigger an in-memory refresh from the linked account's `x_token`
-when available. A short settle window after reconnect suppresses stale retained
-state.
+keeps the state WebSocket alive using the keep-alive interval the redirector
+supplies. Reconnect timing follows the official Yandex Music client: 1, 5, and
+30 second delays (or the delay ladder the server supplies), an exact wait when
+Ynison asks the client to stay away (`ynison-go-away-for-seconds`), and no
+fast retries for errors the official client does not retry. Once a ladder is
+exhausted the plugin keeps trying every five minutes instead of giving up.
+Authentication rejections trigger an in-memory refresh from the linked
+account's `x_token` when available. A short settle window after reconnect
+suppresses stale retained state.
+
+Playback position is published only when Yandex Music would otherwise show a
+wrong position (more than two seconds of drift, a pause change, or a new
+duration). Player commands wait up to five seconds for a reconnecting
+connection before reporting a failure. RADIO queues keep at most 200 items
+around the current track.
 
 ## Development
 
