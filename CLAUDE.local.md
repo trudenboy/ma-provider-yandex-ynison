@@ -44,9 +44,9 @@ per-track ffmpeg → session-fixed PCM → Music Assistant player
 - **Single credential owner.** Yandex Music owns persistent `token` and
   `x_token` values. Ynison reads them through `get_setup_value` and never
   writes them back.
-- **Player-owned exclusivity.** `on_source_selected` claims
-  `_in_use_by_player`; `playback_session_id` rejects teardown callbacks from
-  superseded requests on the same player.
+- **Player-owned exclusivity.** `on_source_selected` claims the source in
+  `PlaybackSession` (owner, consumer, stream session id); the session id rejects
+  teardown callbacks from superseded requests on the same player.
 - **Side-effect-free stream details.** `get_stream_details(item_id,
   media_type)` does not claim playback ownership, so preload cannot reserve the
   source.
@@ -77,8 +77,11 @@ per-track ffmpeg → session-fixed PCM → Music Assistant player
 | `provider/setup_flow.py` | Linked account and required target-player setup/reconfigure |
 | `provider/credential_source.py` | Provider-local adapter for setup-owned Yandex Music credentials |
 | `provider/auth.py` | Temporary music-token refresh from an `x_token` |
-| `provider/provider.py` | AudioSource lifecycle, streaming, control sync, metadata, and queues |
-| `provider/ynison_client.py` | Ynison transport, messages, state, reconnect, and strict sends |
+| `provider/provider.py` | AudioSource lifecycle, streaming, control sync, metadata, and RADIO replenishment |
+| `provider/playback_session.py` | Source claim, stream cursor, restart and stop requests with reasons, echo grace window |
+| `provider/reconnect_policy.py` | Pure reconnect timing: ladders, go-away, retryable statuses, idle retry |
+| `provider/queue_model.py` | Pure queue view and edits: navigation, index moves, appends with the 200-item window, repeat, shuffle |
+| `provider/ynison_client.py` | Ynison transport, state parsing, echo/relay classification, status reporter, queue commands, strict sends |
 | `provider/streaming.py` | PCM profiles, probe arguments, and fresh format factory |
 | `provider/protocols.py` | Structural subset required from `yandex_music` |
 | `provider/constants.py` | URLs, keys, defaults, timeouts, and protocol errors |
@@ -179,10 +182,21 @@ The transport performs:
 5. passive-event muting request;
 6. message-loop state dispatch.
 
-Transient failures reconnect indefinitely using 5, 10, 30, and 60 second
-saturated delays with ±20% jitter. Only one reconnect task may exist. Strict
+Reconnect timing lives in `ReconnectPolicy` and follows the official client:
+1, 5 and 30 second delays without jitter, or the server's `ynison-backoff-millis`
+ladder; a `ynison-go-away-for-seconds` response ends the session and holds the
+next dial for exactly that window (within one process; it is not persisted).
+The ladder restarts when the error kind changes (server code vs. transport) and
+after the first healthy state message. An exhausted ladder, or a gRPC status the
+official client does not retry (anything but 8/10/14), waits 300 seconds. The
+redirector's `keep_alive_params` set the WebSocket heartbeat (at least 5 s).
+Only one reconnect task may exist. Strict
 sends raise `YnisonSendError` for user commands and delivery-critical queue
-updates; periodic progress and prefetch publications remain best-effort.
+updates after waiting up to five seconds for a reconnecting channel; progress
+and prefetch publications remain best-effort. `report_status` publishes progress
+only when it differs from the newest server-known status (received or sent) by
+more than two seconds, a pause change, or a new duration, and skips best-effort
+reports while another device is active.
 An empty redirect ticket is a `LoginFailed`, like 401/403. During reconnect,
 these failures share a one-attempt credential-refresh budget. Unexpected
 parser/callback errors propagate after socket cleanup and reconnect scheduling.
@@ -214,6 +228,45 @@ uses prefetched data when available, otherwise fetches synchronously, advances
 the queue version/index, and waits for a different track id or queue position.
 Shuffle mappings are extended with the new original indices. Repeat ONE restarts
 the current item; repeat ALL wraps finite queues; repeat NONE stops at their end.
+
+## Concurrency and ownership
+
+Each rule names the test that enforces it.
+
+- **State is applied one frame at a time.** The client parses a frame and awaits
+  the provider's state callback before reading the next one, so state cannot
+  change while a callback awaits (for example the 2.5 s format prefetch). Do not
+  move the callback into a separate task without re-checking state after every
+  await. Test: `test_state_frames_wait_for_the_previous_callback`.
+- **Every background task has an owner.** The provider starts tasks only through
+  `_spawn`; `unload` cancels and awaits them, letting source releases handed to
+  Music Assistant finish for up to five seconds. The client owns its message and
+  reconnect tasks and stops them in `disconnect`. Tests:
+  `tests/standalone/test_task_ownership.py`, `test_unload_cancels_every_spawned_task`,
+  `test_unload_lets_source_release_finish`.
+- **Lock order.** `_queue_navigation_lock` (provider) is taken before the client's
+  `_send_lock`; `_token_refresh_lock` is a leaf taken alone. Never call into the
+  provider while holding `_send_lock`.
+
+### Shadow state
+
+| Copy | Source of truth | Goes stale when | Re-checked |
+|------|-----------------|-----------------|------------|
+| `PlaybackSession` claim (owner, session id) | MA streams controller callbacks | a same-owner reconnect supersedes the request | `lost(token)` in the stream loop and its `finally` |
+| `PlaybackSession.track_id` / `index` | Ynison queue | a peer queue edit or our window trim | track-change detection; `publish_items` returns the trim shift |
+| `PlaybackSession.progress_ms` | PCM bytes streamed | seek or restart | reset at each item start |
+| Client pending queue base | our last sent queue | echo, peer replacement, reconnect, 30 s | `queue_snapshot()`; queue epoch |
+| Client status baseline | newest status received or sent | track change | `report_status` dedup; `status_is_relay` |
+| RADIO prefetch cache | rotor API for one queue generation | peer queue replacement | generation check before use |
+
+### Review checklist
+
+- Reconnect while a user command waits on a strict send.
+- Unload while a prefetch, RADIO fetch or source release is running.
+- Peer queue replacement during a RADIO fetch or a natural-completion wait.
+- Player switch or disabled switching during `on_source_selected`.
+- A relayed stale position or a window trim arriving while a track plays.
+- A go-away during a session, and a provider reload inside the window.
 
 ## Development and verification
 
