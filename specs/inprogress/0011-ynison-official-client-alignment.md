@@ -68,12 +68,17 @@ re-sending `mute_events_if_passive` after losing activity.
    `player_action_timestamp_ms`, and `activity_interception_type`.
 4. A best-effort status report equal to the extrapolated server status within
    2 s (same paused flag and duration) is not sent; changes in pause, duration,
-   track, or a drift above 2 s are sent.
+   track, or a drift above 2 s are sent. Because the server then keeps a stale
+   position, an inbound status that repeats the newest known status is never
+   treated as a peer seek.
 5. A strict status report with unknown duration raises instead of succeeding
    silently; a strict send on a disconnected channel waits up to 5 s for the
    reconnect before raising.
-6. RADIO appends never publish more than 200 playable items; the current item
-   and every item after it are preserved and the current index is shifted.
+6. Unshuffled RADIO appends never publish more than 200 playable items unless
+   the current item itself is further than that from the end; the current item
+   and every item after it are preserved and the current index is shifted
+   without restarting the playing item. Shuffled queues are not trimmed,
+   because dropping original positions could drop items not yet played.
 7. Best-effort status and queue publications are skipped while another device
    is active; strict user commands are not gated.
 8. The provider no longer constructs `player_queue` or `status` wire objects;

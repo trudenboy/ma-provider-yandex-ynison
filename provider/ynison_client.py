@@ -37,6 +37,7 @@ from .constants import (
     STRICT_SEND_WAIT,
     WS_CONNECT_TIMEOUT,
     WS_HEARTBEAT,
+    WS_MIN_HEARTBEAT,
     YNISON_DEVICE_SERVER_DISCONNECT,
     YNISON_ORIGIN,
     YNISON_RECONNECT_ERROR_CODES,
@@ -161,6 +162,10 @@ class YnisonState:
     # version block is present (e.g. status-only update from a peer
     # that did not round-trip via our device).
     last_update_is_echo: bool = False
+    # True iff the most recent update repeated the newest status already known
+    # to the server (received from it or sent by us). Status is published only
+    # on change, so such a relay carries a deliberately stale position.
+    status_is_relay: bool = False
 
     @property
     def current_track_id(self) -> str | None:
@@ -642,24 +647,28 @@ class YnisonClient:
 
     async def publish_items(
         self, items: list[dict[str, Any]], *, expected_generation: int | None = None
-    ) -> bool:
+    ) -> int | None:
         """
         Publish an appended playable list without moving, while this device is active.
 
         :param items: Current playables followed by appended ones.
         :param expected_generation: Queue generation the items were fetched for.
-        :return: ``False`` when another device is active and nothing was sent.
+        :return: Leading items dropped by the window (the current index moved down
+            by that much), or ``None`` when another device is active and nothing
+            was sent.
         :raises ResourceTemporarilyUnavailable: When the queue was replaced meanwhile.
         :raises YnisonSendError: When the edit could not be sent.
         """
         if self.state.active_device_id != self.device_id:
-            return False
+            return None
+        dropped = 0
 
         def mutate(player_state: dict[str, Any]) -> None:
-            replace_items(player_state, items)
+            nonlocal dropped
+            dropped = replace_items(player_state, items)
 
         await self.mutate_player_state(mutate, expected_generation=expected_generation)
-        return True
+        return dropped
 
     async def set_repeat_mode(self, mode: RepeatMode) -> None:
         """
@@ -720,6 +729,22 @@ class YnisonClient:
             "player_action_timestamp_ms": str(int(time.time() * 1000)),
             "activity_interception_type": interception,
         }
+
+    def _is_known_status(self, status: Any) -> bool:
+        """Return whether a status repeats the newest server-known one."""
+        if self._status_baseline is None or not isinstance(status, dict):
+            return False
+        try:
+            progress = int(status.get("progress_ms", 0))
+            duration = int(status.get("duration_ms", 0))
+        except TypeError, ValueError:
+            return False
+        base_progress, base_duration, base_paused, _at = self._status_baseline
+        return (progress, duration, bool(status.get("paused", True))) == (
+            base_progress,
+            base_duration,
+            base_paused,
+        )
 
     def _remember_server_status(self, status: Any) -> None:
         """Record a server-authoritative status as the dedup baseline."""
@@ -917,11 +942,13 @@ class YnisonClient:
         ticket = data.get("redirect_ticket", "")
         session_id = int(data.get("session_id", 0))
         keepalive = data.get("keep_alive_params")
-        self._heartbeat = (
+        interval = (
             parse_seconds(keepalive.get("keep_alive_time_seconds"))
             if isinstance(keepalive, dict)
             else 0.0
-        ) or WS_HEARTBEAT
+        )
+        # A tiny server value would make aiohttp ping and time out aggressively.
+        self._heartbeat = max(interval, WS_MIN_HEARTBEAT) if interval else WS_HEARTBEAT
 
         if not host or not ticket:
             raise LoginFailed("Redirector response missing host or ticket")
@@ -1137,6 +1164,7 @@ class YnisonClient:
         # objects, so merging nested dicts would retain stale keys that are
         # absent from the update.
         incoming_ps = data.get("player_state")
+        self.state.status_is_relay = False
         if incoming_ps is not None:
             # Normalize timestamp fields before storing: Ynison rejects int
             # `status.progress_ms`/`duration_ms`/`version.*` on outbound
@@ -1156,6 +1184,8 @@ class YnisonClient:
                         if number.isdigit() and int(number) < self._last_queue_version:
                             continue
                         self._pending_queue = None
+                if key == "status":
+                    self.state.status_is_relay = self._is_known_status(value)
                 if suppress_status and key == "status":
                     continue
                 if key == "status":

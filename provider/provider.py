@@ -1157,6 +1157,8 @@ class YandexYnisonProvider(PluginProvider):
                 pass  # Skip during grace period after track change or seek
             elif state.last_update_is_echo:
                 pass  # Echo of our own update — ignore
+            elif state.status_is_relay:
+                pass  # Server relayed a known, deliberately stale position
             else:
                 our_ms = self._playback.progress_ms
                 if our_ms >= 0:
@@ -2102,9 +2104,15 @@ class YandexYnisonProvider(PluginProvider):
         if not self._ynison or not self._ynison.connected:
             return
         try:
-            await self._ynison.publish_items(expanded_list, expected_generation=expected_generation)
+            dropped = await self._ynison.publish_items(
+                expanded_list, expected_generation=expected_generation
+            )
         except YnisonSendError, ResourceTemporarilyUnavailable:
             self.logger.warning("RADIO queue update dropped", exc_info=True)
+            return
+        if dropped and self._playback.index >= 0:
+            # The window trim re-indexed the playing item before its echo arrives.
+            self._playback.index -= dropped
 
     async def _on_next(self) -> None:
         """Handle next track command — signal track end so Yandex advances."""

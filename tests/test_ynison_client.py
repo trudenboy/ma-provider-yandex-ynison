@@ -831,6 +831,39 @@ class TestReportStatus:
 
         assert len(self._sent()) == 1
 
+    def test_relayed_known_status_is_marked(self, client: YnisonClient) -> None:
+        """A frame repeating the newest known status is flagged as a relay."""
+        client._parse_state(
+            {
+                "player_state": {
+                    "status": {"progress_ms": "10000", "duration_ms": "200000", "paused": False}
+                }
+            }
+        )
+        assert client.state.status_is_relay is True
+
+        client._parse_state(
+            {
+                "player_state": {
+                    "status": {"progress_ms": "90000", "duration_ms": "200000", "paused": False}
+                }
+            }
+        )
+        assert client.state.status_is_relay is False
+
+    async def test_relay_of_own_sent_status_is_marked(self, client: YnisonClient) -> None:
+        """After our seek, the server relaying that position is not a new status."""
+        assert await client.report_status(90000, 200000, paused=False, strict=True)
+
+        client._parse_state(
+            {
+                "player_state": {
+                    "status": {"progress_ms": "90000", "duration_ms": "200000", "paused": False}
+                }
+            }
+        )
+        assert client.state.status_is_relay is True
+
     async def test_best_effort_skipped_while_other_device_active(
         self, client: YnisonClient
     ) -> None:
@@ -1333,6 +1366,7 @@ class TestGetRedirectTicket:
             ({"keep_alive_params": {"keep_alive_time_seconds": 20}}, 20.0),
             ({"keep_alive_params": {"keep_alive_time_seconds": "45"}}, 45.0),
             ({"keep_alive_params": {"keep_alive_time_seconds": 0}}, 30.0),
+            ({"keep_alive_params": {"keep_alive_time_seconds": 0.01}}, 5.0),
             ({}, 30.0),
         ],
     )
@@ -2008,6 +2042,21 @@ class TestMessageLoop:
         )
 
         assert await self._record_reconnect_delays(client, 3) == [3600.0, 1.0, 5.0]
+
+    async def test_drop_after_healthy_state_is_a_transport_failure(
+        self, client: YnisonClient
+    ) -> None:
+        """A non-fatal error followed by state and a drop retries on the transport ladder."""
+        error = _make_ws_msg(
+            aiohttp.WSMsgType.TEXT,
+            json.dumps({"error": {"details": {"ynison-error-code": "400030001"}, "grpc_code": 3}}),
+        )
+        state = _make_ws_msg(
+            aiohttp.WSMsgType.TEXT, json.dumps({"player_state": {"status": {"paused": True}}})
+        )
+        await self._run_loop_with_messages(client, [error, state])
+
+        assert await self._record_reconnect_delays(client, 1) == [1.0]
 
     async def test_server_backoff_ladder_replaces_default(self, client: YnisonClient) -> None:
         """``ynison-backoff-millis`` supplies the ladder, sorted and de-duplicated."""
@@ -3106,14 +3155,14 @@ class TestQueueCommands:
         client.state.active_device_id = "phone"
         items = [*client.state.player_state["player_queue"]["playable_list"], {"playable_id": "n"}]
 
-        assert await client.publish_items(items) is False
+        assert await client.publish_items(items) is None
         self.mock_ws.send_str.assert_not_awaited()
 
     async def test_publish_items_appends(self, client: YnisonClient) -> None:
         """An active device publishes the appended list without moving."""
         items = [*client.state.player_state["player_queue"]["playable_list"], {"playable_id": "n"}]
 
-        assert await client.publish_items(items) is True
+        assert await client.publish_items(items) == 0
         assert self._sent_queue()["playable_list"][-1] == {"playable_id": "n"}
         assert self._sent_queue()["current_playable_index"] == 0
 

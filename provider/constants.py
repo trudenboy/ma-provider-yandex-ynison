@@ -64,6 +64,7 @@ STATUS_DEDUP_WINDOW_MS: Final[int] = 2000
 # WebSocket timeouts
 WS_CONNECT_TIMEOUT: Final[float] = 15.0
 WS_HEARTBEAT: Final[float] = 30.0
+WS_MIN_HEARTBEAT: Final[float] = 5.0
 
 # Ynison error codes that require immediate reconnection
 YNISON_ERROR_REBALANCED: Final[str] = "300100001"

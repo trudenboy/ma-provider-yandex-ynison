@@ -3142,6 +3142,41 @@ class TestEchoSuppression:
         assert provider._playback.restart_requested()
         assert provider._playback.restart_at_ms == 10000
 
+    async def test_status_relay_does_not_trigger_seek(self) -> None:
+        """A relayed, already-known status is stale by design and is not a peer seek."""
+        provider = _make_provider()
+        await self._prime_same_track(provider)
+
+        state = _make_ynison_state(progress_ms=10000)
+        state.status_is_relay = True
+
+        await provider._handle_ynison_state(state)
+
+        assert not provider._playback.restart_requested()
+
+    async def test_window_trim_moves_cursor_with_the_playing_item(self) -> None:
+        """A RADIO publication that trims the window keeps the cursor on the playing item."""
+        provider = _make_provider()
+        await self._prime_same_track(provider)
+        provider._playback.index = 199
+        provider._ynison = _mock_ynison()
+        provider._ynison.publish_items = AsyncMock(return_value=10)
+
+        await provider._update_queue_list([{"playable_id": "x"}])
+
+        assert provider._playback.index == 189
+        assert not provider._playback.restart_requested()
+
+    async def test_peer_index_change_on_same_track_restarts(self) -> None:
+        """A peer moving to another occurrence of the same track is a real change."""
+        provider = _make_provider()
+        await self._prime_same_track(provider)
+        provider._playback.index = 5
+
+        await provider._handle_ynison_state(_make_ynison_state(progress_ms=1000))
+
+        assert provider._playback.restart_requested()
+
     async def test_default_echo_flag_false(self) -> None:
         """YnisonState default last_update_is_echo is False — seek still fires."""
         provider = _make_provider()
