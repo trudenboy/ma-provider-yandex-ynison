@@ -5,8 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import math
-import random
 import secrets
 import time
 import uuid
@@ -33,6 +31,7 @@ from .constants import (
     DEFAULT_APP_VERSION,
     DEVICE_TYPE_WEB,
     RECONNECT_DELAYS,
+    RECONNECT_IDLE_DELAY,
     WS_CONNECT_TIMEOUT,
     WS_HEARTBEAT,
     YNISON_DEVICE_SERVER_DISCONNECT,
@@ -41,6 +40,7 @@ from .constants import (
     YNISON_REDIRECT_URL,
     YNISON_STATE_PATH,
 )
+from .reconnect_policy import ReconnectPolicy, parse_seconds
 
 
 class YnisonSendError(ConnectionError):
@@ -80,23 +80,6 @@ def _stringify_version(version: Any) -> None:
         val = version.get(key)
         if isinstance(val, int) and not isinstance(val, bool):
             version[key] = str(val)
-
-
-def _parse_seconds(value: Any) -> float:
-    """Return a positive number of seconds from a Ynison error detail, or 0."""
-    try:
-        seconds = float(value)
-    except TypeError, ValueError:
-        return 0.0
-    return seconds if seconds > 0 and math.isfinite(seconds) else 0.0
-
-
-def _parse_backoff_ladder(value: Any) -> tuple[float, ...]:
-    """Return a sorted, de-duplicated reconnect ladder in seconds from ``ynison-backoff-millis``."""
-    if not isinstance(value, str):
-        return ()
-    millis = {int(part) for part in value.split(":") if part.strip().isdigit()}
-    return tuple(ms / 1000 for ms in sorted(millis))
 
 
 def _local_time(epoch: float) -> str:
@@ -245,10 +228,8 @@ class YnisonClient:
         self._stop_event = asyncio.Event()
         self._connected = False
         self._has_connected_once = False
-        self._reconnect_failures = 0
-        self._backoff_ladder: tuple[float, ...] = ()
-        self._backoff_key: tuple[str, str] | None = None
-        self._go_away = 0.0
+        self._policy = ReconnectPolicy(RECONNECT_DELAYS, RECONNECT_IDLE_DELAY)
+        self._heartbeat = WS_HEARTBEAT
         self._status_watermarks: deque[_StatusWatermark] = deque(maxlen=8)
 
         # Latest state from server
@@ -321,12 +302,8 @@ class YnisonClient:
                 raise
             self._logger.warning("Initial connection failed, scheduling reconnect", exc_info=True)
             self._connected = False
-            if self._ws and not self._ws.closed:
-                await self._ws.close()
-            self._ws = None
-            if self._session and not self._external_session:
-                await self._session.close()
-            self._session = None
+            await self._close_socket()
+            await self._close_session()
             self._schedule_reconnect()
         except Exception:
             await self.disconnect()
@@ -348,13 +325,8 @@ class YnisonClient:
             with suppress(asyncio.CancelledError):
                 await self._reconnect_task
 
-        if self._ws and not self._ws.closed:
-            await self._ws.close()
-        self._ws = None
-
-        if self._session and not self._external_session:
-            await self._session.close()
-        self._session = None
+        await self._close_socket()
+        await self._close_session()
 
     def update_token(self, token: SecretStr) -> None:
         """Replace the stored OAuth token (e.g. after a refresh)."""
@@ -698,6 +670,12 @@ class YnisonClient:
         host = data.get("host", "")
         ticket = data.get("redirect_ticket", "")
         session_id = int(data.get("session_id", 0))
+        keepalive = data.get("keep_alive_params")
+        self._heartbeat = (
+            parse_seconds(keepalive.get("keep_alive_time_seconds"))
+            if isinstance(keepalive, dict)
+            else 0.0
+        ) or WS_HEARTBEAT
 
         if not host or not ticket:
             raise LoginFailed("Redirector response missing host or ticket")
@@ -716,7 +694,7 @@ class YnisonClient:
         ws_timeout = aiohttp.ClientWSTimeout(ws_close=WS_CONNECT_TIMEOUT)
         try:
             self._ws = await self._session.ws_connect(
-                url, headers=headers, timeout=ws_timeout, heartbeat=WS_HEARTBEAT
+                url, headers=headers, timeout=ws_timeout, heartbeat=self._heartbeat
             )
         except aiohttp.WSServerHandshakeError as err:
             if err.status in (401, 403):
@@ -767,6 +745,7 @@ class YnisonClient:
             raise RuntimeError("WebSocket not connected — call connect() first")
         socket = self._ws
         cancelled = False
+        server_directive = False
         try:
             async for msg in socket:
                 if self._stop_event.is_set():
@@ -809,11 +788,25 @@ class YnisonClient:
                             "Ynison error response: %s",
                             json.dumps(error_info)[:300],
                         )
-                        go_away = _parse_seconds(details.get("ynison-go-away-for-seconds"))
-                        self._apply_server_backoff(
-                            error_code, go_away, details.get("ynison-backoff-millis")
+                        go_away = parse_seconds(details.get("ynison-go-away-for-seconds"))
+                        grpc_code = error_info.get("grpc_code")
+                        self._policy.on_server_error(
+                            error_code,
+                            grpc_code=grpc_code if isinstance(grpc_code, int) else None,
+                            go_away=go_away,
+                            ladder=details.get("ynison-backoff-millis"),
                         )
+                        server_directive = True
                         if go_away:
+                            self._logger.warning(
+                                "Yandex rejected the Ynison connection (error %s) and asked "
+                                "to wait %.0f s. This device will not appear in the Yandex "
+                                "Music app until the next attempt at %s; reconnecting "
+                                "earlier would extend the wait",
+                                error_code,
+                                go_away,
+                                _local_time(time.time() + go_away),
+                            )
                             break
                         if error_code in YNISON_RECONNECT_ERROR_CODES:
                             self._logger.info(
@@ -824,7 +817,7 @@ class YnisonClient:
                         continue
 
                     self._parse_state(data)
-                    self._reconnect_failures = 0
+                    self._policy.on_healthy()
                     try:
                         await self._on_state_update(self.state)
                     except MusicAssistantError:
@@ -860,6 +853,8 @@ class YnisonClient:
                 with suppress(aiohttp.ClientError, OSError, TimeoutError):
                     await socket.close()
             if self._ws is socket and not self._stop_event.is_set() and not cancelled:
+                if not server_directive:
+                    self._policy.on_transport_failure()
                 self._schedule_reconnect()
         self._logger.debug("Ynison message loop exited")
 
@@ -953,7 +948,7 @@ class YnisonClient:
 
     async def _reconnect(self) -> None:
         """
-        Reconnect with exponential backoff, retrying indefinitely.
+        Reconnect on the reconnect policy's schedule, retrying indefinitely.
 
         On authentication failure (LoginFailed), attempts to refresh the token
         via the on_auth_failure callback before the next retry. The loop only
@@ -963,7 +958,7 @@ class YnisonClient:
         attempt = 0
         refresh_attempted = False
         while not self._stop_event.is_set():
-            delay = self._next_reconnect_delay()
+            delay = self._policy.next_delay()
             self._logger.info("Ynison reconnect attempt %d in %.1fs", attempt + 1, delay)
             await asyncio.sleep(delay)
 
@@ -972,10 +967,7 @@ class YnisonClient:
 
             attempt += 1
             try:
-                # Close stale WebSocket
-                if self._ws and not self._ws.closed:
-                    await self._ws.close()
-                self._ws = None
+                await self._close_socket()
 
                 # Re-create session if needed
                 if self._session is None or self._session.closed:
@@ -992,6 +984,7 @@ class YnisonClient:
                 self._logger.info("Ynison reconnected successfully")
                 return
             except LoginFailed:
+                self._policy.on_transport_failure()
                 self._logger.warning("Ynison reconnect attempt %d failed: auth error", attempt)
                 if self._on_auth_failure and not refresh_attempted:
                     try:
@@ -1010,44 +1003,20 @@ class YnisonClient:
             except asyncio.CancelledError:
                 return
             except aiohttp.ClientError, OSError, TimeoutError, ResourceTemporarilyUnavailable:
+                self._policy.on_transport_failure()
                 self._logger.warning("Ynison reconnect attempt %d failed", attempt, exc_info=True)
 
-    def _next_reconnect_delay(self) -> float:
-        """Return the wait before the next reconnect attempt, honouring server back-off."""
-        if self._go_away:
-            delay = self._go_away
-            self._go_away = 0.0
-            self._reconnect_failures = 0
-            return delay
-        ladder = self._backoff_ladder or RECONNECT_DELAYS
-        delay = ladder[min(self._reconnect_failures, len(ladder) - 1)]
-        self._reconnect_failures += 1
-        # Add ±20% jitter to prevent thundering-herd reconnects
-        return delay * (1 + 0.2 * (2 * random.random() - 1))  # noqa: S311 - reconnect jitter
+    async def _close_socket(self) -> None:
+        """Close and forget the state WebSocket."""
+        if self._ws and not self._ws.closed:
+            await self._ws.close()
+        self._ws = None
 
-    def _apply_server_backoff(self, error_code: str, go_away: float, backoff: Any) -> None:
-        """
-        Adopt the retry policy carried by a Ynison error response.
-
-        :param error_code: Ynison error code of the response.
-        :param go_away: Seconds the server asked this client to stay away, or 0.
-        :param backoff: Raw ``ynison-backoff-millis`` ladder, if supplied.
-        """
-        self._backoff_ladder = _parse_backoff_ladder(backoff)
-        key = ("go_away" if go_away else "basic", error_code)
-        if key != self._backoff_key:
-            self._backoff_key = key
-            self._reconnect_failures = 0
-        if go_away:
-            self._go_away = go_away
-            self._logger.warning(
-                "Yandex rejected the Ynison connection (error %s) and asked to wait %.0f s. "
-                "This device will not appear in the Yandex Music app until the next attempt "
-                "at %s; reconnecting earlier would extend the wait",
-                error_code,
-                go_away,
-                _local_time(time.time() + go_away),
-            )
+    async def _close_session(self) -> None:
+        """Close an HTTP session this client created and forget it."""
+        if self._session and not self._external_session:
+            await self._session.close()
+        self._session = None
 
     def _player_state_message(self, player_state: dict[str, Any]) -> dict[str, Any]:
         """Build a complete queue update envelope."""

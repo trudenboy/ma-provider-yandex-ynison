@@ -1125,6 +1125,44 @@ class TestGetRedirectTicket:
         assert sid == 42
         mock_ws.close.assert_awaited_once()
 
+    @pytest.mark.parametrize(
+        ("redirect_extra", "heartbeat"),
+        [
+            ({"keep_alive_params": {"keep_alive_time_seconds": 20}}, 20.0),
+            ({"keep_alive_params": {"keep_alive_time_seconds": "45"}}, 45.0),
+            ({"keep_alive_params": {"keep_alive_time_seconds": 0}}, 30.0),
+            ({}, 30.0),
+        ],
+    )
+    async def test_server_keepalive_drives_state_heartbeat(
+        self,
+        client: YnisonClient,
+        redirect_extra: dict[str, Any],
+        heartbeat: float,
+    ) -> None:
+        """The redirector's keep-alive interval becomes the state socket heartbeat."""
+        redirect_msg = MagicMock()
+        redirect_msg.type = aiohttp.WSMsgType.TEXT
+        redirect_msg.data = json.dumps(
+            {"host": "node", "redirect_ticket": "ticket", "session_id": 1, **redirect_extra}
+        )
+        redirect_ws = AsyncMock()
+        redirect_ws.receive = AsyncMock(return_value=redirect_msg)
+        state_ws = AsyncMock()
+        session = AsyncMock()
+        session.ws_connect = AsyncMock(side_effect=[redirect_ws, state_ws])
+        client._session = session
+
+        with patch.object(client, "send_full_state", new_callable=AsyncMock):
+            await client._connect_state(*await client._get_redirect_ticket())
+        message_task = client._message_task
+        assert message_task is not None
+        message_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await message_task
+
+        assert session.ws_connect.await_args_list[1].kwargs["heartbeat"] == heartbeat
+
     async def test_auth_failure_401(self, client: YnisonClient) -> None:
         """401 WSServerHandshakeError raises LoginFailed."""
         err = aiohttp.WSServerHandshakeError(
@@ -1716,7 +1754,6 @@ class TestMessageLoop:
 
         with (
             patch(SLEEP_PATH, new_callable=AsyncMock, side_effect=record_sleep),
-            patch("provider.ynison_client.random.random", return_value=0.5),
             patch.object(
                 client,
                 "_get_redirect_ticket",
@@ -1787,26 +1824,9 @@ class TestMessageLoop:
         )
         await self._run_loop_with_messages(client, [rebalance])
 
-        assert await self._record_reconnect_delays(client, 6) == [0.0, 0.1, 0.5, 1.0, 5.0, 5.0]
-
-    async def test_error_code_change_restarts_ladder(self, client: YnisonClient) -> None:
-        """A different server error code resets the ladder iteration."""
-
-        def error(code: str) -> MagicMock:
-            return _make_ws_msg(
-                aiohttp.WSMsgType.TEXT,
-                json.dumps({"error": {"details": {"ynison-error-code": code}}}),
-            )
-
-        await self._run_loop_with_messages(client, [error("300100001")])
-        await self._record_reconnect_delays(client, 2)
-        await self._run_loop_with_messages(client, [error("300100001")])
-        same = await self._record_reconnect_delays(client, 1)
-        await self._run_loop_with_messages(client, [error("300100002")])
-        changed = await self._record_reconnect_delays(client, 1)
-
-        assert same == [30.0]
-        assert changed == [1.0]
+        # The first dial follows the server ladder; failed dials are transport
+        # failures, a different error kind, so the default ladder takes over.
+        assert await self._record_reconnect_delays(client, 5) == [0.0, 1.0, 5.0, 30.0, 300.0]
 
     async def test_text_message_invalid_json(self, client: YnisonClient) -> None:
         """TEXT message with invalid JSON logs warning, continues."""
@@ -2050,7 +2070,6 @@ class TestReconnect:
 
         with (
             patch(SLEEP_PATH, new_callable=AsyncMock, side_effect=record_sleep),
-            patch("provider.ynison_client.random.random", return_value=0.5),
             patch.object(
                 client,
                 "_get_redirect_ticket",
@@ -2075,7 +2094,6 @@ class TestReconnect:
 
         with (
             patch(SLEEP_PATH, new_callable=AsyncMock, side_effect=record_sleep),
-            patch("provider.ynison_client.random.random", return_value=0.5),
             patch.object(
                 client,
                 "_get_redirect_ticket",
