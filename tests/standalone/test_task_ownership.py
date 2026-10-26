@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import ast
-from pathlib import Path
+import inspect
 
-_PROVIDER = Path(__file__).resolve().parents[2] / "provider" / "provider.py"
+from provider import provider as provider_module
 
 
 def _create_task_callers(source: str) -> list[tuple[str, int]]:
@@ -39,11 +39,11 @@ def test_provider_creates_tasks_only_through_spawn() -> None:
     """Tasks started anywhere else would outlive unload."""
     stray = [
         (func, line)
-        for func, line in _create_task_callers(_PROVIDER.read_text(encoding="utf-8"))
+        for func, line in _create_task_callers(inspect.getsource(provider_module))
         if func != "_spawn"
     ]
 
-    assert stray == [], f"create_task outside _spawn in provider/provider.py: {stray}"
+    assert stray == [], f"create_task outside _spawn in the provider module: {stray}"
 
 
 def test_guard_detects_a_stray_task() -> None:
