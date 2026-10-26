@@ -112,7 +112,10 @@ ignored, and existing instances use continuous playback without reconfiguration.
 
 The client performs the Ynison redirector and state-service handshakes, then
 keeps the state WebSocket alive. Transient disconnects reconnect indefinitely
-with saturated 5, 10, 30, and 60 second delays plus jitter. Authentication
+with saturated 1, 5, and 30 second delays plus jitter, or with the delay
+ladder the server supplies. When Ynison asks the client to stay away
+(`ynison-go-away-for-seconds`), no reconnect is attempted until that window has
+passed, matching the official Yandex Music client. Authentication
 rejections trigger an in-memory refresh from the linked account's `x_token`
 when available. A short settle window after reconnect suppresses stale retained
 state.

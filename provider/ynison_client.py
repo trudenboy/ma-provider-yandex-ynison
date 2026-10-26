@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import random
 import secrets
 import time
@@ -78,6 +79,23 @@ def _stringify_version(version: Any) -> None:
         val = version.get(key)
         if isinstance(val, int) and not isinstance(val, bool):
             version[key] = str(val)
+
+
+def _parse_seconds(value: Any) -> float:
+    """Return a positive number of seconds from a Ynison error detail, or 0."""
+    try:
+        seconds = float(value)
+    except TypeError, ValueError:
+        return 0.0
+    return seconds if seconds > 0 and math.isfinite(seconds) else 0.0
+
+
+def _parse_backoff_ladder(value: Any) -> tuple[float, ...]:
+    """Return a sorted, de-duplicated reconnect ladder in seconds from ``ynison-backoff-millis``."""
+    if not isinstance(value, str):
+        return ()
+    millis = {int(part) for part in value.split(":") if part.strip().isdigit()}
+    return tuple(ms / 1000 for ms in sorted(millis))
 
 
 def normalize_player_state_timestamps(player_state: dict[str, Any]) -> None:
@@ -221,6 +239,10 @@ class YnisonClient:
         self._stop_event = asyncio.Event()
         self._connected = False
         self._has_connected_once = False
+        self._reconnect_failures = 0
+        self._backoff_ladder: tuple[float, ...] = ()
+        self._backoff_key: tuple[str, str] | None = None
+        self._go_away = 0.0
         self._status_watermarks: deque[_StatusWatermark] = deque(maxlen=8)
 
         # Latest state from server
@@ -775,11 +797,18 @@ class YnisonClient:
 
                     if "error" in data:
                         error_info = data["error"]
-                        error_code = error_info.get("details", {}).get("ynison-error-code", "")
+                        details = error_info.get("details", {})
+                        error_code = details.get("ynison-error-code", "")
                         self._logger.warning(
                             "Ynison error response: %s",
                             json.dumps(error_info)[:300],
                         )
+                        go_away = _parse_seconds(details.get("ynison-go-away-for-seconds"))
+                        self._apply_server_backoff(
+                            error_code, go_away, details.get("ynison-backoff-millis")
+                        )
+                        if go_away:
+                            break
                         if error_code in YNISON_RECONNECT_ERROR_CODES:
                             self._logger.info(
                                 "Ynison re-balance error %s — breaking for immediate reconnect",
@@ -789,6 +818,7 @@ class YnisonClient:
                         continue
 
                     self._parse_state(data)
+                    self._reconnect_failures = 0
                     try:
                         await self._on_state_update(self.state)
                     except MusicAssistantError:
@@ -927,10 +957,7 @@ class YnisonClient:
         attempt = 0
         refresh_attempted = False
         while not self._stop_event.is_set():
-            delay = RECONNECT_DELAYS[min(attempt, len(RECONNECT_DELAYS) - 1)]
-            # Add ±20% jitter to prevent thundering-herd reconnects
-            jitter = delay * 0.2 * (2 * random.random() - 1)  # noqa: S311 - reconnect jitter
-            delay = max(0.5, delay + jitter)
+            delay = self._next_reconnect_delay()
             self._logger.info("Ynison reconnect attempt %d in %.1fs", attempt + 1, delay)
             await asyncio.sleep(delay)
 
@@ -978,6 +1005,40 @@ class YnisonClient:
                 return
             except aiohttp.ClientError, OSError, TimeoutError, ResourceTemporarilyUnavailable:
                 self._logger.warning("Ynison reconnect attempt %d failed", attempt, exc_info=True)
+
+    def _next_reconnect_delay(self) -> float:
+        """Return the wait before the next reconnect attempt, honouring server back-off."""
+        if self._go_away:
+            delay = self._go_away
+            self._go_away = 0.0
+            self._reconnect_failures = 0
+            return delay
+        ladder = self._backoff_ladder or RECONNECT_DELAYS
+        delay = ladder[min(self._reconnect_failures, len(ladder) - 1)]
+        self._reconnect_failures += 1
+        # Add ±20% jitter to prevent thundering-herd reconnects
+        return delay * (1 + 0.2 * (2 * random.random() - 1))  # noqa: S311 - reconnect jitter
+
+    def _apply_server_backoff(self, error_code: str, go_away: float, backoff: Any) -> None:
+        """
+        Adopt the retry policy carried by a Ynison error response.
+
+        :param error_code: Ynison error code of the response.
+        :param go_away: Seconds the server asked this client to stay away, or 0.
+        :param backoff: Raw ``ynison-backoff-millis`` ladder, if supplied.
+        """
+        self._backoff_ladder = _parse_backoff_ladder(backoff)
+        key = ("go_away" if go_away else "basic", error_code)
+        if key != self._backoff_key:
+            self._backoff_key = key
+            self._reconnect_failures = 0
+        if go_away:
+            self._go_away = go_away
+            self._logger.warning(
+                "Ynison asked this client to stay away for %.0fs (error %s)",
+                go_away,
+                error_code,
+            )
 
     def _player_state_message(self, player_state: dict[str, Any]) -> dict[str, Any]:
         """Build a complete queue update envelope."""
