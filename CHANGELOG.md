@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.4.1] - 2026-10-26
+
+### Fixed
+
+- Background work started by the plugin (connecting, provider matching, starting
+  playback, RADIO prefetch) is stopped when the plugin is reloaded or removed, and
+  giving the source back to a player is allowed to finish, instead of running on
+  after the plugin is gone.
+
 ## [4.4.0] - 2026-10-26
 
 ### Changed
