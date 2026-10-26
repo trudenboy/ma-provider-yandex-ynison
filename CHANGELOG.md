@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.4.2] - 2026-10-26
+
+### Fixed
+
+- Pausing from Music Assistant sends the position actually playing instead of the
+  last position Yandex Music reported, so resuming no longer jumps back to it.
+- A seek from another device to the position this device reported last (for
+  example back to the start of the track) is no longer ignored.
+- Device-list or queue-only updates from Yandex Music no longer trigger a seek back
+  to an old position.
+
 ## [4.4.1] - 2026-10-26
 
 ### Fixed
