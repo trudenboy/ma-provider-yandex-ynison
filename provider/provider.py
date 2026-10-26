@@ -63,6 +63,7 @@ from .constants import (
     YANDEX_MUSIC_LOSSLESS_QUALITIES,
 )
 from .credential_source import YandexMusicCredentialSource
+from .playback_session import PlaybackSession, RestartReason, StopReason
 from .protocols import YandexMusicProviderLike
 from .queue_model import RADIO_ENTITY_TYPES, YnisonQueueView, radio_items, repeat_from_ynison
 from .streaming import (
@@ -89,10 +90,6 @@ if TYPE_CHECKING:
 
 # How often (seconds) to sync progress to MA UI and Ynison.
 _PROGRESS_SYNC_INTERVAL = 5.0
-
-# Grace window after our own REPLACE/seek during which incoming Ynison
-# progress updates are treated as our own echo (not a user seek).
-_ECHO_GRACE_PERIOD = 3.0
 
 # Bound on the synchronous pre-fetch in _prefetch_format_for_track. A slow
 # pre-fetch is treated like a failed one — fall back to the current format
@@ -164,8 +161,6 @@ class YandexYnisonProvider(PluginProvider):
     # an explicit opt-out. Analysing transient external-source tracks
     # buys nothing.
     is_streaming_provider: bool = False
-    _current_streaming_track_id: str | None
-    _current_streaming_index: int
     _last_shuffle_enabled: bool | None = None
     _last_repeat_mode: RepeatMode | None = None
 
@@ -204,18 +199,13 @@ class YandexYnisonProvider(PluginProvider):
         self._device_id: str = device_id
 
         # Runtime state
-        self._active_player_id: str | None = None
         self._ynison: YnisonClient | None = None
         self._runner_task: asyncio.Task[None] | None = None
         self._on_unload_callbacks: list[Callable[..., None]] = []
         self._yandex_provider: YandexMusicProviderLike | None = None
-        self._current_streaming_track_id, self._current_streaming_index = None, -1
-        self._track_changed_event = asyncio.Event()
-        self._stream_stop_event = asyncio.Event()
-        self._seek_position_ms: int = 0
-        self._seek_grace_until: float = 0.0
+        # Source claim, stream cursor, restart and stop requests.
+        self._playback = PlaybackSession()
         self._last_player_update_time: float = 0.0
-        self._actual_duration_ms: int = 0
         self._prefetched_list: list[dict[str, Any]] | None = None
         self._prefetched_queue_generation: int | None = None
         self._queue_navigation_lock = asyncio.Lock()
@@ -225,11 +215,6 @@ class YandexYnisonProvider(PluginProvider):
 
         # Rate limiter for Yandex API calls (max 2 req/s)
         self._api_throttler = ThrottlerManager(rate_limit=2, period=1.0)
-
-        # Progress tracking — byte counter is the single source of truth
-        # during active streaming; Ynison echoes are detected via
-        # YnisonState.last_update_is_echo and ignored.
-        self._streaming_progress_ms: int = 0
 
         # AudioSource MediaItem + per-stream state
         self._stream_metadata = StreamMetadata(
@@ -258,24 +243,12 @@ class YandexYnisonProvider(PluginProvider):
             exclusive=True,
             allow_external_trigger=True,
         )
-        # _in_use_by_player tracks the user-facing player that owns the source session
-        self._in_use_by_player: str | None = None
-        # _active_session_id is the controller-provided token for the current
-        # stream request — used to reject stale on_source_unselected callbacks
-        # after a same-owner reconnect supersedes the previous request.
-        self._active_session_id: str | None = None
 
         # Idempotency cache for outbound peer-commands. Suppresses duplicate
         # (action, key) pairs inside `_COMMAND_IDEMPOTENCY_TTL` — protects
         # against echo-storms where the same Ynison broadcast lands on our
         # state-handler twice in quick succession.
         self._command_idempotency: dict[tuple[str, str | None], float] = {}
-
-        # "Ynison paused us externally — expect a resume that needs
-        # `play_media` re-issuance." Set in `_pause_playback`, read in
-        # `_activate_playback`. Survives a stray `_stream_stop_event` clear
-        # independent of the stop signal (which covers non-pause stop reasons).
-        self._externally_paused: bool = False
 
         # In-memory music-token cache keyed by SHA-256(x_token). 50-min TTL,
         # 4-entry LRU. Coalesces concurrent refresh attempts via a single
@@ -479,31 +452,20 @@ class YandexYnisonProvider(PluginProvider):
         reload), the new format takes effect only on the *next* session —
         preventing bit-depth/sample-rate mismatches that cause noise.
         """
-        self._stream_stop_event.clear()
-        # Snapshot the source-session owner at stream start. The physical consumer
-        # may be a protocol bridge, while this id remains the user-facing player.
-        # The lock may legitimately be empty here — MA's `_load_item` preload
-        # path drives the generator to fill an initial audio buffer BEFORE
-        # `on_source_selected` has been dispatched, so `_in_use_by_player` is
-        # still None on that call. `had_claim` records whether a lock was
-        # already in force at entry; only in that case do we enforce
-        # cross-session invariants on the loop and the `finally` cleanup.
-        player_id = self._in_use_by_player or ""
-        had_claim = self._in_use_by_player is not None
-        # Snapshot the active session id too so a same-owner reconnect (which
-        # updates _active_session_id but not _in_use_by_player) is treated as a
-        # superseding session: the loop exits early, and the finally clear
-        # below skips the release so it doesn't clobber the new claim.
-        captured_session_id = self._active_session_id
+        playback = self._playback
+        playback.begin_stream()
+        # Capture the claim at stream start. The physical consumer may be a
+        # protocol bridge, while the claim names the user-facing owner. MA's
+        # `_load_item` preload path drives the generator BEFORE
+        # `on_source_selected`, so there may be no claim yet; such a stream is
+        # never bound to a claim (`lost()` stays False) and never releases one.
+        # A same-owner reconnect refreshes only the session id; it still
+        # supersedes this stream, which then must not release the new claim.
+        token = playback.capture()
 
-        # MA's streams controller may pass a non-zero seek_position (e.g. a
-        # resume initiated through a path that does NOT go through Ynison and
-        # therefore did not set `_seek_position_ms`). Honor it as the seed for
-        # the upcoming track. The Ynison-driven seek path (`_activate_playback`
-        # / `_on_seek`) keeps writing `_seek_position_ms` directly, which
-        # subsequent track iterations consume — only the seed differs.
-        if seek_position > 0 and self._seek_position_ms == 0:
-            self._seek_position_ms = seek_position * 1000
+        # MA's streams controller may pass a non-zero seek_position for a
+        # resume that did not go through Ynison; Ynison-driven restarts win.
+        playback.seed_start(seek_position * 1000)
 
         # Freeze format for this streaming session so every inner ffmpeg
         # produces data matching the outer ffmpeg's captured input_format.
@@ -511,28 +473,21 @@ class YandexYnisonProvider(PluginProvider):
         session_fmt: AudioFormat = make_pcm_format(session_params)
 
         try:
-            while not self._stream_stop_event.is_set() and (
-                # Preload path: no claim was active at entry — drive the
-                # loop purely off Ynison state and the stop event.
-                not had_claim or not self._session_lost(player_id, captured_session_id)
-            ):
+            while not playback.stop_requested() and not playback.lost(token):
                 if not self._ynison or not self._ynison.state.current_track_id:
                     # Wait for a track to appear
-                    self._track_changed_event.clear()
-                    try:
-                        await asyncio.wait_for(self._track_changed_event.wait(), timeout=30.0)
-                    except TimeoutError:
-                        continue
+                    playback.consume_restart()
+                    await playback.wait_restart(30.0)
                     continue
 
-                # Clear event before reading state so any subsequent update
-                # re-sets the event instead of being silently cleared.
-                self._track_changed_event.clear()
+                # Consume the wake-up before reading state so any later update
+                # requests a new restart instead of being silently dropped.
+                playback.consume_restart()
                 track_id = self._ynison.state.current_track_id
-                self._current_streaming_track_id = track_id
-                self._current_streaming_index = self._ynison.state.current_index
+                playback.track_id = track_id
+                playback.index = self._ynison.state.current_index
 
-                # `_pause_playback` set the stop event; finalize.
+                # `_pause_playback` requested the stop; finalize.
                 if self._ynison.state.is_paused:
                     return
 
@@ -540,16 +495,16 @@ class YandexYnisonProvider(PluginProvider):
                     self.logger.warning(
                         "No linked Yandex Music provider — cannot stream track %s", track_id
                     )
-                    self._stream_stop_event.set()
-                    if self._in_use_by_player == player_id:
-                        await self.mass.players.cmd_stop(player_id)
+                    playback.request_stop(StopReason.PROVIDER_LOST)
+                    if token and playback.owner_player_id == token.owner_player_id:
+                        await self.mass.players.cmd_stop(token.owner_player_id)
                     return
 
-                # Stream the current track
-                seek_ms = self._seek_position_ms
-                self._seek_position_ms = 0
+                seek_ms, reason = playback.take_start()
+                if reason is not None:
+                    self.logger.debug("Starting track %s at %dms (%s)", track_id, seek_ms, reason)
                 bytes_yielded = 0
-                self._streaming_progress_ms = seek_ms
+                playback.progress_ms = seek_ms
                 last_progress_sync = time.monotonic()
 
                 track_fmt = make_pcm_format(session_params)
@@ -568,13 +523,13 @@ class YandexYnisonProvider(PluginProvider):
                             await self._sync_progress(
                                 seek_ms,
                                 bytes_yielded,
-                                self._active_player_id,
+                                playback.consumer_player_id,
                                 session_fmt,
                             )
                         if (
-                            self._track_changed_event.is_set()
-                            or self._stream_stop_event.is_set()
-                            or (had_claim and self._session_lost(player_id, captured_session_id))
+                            playback.restart_requested()
+                            or playback.stop_requested()
+                            or playback.lost(token)
                         ):
                             break
 
@@ -587,26 +542,20 @@ class YandexYnisonProvider(PluginProvider):
                     if excess:
                         yield b"\x00" * (frame_size - excess)
 
-                # Don't clear _current_streaming_track_id yet — keep it set
-                # during advance/wait so Ynison echo of the same track doesn't
-                # trigger a false track-change detection in _activate_playback.
+                # Keep the cursor during advance/wait so a Ynison echo of the
+                # same track doesn't look like a track change in _activate_playback.
 
-                if self._stream_stop_event.is_set():
+                if playback.stop_requested():
                     break
 
-                # Differentiate "track finished naturally" from "inner loop
-                # broke out early". Signalling completion on an
-                # interrupted track makes Yandex auto-advance the queue —
-                # surfaces as an unwanted skip on pause / handoff.
-                broke_for_pause = self._ynison is not None and self._ynison.state.is_paused
-                broke_for_session_change = had_claim and self._session_lost(
-                    player_id, captured_session_id
-                )
+                # Only a track that played to its end signals completion;
+                # completing an interrupted track makes Yandex auto-advance the
+                # queue, which surfaces as an unwanted skip on pause / handoff.
                 natural_end = (
-                    not self._track_changed_event.is_set()
-                    and not broke_for_pause
-                    and not broke_for_session_change
+                    not playback.restart_requested()
+                    and not playback.lost(token)
                     and self._ynison is not None
+                    and not self._ynison.state.is_paused
                     and self._ynison.state.current_track_id == track_id
                 )
                 if natural_end:
@@ -614,30 +563,20 @@ class YandexYnisonProvider(PluginProvider):
                     old_index = self._ynison.state.current_index
                     completion = await self._signal_track_completion()
                     if completion == "restart":
-                        self._seek_position_ms = 0
-                        self._track_changed_event.set()
+                        playback.request_restart(0, RestartReason.REPEAT, grace=False)
                     elif completion in ("stop", "failed") or not await self._wait_for_track_change(
                         (track_id, old_index)
                     ):
-                        self._stream_stop_event.set()
+                        playback.request_stop(StopReason.QUEUE_END)
                         break
 
-                # Clear before next iteration — the new track ID will be set at
-                # the top of the loop from the latest Ynison state.
-                self._current_streaming_track_id = None
-                self._current_streaming_index = -1
+                # The next item is read from the latest Ynison state.
+                playback.track_id = None
+                playback.index = -1
         finally:
-            # Release ownership only if THIS generator owned the claim at
-            # entry AND no one else has superseded it since. The double-guard
-            # protects against a same-owner reconnect refreshing the session
-            # id without changing the owner id; clearing the lock on the old
-            # generator's teardown would otherwise clobber the new session's
-            # claim. `had_claim` keeps the preload path from touching the lock
-            # at all (no claim ever existed to release).
-            if had_claim and not self._session_lost(player_id, captured_session_id):
-                self._in_use_by_player = None
-            self._current_streaming_track_id = None
-            self._current_streaming_index = -1
+            playback.release_if_current(token)
+            playback.track_id = None
+            playback.index = -1
 
     async def on_source_selected(
         self,
@@ -681,11 +620,11 @@ class YandexYnisonProvider(PluginProvider):
 
         # Stop a previous physical consumer when switching. A protocol bridge and
         # its owner represent the same source session and must not stop each other.
-        if self._active_player_id and self._active_player_id not in (
+        if self._playback.consumer_player_id and self._playback.consumer_player_id not in (
             player_id,
             owner_player_id,
         ):
-            prev_player_id = self._active_player_id
+            prev_player_id = self._playback.consumer_player_id
             self.logger.info(
                 "Source selected on %s, stopping %s",
                 player_id,
@@ -700,16 +639,10 @@ class YandexYnisonProvider(PluginProvider):
                     err,
                 )
 
-        # Claim ownership for this player. The lock lives here (not in
-        # get_stream_details) so preload paths can fetch streamdetails without
-        # accidentally blocking a subsequent cross-player handoff at the actual
-        # stream request.
-        self._in_use_by_player = owner_player_id
-        # Record this request's session id so a later on_source_unselected can
-        # tell whether it is the live teardown or a stale callback from a
-        # superseded same-owner request.
-        self._active_session_id = stream_session_id
-        self._active_player_id = player_id
+        # Claim here, not in get_stream_details, so preload paths can fetch
+        # stream details without blocking a later cross-player handoff. The
+        # session id lets on_source_unselected reject stale teardowns.
+        self._playback.claim(owner_player_id, player_id, stream_session_id)
         self.logger.debug("Active player set to: %s", player_id)
         self._publish_source_options(owner_player_id)
 
@@ -719,16 +652,9 @@ class YandexYnisonProvider(PluginProvider):
         """Release the player-scoped exclusive claim when MA tears down the stream."""
         if source_id != AUDIO_SOURCE_ID:
             return
-        # Reject stale callbacks: only release if this is still the active
-        # session. An owner-player check alone is not sufficient — same-player
-        # reconnects (player drops + reopens the same stream URL before the
-        # original request's finally fires) would otherwise let the old
-        # request's late callback clear the live claim of the new stream.
-        if self._active_session_id != stream_session_id:
-            return
-        self._active_session_id = None
-        if self._in_use_by_player == owner_player_id:
-            self._in_use_by_player = None
+        # Only this request's own teardown releases the claim: a same-player
+        # reconnect may deliver the old request's callback after the new one.
+        self._playback.release(owner_player_id, stream_session_id)
 
     async def _wait_for_track_change(
         self, old_track: str | tuple[str, int], timeout: float = 30.0
@@ -745,8 +671,8 @@ class YandexYnisonProvider(PluginProvider):
         else:
             old_track_id, old_index = old_track, None
         deadline = time.monotonic() + timeout
-        while not self._stream_stop_event.is_set():
-            # Check state BEFORE clearing the event.  Ynison may have already
+        while not self._playback.stop_requested():
+            # Check state BEFORE consuming the wake-up.  Ynison may have already
             # advanced between _signal_track_completion() returning and this
             # method running; clearing first would drop the set() that went
             # with the state update, leaving us to wait until timeout.
@@ -761,13 +687,9 @@ class YandexYnisonProvider(PluginProvider):
                     or (old_index is not None and current_index != old_index)
                 ):
                     return True
-            self._track_changed_event.clear()
+            self._playback.consume_restart()
             remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            try:
-                await asyncio.wait_for(self._track_changed_event.wait(), timeout=remaining)
-            except TimeoutError:
+            if remaining <= 0 or not await self._playback.wait_restart(remaining):
                 break
         self.logger.info("No new track from Ynison after completion, stopping stream")
         return False
@@ -796,7 +718,7 @@ class YandexYnisonProvider(PluginProvider):
                 "Linked Yandex Music provider unavailable — stopping track %s",
                 track_id,
             )
-            self._stream_stop_event.set()
+            self._playback.request_stop(StopReason.PROVIDER_LOST)
             return
         # Playback receives the highest priority while still counting toward
         # the request budget. Prefetch retains its caller's priority.
@@ -807,7 +729,7 @@ class YandexYnisonProvider(PluginProvider):
                 )
         except MusicAssistantError:
             self.logger.exception("Failed to get stream details for track %s", track_id)
-            self._stream_stop_event.set()
+            self._playback.request_stop(StopReason.STREAM_ERROR)
             return
 
         if not self._linked_provider_is_current(provider):
@@ -815,7 +737,7 @@ class YandexYnisonProvider(PluginProvider):
                 "Linked Yandex Music provider changed mid-stream — stopping track %s",
                 track_id,
             )
-            self._stream_stop_event.set()
+            self._playback.request_stop(StopReason.PROVIDER_LOST)
             return
 
         await self._update_metadata_from_stream(stream_details, seek_ms)
@@ -824,7 +746,7 @@ class YandexYnisonProvider(PluginProvider):
                 "Linked Yandex Music provider changed while preparing track %s",
                 track_id,
             )
-            self._stream_stop_event.set()
+            self._playback.request_stop(StopReason.PROVIDER_LOST)
             return
 
         # No -re here: MA's realtime pacer is the single pacing authority for
@@ -856,7 +778,7 @@ class YandexYnisonProvider(PluginProvider):
                     "Linked Yandex Music provider changed before starting track %s",
                     track_id,
                 )
-                self._stream_stop_event.set()
+                self._playback.request_stop(StopReason.PROVIDER_LOST)
                 return
             raw_stream = provider.get_audio_stream(stream_details)
             ffmpeg_stream = get_ffmpeg_stream(
@@ -872,7 +794,7 @@ class YandexYnisonProvider(PluginProvider):
                             "Linked Yandex Music provider changed while streaming track %s",
                             track_id,
                         )
-                        self._stream_stop_event.set()
+                        self._playback.request_stop(StopReason.PROVIDER_LOST)
                         break
                     yield chunk
 
@@ -1169,14 +1091,14 @@ class YandexYnisonProvider(PluginProvider):
                 "Ynison → paused (track=%s progress=%dms)", track_id, state.progress_ms
             )
             await self._pause_playback()
-        elif self._in_use_by_player:
+        elif self._playback.owner_player_id:
             self.logger.info(
                 "Ynison → other device active (was=%s), clearing",
                 state.active_device_id,
             )
             self._clear_active_player()
 
-    async def _activate_playback(self, state: YnisonState) -> None:  # noqa: PLR0915
+    async def _activate_playback(self, state: YnisonState) -> None:
         """Activate playback on the target MA player."""
         target_player_id = self._get_target_player_id()
         if not target_player_id:
@@ -1187,24 +1109,22 @@ class YandexYnisonProvider(PluginProvider):
         # play_media below. `_externally_paused` survives a stray stop-event
         # clear; the stop event covers non-pause stop reasons
         # (`_stream_track` warning branch, `_clear_active_player`).
-        needs_reselect = self._stream_stop_event.is_set() or self._externally_paused
-        self._stream_stop_event.clear()
-        self._externally_paused = False
+        needs_reselect = self._playback.resume()
 
         # Start playback via the standard play_media flow if not already active.
         # Guard on the physical consumer (set immediately) rather than the
         # owner claim (set when the streams controller starts the request) to
         # prevent queuing redundant play_media calls during the ~5s gap.
-        if self._active_player_id != target_player_id or needs_reselect:
+        if self._playback.consumer_player_id != target_player_id or needs_reselect:
             # Pre-fetch the upcoming track's real format BEFORE submitting
             # play_media so the AudioSource's provider_mapping carries the
             # right audio_format when the streams controller calls
             # get_stream_details(). Skip on same-track same-player resume —
             # the cached format is still correct for that case.
             upcoming = state.current_track_id
-            switching_player = self._active_player_id != target_player_id
-            self._active_player_id = target_player_id
-            if upcoming and (switching_player or upcoming != self._current_streaming_track_id):
+            switching_player = self._playback.consumer_player_id != target_player_id
+            self._playback.consumer_player_id = target_player_id
+            if upcoming and (switching_player or upcoming != self._playback.track_id):
                 await self._prefetch_format_for_track(upcoming)
             self.mass.create_task(
                 self.mass.player_queues.play_media(target_player_id, str(self._audio_source.uri))
@@ -1215,62 +1135,52 @@ class YandexYnisonProvider(PluginProvider):
         new_track = state.current_track_id
         new_index = state.current_index
         if new_track and (
-            new_track != self._current_streaming_track_id
-            or (self._current_streaming_index >= 0 and new_index != self._current_streaming_index)
+            new_track != self._playback.track_id
+            or (self._playback.index >= 0 and new_index != self._playback.index)
         ):
-            self.logger.info("Track changed: %s -> %s", self._current_streaming_track_id, new_track)
-            self._current_streaming_track_id = new_track
-            self._current_streaming_index = new_index
-            self._seek_position_ms = state.progress_ms
-            self._track_changed_event.set()
+            self.logger.info("Track changed: %s -> %s", self._playback.track_id, new_track)
+            self._playback.track_id = new_track
+            self._playback.index = new_index
+            # The grace window ignores stale echoed progress after the change.
+            self._playback.request_restart(state.progress_ms, RestartReason.TRACK_CHANGE)
             significant_change = True
-            # Grace period: ignore seek detection for a few seconds after
-            # track change — Ynison echoes can report stale progress that
-            # looks like a large drift.
-            self._seek_grace_until = time.monotonic() + _ECHO_GRACE_PERIOD
-        elif new_track and new_track == self._current_streaming_track_id:
+        elif new_track and new_track == self._playback.track_id:
             # Same-track resume after pause: explicitly seek to the Ynison position
             # so the new stream starts at the right offset.
             if needs_reselect:
-                self._seek_position_ms = state.progress_ms
-                self._track_changed_event.set()
-                self._seek_grace_until = time.monotonic() + _ECHO_GRACE_PERIOD
+                self._playback.request_restart(state.progress_ms, RestartReason.RESUME)
                 significant_change = True
+            # Detect seek: compare Ynison progress against our stream position.
+            # Ignore Ynison echoes (updates authored by our own device_id) to
+            # prevent feedback loops where our own progress triggers false seeks.
+            elif self._playback.in_grace():
+                pass  # Skip during grace period after track change or seek
+            elif state.last_update_is_echo:
+                pass  # Echo of our own update — ignore
             else:
-                # Detect seek: compare Ynison progress against our stream position.
-                # Ignore Ynison echoes (updates authored by our own device_id) to
-                # prevent feedback loops where our own progress triggers false seeks.
-                now = time.monotonic()
-                if now < self._seek_grace_until:
-                    pass  # Skip during grace period after track change or seek
-                elif state.last_update_is_echo:
-                    pass  # Echo of our own update — ignore
-                else:
-                    our_ms = self._streaming_progress_ms
-                    if our_ms >= 0:
-                        verdict = self._classify_drift(state.progress_ms, our_ms)
-                        if verdict == "seek":
-                            drift_ms = abs(state.progress_ms - our_ms)
-                            self.logger.info(
-                                "Seek detected on track %s: "
-                                "expected ~%dms, Ynison at %dms (drift %dms)",
-                                new_track,
-                                our_ms,
-                                state.progress_ms,
-                                int(drift_ms),
-                            )
-                            self._seek_position_ms = state.progress_ms
-                            self._track_changed_event.set()
-                            self._seek_grace_until = now + _ECHO_GRACE_PERIOD
-                            significant_change = True
-                        elif verdict == "queue_rebuild":
-                            self.logger.debug(
-                                "Drift on track %s classified as queue-rebuild "
-                                "echo (Ynison=%dms, ours=%dms) — not seeking",
-                                new_track,
-                                state.progress_ms,
-                                our_ms,
-                            )
+                our_ms = self._playback.progress_ms
+                if our_ms >= 0:
+                    verdict = self._classify_drift(state.progress_ms, our_ms)
+                    if verdict == "seek":
+                        drift_ms = abs(state.progress_ms - our_ms)
+                        self.logger.info(
+                            "Seek detected on track %s: "
+                            "expected ~%dms, Ynison at %dms (drift %dms)",
+                            new_track,
+                            our_ms,
+                            state.progress_ms,
+                            int(drift_ms),
+                        )
+                        self._playback.request_restart(state.progress_ms, RestartReason.SEEK)
+                        significant_change = True
+                    elif verdict == "queue_rebuild":
+                        self.logger.debug(
+                            "Drift on track %s classified as queue-rebuild "
+                            "echo (Ynison=%dms, ours=%dms) — not seeking",
+                            new_track,
+                            state.progress_ms,
+                            our_ms,
+                        )
 
         # Update metadata from state
         self._update_metadata(state)
@@ -1297,7 +1207,7 @@ class YandexYnisonProvider(PluginProvider):
             meta.duration = best_duration // 1000
         # Only update elapsed from Ynison when NOT actively streaming —
         # during streaming, _sync_progress provides byte-accurate progress.
-        if state.progress_ms is not None and not self._in_use_by_player:
+        if state.progress_ms is not None and not self._playback.owner_player_id:
             meta.elapsed_time = state.progress_ms // 1000
             meta.elapsed_time_last_updated = time.time()
 
@@ -1325,22 +1235,24 @@ class YandexYnisonProvider(PluginProvider):
         meta = self._stream_metadata
         if stream_details.duration:
             meta.duration = stream_details.duration
-            self._actual_duration_ms = stream_details.duration * 1000
+            self._playback.duration_ms = stream_details.duration * 1000
             # Push the real duration to Ynison so the YM app shows
             # the correct value (we send duration_ms=0 on advance to
             # prevent stale propagation, so this corrects it).
             if self._ynison:
                 await self._ynison.report_status(
                     progress_ms=seek_ms,
-                    duration_ms=self._actual_duration_ms,
+                    duration_ms=self._playback.duration_ms,
                     paused=self._ynison.state.is_paused,
                 )
         meta.elapsed_time = seek_ms // 1000 if seek_ms else 0
         meta.elapsed_time_last_updated = time.time()
         # Use `_active_player_id`, the physical player wrapping our stream (a
         # protocol bridge when present), rather than the source-session owner.
-        if self._active_player_id:
-            self.mass.players.trigger_player_update(self._active_player_id, force_update=True)
+        if self._playback.consumer_player_id:
+            self.mass.players.trigger_player_update(
+                self._playback.consumer_player_id, force_update=True
+            )
 
     def _bytes_to_ms(self, byte_count: int, fmt: AudioFormat | None = None) -> int:
         """Convert PCM byte count to milliseconds using the given format."""
@@ -1358,7 +1270,7 @@ class YandexYnisonProvider(PluginProvider):
     ) -> None:
         """Push real playback progress to MA metadata and Ynison."""
         elapsed_ms = seek_ms + self._bytes_to_ms(bytes_yielded, fmt)
-        self._streaming_progress_ms = elapsed_ms
+        self._playback.progress_ms = elapsed_ms
         # Update MA metadata
         meta = self._stream_metadata
         if meta:
@@ -1385,13 +1297,13 @@ class YandexYnisonProvider(PluginProvider):
         a few seconds — the alternative kept resume instant but left
         MA's UI stuck on PLAYING.
         """
-        target = self._in_use_by_player
+        target = self._playback.owner_player_id
         if not target:
             self.logger.info("Pause requested but no active player (_in_use_by_player is None)")
             return
         self.logger.info("Pause: cmd_stop(%s)", target)
-        # stop event ends the audio generator; finally clears the lock.
-        self._stream_stop_event.set()
+        # The stop ends the audio generator; its finally releases the claim.
+        self._playback.request_stop(StopReason.PAUSE)
         try:
             await self.mass.players.cmd_stop(target)
         except PlayerCommandFailed, PlayerUnavailableError:
@@ -1410,8 +1322,7 @@ class YandexYnisonProvider(PluginProvider):
         # …)` would target the bridge and raise
         # `PlayerUnavailableError`. Post-success only so a failure
         # path keeps the bridge id intact for the next attempt.
-        self._active_player_id = target
-        self._externally_paused = True
+        self._playback.pause_externally(target)
 
     # ------------------------------------------------------------------
     # Player selection
@@ -1442,10 +1353,10 @@ class YandexYnisonProvider(PluginProvider):
     def _get_target_player_id(self) -> str | None:
         """Determine the target player ID for playback."""
         # If there's an active player, validate it still exists
-        if self._active_player_id:
-            if self.mass.players.get_player(self._active_player_id):
-                return self._active_player_id
-            self._active_player_id = None
+        if self._playback.consumer_player_id:
+            if self.mass.players.get_player(self._playback.consumer_player_id):
+                return self._playback.consumer_player_id
+            self._playback.consumer_player_id = None
 
         # The configured player is mandatory; never redirect to another player.
         if self.mass.players.get_player(self._default_player_id):
@@ -1456,15 +1367,6 @@ class YandexYnisonProvider(PluginProvider):
             self._default_player_id,
         )
         return None
-
-    def _session_lost(self, player_id: str, session_id: str | None) -> bool:
-        """
-        Return ``True`` when our claim no longer matches the live session.
-
-        :param player_id: Owning player id captured at generator entry.
-        :param session_id: ``_active_session_id`` captured at generator entry.
-        """
-        return self._in_use_by_player != player_id or self._active_session_id != session_id
 
     def _idempotent(self, action: str, key: str | None) -> bool:
         """
@@ -1565,22 +1467,17 @@ class YandexYnisonProvider(PluginProvider):
 
     def _clear_active_player(self) -> None:
         """Clear the active player and reset plugin state."""
-        prev_player_id = self._active_player_id
+        prev_player_id = self._playback.consumer_player_id
         # the owner is the user-facing MA player; _active_player_id can be the protocol
         # player that consumed the stream, which is not what holds the source session
-        owner_player_id = self._in_use_by_player
+        owner_player_id = self._playback.owner_player_id
         source_session = (
             self.mass.players.get_audio_source_session(owner_player_id) if owner_player_id else None
         )
-        self._active_player_id = None
-        self._in_use_by_player = None
-        self._active_session_id = None
-        self._stream_stop_event.set()
-        self._streaming_progress_ms = 0
+        self._playback.reset()
         self._prefetched_list = None
         self._prefetched_queue_generation = None
         self._command_idempotency.clear()
-        self._externally_paused = False
         if self._prefetch_task and not self._prefetch_task.done():
             self._prefetch_task.cancel()
 
@@ -1750,7 +1647,7 @@ class YandexYnisonProvider(PluginProvider):
         # active session keeps using its frozen snapshot; the new format takes
         # effect on the next session.
         old = self._normalized_params
-        if self._in_use_by_player and (
+        if self._playback.owner_player_id and (
             old.get("content_type") != content_type
             or old.get("sample_rate") != sample_rate
             or old.get("bit_depth") != bit_depth
@@ -1781,16 +1678,16 @@ class YandexYnisonProvider(PluginProvider):
         # The session publishes the controls from the object it holds, so hand it the
         # rebuilt one: the new capability flags reach the UI without waiting for the
         # source to be selected again.
-        if not self._in_use_by_player:
+        if not self._playback.owner_player_id:
             return
-        self.mass.players.refresh_source(self._in_use_by_player, self._audio_source)
+        self.mass.players.refresh_source(self._playback.owner_player_id, self._audio_source)
 
     def _remember_and_publish_source_options(self, queue: dict[str, Any]) -> None:
         """Store Ynison queue options and mirror them to the active source session."""
         self._last_shuffle_enabled = YnisonQueueView(queue).shuffle_enabled
         self._last_repeat_mode = repeat_from_ynison(queue)
-        if self._in_use_by_player:
-            self._publish_source_options(self._in_use_by_player)
+        if self._playback.owner_player_id:
+            self._publish_source_options(self._playback.owner_player_id)
 
     def _publish_source_options(self, owner_player_id: str) -> None:
         """Publish the last Ynison ordering options to one claimed source session."""
@@ -1836,8 +1733,8 @@ class YandexYnisonProvider(PluginProvider):
 
     def _best_duration_ms(self) -> int:
         """Return the best known duration: actual from stream, or Ynison state as fallback."""
-        if self._actual_duration_ms > 0:
-            return self._actual_duration_ms
+        if self._playback.duration_ms > 0:
+            return self._playback.duration_ms
         if self._ynison:
             return self._ynison.state.duration_ms
         return 0
@@ -1974,7 +1871,7 @@ class YandexYnisonProvider(PluginProvider):
     async def _wait_for_ynison_connection(self, client: YnisonClient) -> bool:
         """Wait at most ten seconds for the same client's transport to recover."""
         for _ in range(10):
-            if self._ynison is not client or self._stream_stop_event.is_set():
+            if self._ynison is not client or self._playback.stop_requested():
                 return False
             if client.connected and not client.in_post_reconnect_settle:
                 return True
@@ -1983,7 +1880,7 @@ class YandexYnisonProvider(PluginProvider):
             self._ynison is client
             and client.connected
             and not client.in_post_reconnect_settle
-            and not self._stream_stop_event.is_set()
+            and not self._playback.stop_requested()
         )
 
     async def _signal_track_completion(
@@ -2017,7 +1914,7 @@ class YandexYnisonProvider(PluginProvider):
         if not self._ynison:
             return "failed"
         duration = self._best_duration_ms()
-        self._actual_duration_ms = 0
+        self._playback.duration_ms = 0
 
         # 1. Report that playback reached the end.
         # Echo tracking is handled by the client's status watermarks.
@@ -2216,8 +2113,7 @@ class YandexYnisonProvider(PluginProvider):
         if outcome == "failed":
             raise PlayerCommandFailed("Ynison queue advance failed")
         if outcome == "restart":
-            self._seek_position_ms = 0
-            self._track_changed_event.set()
+            self._playback.request_restart(0, RestartReason.REPEAT, grace=False)
 
     async def _on_previous(self) -> None:
         """Handle previous track command — update queue index in Ynison."""
@@ -2230,7 +2126,7 @@ class YandexYnisonProvider(PluginProvider):
                     previous_index, expected_generation=client.queue_generation
                 ):
                     raise PlayerCommandFailed("Ynison queue advance failed")
-                self._actual_duration_ms = 0
+                self._playback.duration_ms = 0
 
     async def _on_seek(self, position: int) -> None:
         """
@@ -2249,14 +2145,11 @@ class YandexYnisonProvider(PluginProvider):
                 strict=True,
             )
         except YnisonSendError as exc:
-            # Do not mutate `_seek_position_ms` / `_seek_grace_until` on failure
-            # — local stream state must not drift past a send that never landed.
+            # Local stream state must not drift past a send that never landed.
             raise PlayerCommandFailed("Ynison send failed") from exc
         # Also trigger local stream restart so seek takes effect
         # immediately without waiting for the Ynison echo.
-        self._seek_position_ms = seek_ms
-        self._seek_grace_until = time.monotonic() + _ECHO_GRACE_PERIOD
-        self._track_changed_event.set()
+        self._playback.request_restart(seek_ms, RestartReason.SEEK)
 
     async def _on_repeat(self, repeat_mode: RepeatMode) -> None:
         """Publish a Music Assistant repeat mode to the Ynison queue."""
