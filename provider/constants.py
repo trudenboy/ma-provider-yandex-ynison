@@ -18,6 +18,7 @@ CONF_YM_INSTANCE: Final[str] = "ym_instance"
 CONF_MASS_PLAYER_ID: Final[str] = "mass_player_id"
 CONF_ALLOW_PLAYER_SWITCH: Final[str] = "allow_player_switch"
 CONF_DEVICE_ID: Final[str] = "device_id"
+CONF_YNISON_TRANSPORT: Final[str] = "ynison_transport"
 CONF_OUTPUT_SAMPLE_RATE: Final[str] = "output_sample_rate"
 CONF_OUTPUT_BIT_DEPTH: Final[str] = "output_bit_depth"
 
@@ -60,6 +61,11 @@ STRICT_SEND_WAIT: Final[float] = 5.0
 # A best-effort status within this distance of the extrapolated server status
 # is not re-sent (official client: ±2000 ms).
 STATUS_DEDUP_WINDOW_MS: Final[int] = 2000
+
+# Ynison transports: the WebSocket gateway, or the experimental native gRPC
+# transport the official mobile apps use.
+TRANSPORT_WEBSOCKET: Final[str] = "websocket"
+TRANSPORT_GRPC: Final[str] = "grpc"
 
 # WebSocket timeouts
 WS_CONNECT_TIMEOUT: Final[float] = 15.0

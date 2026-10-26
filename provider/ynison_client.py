@@ -35,6 +35,8 @@ from .constants import (
     RECONNECT_IDLE_DELAY,
     STATUS_DEDUP_WINDOW_MS,
     STRICT_SEND_WAIT,
+    TRANSPORT_GRPC,
+    TRANSPORT_WEBSOCKET,
     WS_CONNECT_TIMEOUT,
     WS_HEARTBEAT,
     WS_MIN_HEARTBEAT,
@@ -44,6 +46,7 @@ from .constants import (
     YNISON_REDIRECT_URL,
     YNISON_STATE_PATH,
 )
+from .grpc_transport import GrpcStateSocket, YnisonRejectedError, build_metadata, redirect
 from .queue_model import (
     QueueOutcome,
     make_version_block,
@@ -223,6 +226,8 @@ class YnisonClient:
         logger: logging.Logger,
         http_session: aiohttp.ClientSession | None = None,
         on_auth_failure: AuthRefreshCallback | None = None,
+        transport: str = TRANSPORT_WEBSOCKET,
+        accept_language: str = "en",
     ) -> None:
         """
         Initialize Ynison client.
@@ -235,6 +240,9 @@ class YnisonClient:
         :param on_auth_failure: Optional callback invoked on auth failure during
             reconnect. Should return a fresh SecretStr token. If not provided or
             if the callback raises, reconnect proceeds with the current token.
+        :param transport: ``websocket`` (gateway) or ``grpc`` (experimental
+            native transport used by the official mobile apps).
+        :param accept_language: Preferred content language sent over gRPC.
         """
         self._token = token
         self._device_info = device_info
@@ -242,8 +250,11 @@ class YnisonClient:
         self._logger = logger
         self._external_session = http_session
         self._on_auth_failure = on_auth_failure
+        self._transport = transport
+        self._accept_language = accept_language
+        self._last_session_id: int | None = None
 
-        self._ws: aiohttp.ClientWebSocketResponse | None = None
+        self._ws: aiohttp.ClientWebSocketResponse | GrpcStateSocket | None = None
         self._session: aiohttp.ClientSession | None = None
         self._send_lock = asyncio.Lock()
         self._pending_queue: dict[str, Any] | None = None
@@ -326,6 +337,12 @@ class YnisonClient:
         except asyncio.CancelledError:
             await self.disconnect()
             raise
+        except YnisonRejectedError as err:
+            self._connected = False
+            await self._close_socket()
+            await self._close_session()
+            self._apply_error_frame(err.error_info)
+            self._schedule_reconnect()
         except (LoginFailed, aiohttp.ClientError, OSError, TimeoutError) as exc:
             if isinstance(exc, LoginFailed) and self._on_auth_failure is None:
                 await self.disconnect()
@@ -915,28 +932,10 @@ class YnisonClient:
         """
         if self._session is None:
             raise RuntimeError("HTTP session not initialized — call connect() first")
-        headers = self._build_headers()
-
-        ws_timeout = aiohttp.ClientWSTimeout(ws_close=WS_CONNECT_TIMEOUT)
-        try:
-            ws = await self._session.ws_connect(
-                YNISON_REDIRECT_URL,
-                headers=headers,
-                timeout=ws_timeout,
-            )
-        except aiohttp.WSServerHandshakeError as err:
-            if err.status in (401, 403):
-                raise LoginFailed("Ynison authentication failed — invalid token") from err
-            raise
-
-        try:
-            msg = await ws.receive(timeout=WS_CONNECT_TIMEOUT)
-            if msg.type in (aiohttp.WSMsgType.TEXT, aiohttp.WSMsgType.BINARY):
-                data = json.loads(msg.data)
-            else:
-                raise ConnectionError(f"Unexpected message type from redirector: {msg.type}")
-        finally:
-            await ws.close()
+        if self._transport == TRANSPORT_GRPC:
+            data = await redirect(self._grpc_metadata(session_id=self._last_session_id))
+        else:
+            data = await self._ws_redirect()
 
         host = data.get("host", "")
         ticket = data.get("redirect_ticket", "")
@@ -952,6 +951,7 @@ class YnisonClient:
 
         if not host or not ticket:
             raise LoginFailed("Redirector response missing host or ticket")
+        self._last_session_id = session_id
 
         self._logger.debug("Ynison redirect: host=%s, session_id=%d", host, session_id)
         return host, ticket, session_id
@@ -961,18 +961,26 @@ class YnisonClient:
         if self._session is None:
             raise RuntimeError("HTTP session not initialized — call connect() first")
         self._reset_pending_queue()
-        url = f"wss://{host}{YNISON_STATE_PATH}"
-        headers = self._build_headers(redirect_ticket=ticket, session_id=session_id)
-
-        ws_timeout = aiohttp.ClientWSTimeout(ws_close=WS_CONNECT_TIMEOUT)
-        try:
-            self._ws = await self._session.ws_connect(
-                url, headers=headers, timeout=ws_timeout, heartbeat=self._heartbeat
+        if self._transport == TRANSPORT_GRPC:
+            socket = GrpcStateSocket(
+                host,
+                self._grpc_metadata(redirect_ticket=ticket, session_id=session_id),
+                keepalive_s=self._heartbeat,
             )
-        except aiohttp.WSServerHandshakeError as err:
-            if err.status in (401, 403):
-                raise LoginFailed("Ynison authentication failed — invalid token") from err
-            raise
+            await socket.open()
+            self._ws = socket
+        else:
+            url = f"wss://{host}{YNISON_STATE_PATH}"
+            headers = self._build_headers(redirect_ticket=ticket, session_id=session_id)
+            ws_timeout = aiohttp.ClientWSTimeout(ws_close=WS_CONNECT_TIMEOUT)
+            try:
+                self._ws = await self._session.ws_connect(
+                    url, headers=headers, timeout=ws_timeout, heartbeat=self._heartbeat
+                )
+            except aiohttp.WSServerHandshakeError as err:
+                if err.status in (401, 403):
+                    raise LoginFailed("Ynison authentication failed — invalid token") from err
+                raise
         self._connected = True
         self._logger.info("Connected to Ynison state service at %s", host)
 
@@ -1043,7 +1051,7 @@ class YnisonClient:
 
                 if msg.type == aiohttp.WSMsgType.TEXT:
                     try:
-                        data = json.loads(msg.data)
+                        data = json.loads(msg.data or "")
                     except json.JSONDecodeError:
                         data = None
                     if not isinstance(data, dict):
@@ -1298,9 +1306,48 @@ class YnisonClient:
                         self._logger.warning("Token refresh permanently failed", exc_info=True)
             except asyncio.CancelledError:
                 return
+            except YnisonRejectedError as err:
+                self._apply_error_frame(err.error_info)
             except aiohttp.ClientError, OSError, TimeoutError, ResourceTemporarilyUnavailable:
                 self._policy.on_transport_failure()
                 self._logger.warning("Ynison reconnect attempt %d failed", attempt, exc_info=True)
+
+    async def _ws_redirect(self) -> dict[str, Any]:
+        """Ask the WebSocket redirector which state host serves this account."""
+        assert self._session is not None
+        ws_timeout = aiohttp.ClientWSTimeout(ws_close=WS_CONNECT_TIMEOUT)
+        try:
+            ws = await self._session.ws_connect(
+                YNISON_REDIRECT_URL, headers=self._build_headers(), timeout=ws_timeout
+            )
+        except aiohttp.WSServerHandshakeError as err:
+            if err.status in (401, 403):
+                raise LoginFailed("Ynison authentication failed — invalid token") from err
+            raise
+        try:
+            msg = await ws.receive(timeout=WS_CONNECT_TIMEOUT)
+            if msg.type not in (aiohttp.WSMsgType.TEXT, aiohttp.WSMsgType.BINARY):
+                raise ConnectionError(f"Unexpected message type from redirector: {msg.type}")
+            data: dict[str, Any] = json.loads(msg.data)
+        finally:
+            await ws.close()
+        return data
+
+    def _grpc_metadata(
+        self, *, redirect_ticket: str | None = None, session_id: int | None = None
+    ) -> list[tuple[str, str]]:
+        """Return gRPC call metadata for this device."""
+        info = self._device_info
+        return build_metadata(
+            self._token.get_secret(),
+            info.device_id,
+            info.type,
+            info.app_name,
+            info.app_version,
+            accept_language=self._accept_language,
+            redirect_ticket=redirect_ticket,
+            session_id=session_id,
+        )
 
     async def _close_socket(self) -> None:
         """Close and forget the state WebSocket."""

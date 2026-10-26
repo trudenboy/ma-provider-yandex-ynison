@@ -56,10 +56,13 @@ from .constants import (
     CONF_OUTPUT_BIT_DEPTH,
     CONF_OUTPUT_SAMPLE_RATE,
     CONF_YM_INSTANCE,
+    CONF_YNISON_TRANSPORT,
     DEFAULT_DISPLAY_NAME,
     LEGACY_YM_INSTANCE_OWN,
     OUTPUT_AUTO,
     STRICT_SEND_WAIT,
+    TRANSPORT_GRPC,
+    TRANSPORT_WEBSOCKET,
     YANDEX_MUSIC_LOSSLESS_QUALITIES,
 )
 from .credential_source import YandexMusicCredentialSource
@@ -191,6 +194,8 @@ class YandexYnisonProvider(PluginProvider):
         self._cfg_sample_rate: str = (
             cast("str", self.config.get_value(CONF_OUTPUT_SAMPLE_RATE)) or OUTPUT_AUTO
         )
+        transport = self.config.get_value(CONF_YNISON_TRANSPORT)
+        self._transport = TRANSPORT_GRPC if transport == TRANSPORT_GRPC else TRANSPORT_WEBSOCKET
         self._cfg_bit_depth: str = (
             cast("str", self.config.get_value(CONF_OUTPUT_BIT_DEPTH)) or OUTPUT_AUTO
         )
@@ -304,6 +309,16 @@ class YandexYnisonProvider(PluginProvider):
                 hidden=True,
                 required=False,
             ),
+            ConfigEntry(
+                key=CONF_YNISON_TRANSPORT,
+                type=ConfigEntryType.STRING,
+                default_value=TRANSPORT_WEBSOCKET,
+                options=[
+                    ConfigValueOption(TRANSPORT_WEBSOCKET),
+                    ConfigValueOption(TRANSPORT_GRPC),
+                ],
+                advanced=True,
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -343,6 +358,8 @@ class YandexYnisonProvider(PluginProvider):
             logger=self.logger,
             http_session=self.mass.http_session,
             on_auth_failure=self._refresh_ynison_token,
+            transport=self._transport,
+            accept_language=str(self.mass.metadata.locale).replace("_", "-"),
         )
 
         self._runner_task = self._spawn(self._ynison.connect())

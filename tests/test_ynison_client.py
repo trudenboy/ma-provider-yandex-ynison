@@ -24,6 +24,7 @@ from provider.constants import (
     DEVICE_TYPE_WEB,
     YNISON_ORIGIN,
 )
+from provider.grpc_transport import YnisonRejectedError
 from provider.ynison_client import (
     YnisonClient,
     YnisonDeviceInfo,
@@ -3198,3 +3199,82 @@ class TestQueueCommands:
         sent = self._sent_queue()
         assert sent["options"]["repeat_mode"] == "ALL"
         assert sent["shuffle_optional"]["playable_indices"][0] == 0
+
+
+# ------------------------------------------------------------------
+# Experimental gRPC transport
+# ------------------------------------------------------------------
+
+
+class TestGrpcTransport:
+    """The client drives the gRPC transport like the WebSocket one."""
+
+    def _client(self) -> YnisonClient:
+        return YnisonClient(
+            token=SecretStr("test-token"),
+            device_info=YnisonDeviceInfo(device_id="test-device-id", title="T"),
+            on_state_update=AsyncMock(),
+            logger=MagicMock(),
+            transport="grpc",
+            accept_language="ru-RU",
+        )
+
+    async def test_redirect_go_away_holds_the_next_dial(self) -> None:
+        """A go-away on the gRPC redirector waits the server window before redialling."""
+        client = self._client()
+        client._external_session = AsyncMock(closed=False)
+        rejection = YnisonRejectedError(
+            {
+                "details": {
+                    "ynison-error-code": "500140000",
+                    "ynison-go-away-for-seconds": "43200",
+                },
+                "grpc_code": 14,
+                "message": "Ynison service is temporary unavailable.",
+            }
+        )
+        sleeps: list[float] = []
+
+        async def record_sleep(delay: float) -> None:
+            sleeps.append(delay)
+            client._stop_event.set()
+
+        with (
+            patch("provider.ynison_client.redirect", AsyncMock(side_effect=rejection)),
+            patch(SLEEP_PATH, new_callable=AsyncMock, side_effect=record_sleep),
+        ):
+            await client.connect()
+            assert client._reconnect_task is not None
+            await client._reconnect_task
+
+        assert sleeps == [43200.0]
+
+    async def test_state_stream_uses_grpc_socket_with_ticket(self) -> None:
+        """The state connection opens a gRPC stream carrying the redirect ticket."""
+        client = self._client()
+        client._external_session = AsyncMock(closed=False)
+        socket = AsyncMock()
+        socket.closed = False
+        redirect_data = {
+            "host": "node.ynison",
+            "redirect_ticket": "ticket",
+            "session_id": "42",
+            "keep_alive_params": {"keep_alive_time_seconds": 20},
+        }
+
+        with (
+            patch("provider.ynison_client.redirect", AsyncMock(return_value=redirect_data)),
+            patch("provider.ynison_client.GrpcStateSocket", return_value=socket) as factory,
+            patch.object(client, "_message_loop", new_callable=AsyncMock),
+        ):
+            await client.connect()
+
+        host, metadata = factory.call_args.args
+        assert host == "node.ynison"
+        assert ("ynison-redirect-ticket", "ticket") in metadata
+        assert ("ynison-session-id", "42") in metadata
+        assert factory.call_args.kwargs["keepalive_s"] == 20.0
+        socket.open.assert_awaited_once()
+        sent = [json.loads(call.args[0]) for call in socket.send_str.await_args_list]
+        assert "update_full_state" in sent[0]
+        await client.disconnect()
