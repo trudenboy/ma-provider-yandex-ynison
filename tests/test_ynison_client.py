@@ -2845,7 +2845,7 @@ class TestGoAwayHold:
             [_make_ws_msg(aiohttp.WSMsgType.TEXT, json.dumps(_fixture("go_away_throttle.json")))],
         )
 
-        warnings = [call.args for call in client._logger.warning.call_args_list]  # type: ignore[attr-defined]
+        warnings = [call.args for call in client._logger.warning.call_args_list]
         message, *args = next(w for w in warnings if "asked to wait" in w[0])
         rendered = message % tuple(args)
         assert "500140000" in rendered
@@ -2862,6 +2862,6 @@ class TestGoAwayHold:
 
         await TestMessageLoop()._run_loop_with_messages(client, [healthy])
 
-        client._logger.info.assert_any_call(  # type: ignore[attr-defined]
+        client._logger.info.assert_any_call(
             "Ynison accepted the connection again after the requested wait"
         )
