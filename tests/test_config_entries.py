@@ -7,6 +7,7 @@ from provider.constants import (
     CONF_DEVICE_ID,
     CONF_OUTPUT_BIT_DEPTH,
     CONF_OUTPUT_SAMPLE_RATE,
+    CONF_YNISON_TRANSPORT,
 )
 from provider.provider import YandexYnisonProvider
 
@@ -22,6 +23,7 @@ async def test_runtime_config_contains_playback_options_only() -> None:
         CONF_OUTPUT_SAMPLE_RATE,
         CONF_OUTPUT_BIT_DEPTH,
         CONF_DEVICE_ID,
+        CONF_YNISON_TRANSPORT,
     ]
 
 

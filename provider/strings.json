@@ -33,6 +33,14 @@
     },
     "device_id": {
       "label": "Device ID"
+    },
+    "ynison_transport": {
+      "label": "Ynison transport (experimental)",
+      "description": "WebSocket is the default. gRPC is the native transport of the official mobile apps; it is experimental and may disconnect on very long queues.",
+      "options": {
+        "websocket": "WebSocket (default)",
+        "grpc": "gRPC (experimental)"
+      }
     }
   },
   "setup_flow": {
