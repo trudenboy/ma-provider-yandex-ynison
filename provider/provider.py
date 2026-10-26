@@ -9,7 +9,7 @@ import time
 from collections.abc import AsyncGenerator, Callable
 from contextlib import aclosing, suppress
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from music_assistant_models.config_entries import ConfigEntry, ConfigValueOption
 from music_assistant_models.enums import (
@@ -64,7 +64,7 @@ from .constants import (
 )
 from .credential_source import YandexMusicCredentialSource
 from .protocols import YandexMusicProviderLike
-from .queue_model import YnisonQueueView, insert_shuffle_indices
+from .queue_model import RADIO_ENTITY_TYPES, YnisonQueueView, radio_items, repeat_from_ynison
 from .streaming import (
     PCM_LOSSLESS_PARAMS,
     PCM_LOSSY_PARAMS,
@@ -77,7 +77,6 @@ from .ynison_client import (
     YnisonSendError,
     YnisonState,
     generate_device_id,
-    make_version_block,
 )
 
 if TYPE_CHECKING:
@@ -531,9 +530,7 @@ class YandexYnisonProvider(PluginProvider):
                 self._track_changed_event.clear()
                 track_id = self._ynison.state.current_track_id
                 self._current_streaming_track_id = track_id
-                self._current_streaming_index = self._ynison.state.player_state.get(
-                    "player_queue", {}
-                ).get("current_playable_index", -1)
+                self._current_streaming_index = self._ynison.state.current_index
 
                 # `_pause_playback` set the stop event; finalize.
                 if self._ynison.state.is_paused:
@@ -614,9 +611,7 @@ class YandexYnisonProvider(PluginProvider):
                 )
                 if natural_end:
                     self.logger.info("Track %s finished, advancing to next", track_id)
-                    old_index = self._ynison.state.player_state.get("player_queue", {}).get(
-                        "current_playable_index", -1
-                    )
+                    old_index = self._ynison.state.current_index
                     completion = await self._signal_track_completion()
                     if completion == "restart":
                         self._seek_position_ms = 0
@@ -760,9 +755,7 @@ class YandexYnisonProvider(PluginProvider):
             if self._ynison:
                 state = self._ynison.state
                 current = state.current_track_id
-                current_index = state.player_state.get("player_queue", {}).get(
-                    "current_playable_index", -1
-                )
+                current_index = state.current_index
                 if current is not None and (
                     current != old_track_id
                     or (old_index is not None and current_index != old_index)
@@ -1220,7 +1213,7 @@ class YandexYnisonProvider(PluginProvider):
         # Signal track change if track_id changed
         significant_change = False
         new_track = state.current_track_id
-        new_index = state.player_state.get("player_queue", {}).get("current_playable_index", -1)
+        new_index = state.current_index
         if new_track and (
             new_track != self._current_streaming_track_id
             or (self._current_streaming_index >= 0 and new_index != self._current_streaming_index)
@@ -1795,12 +1788,7 @@ class YandexYnisonProvider(PluginProvider):
     def _remember_and_publish_source_options(self, queue: dict[str, Any]) -> None:
         """Store Ynison queue options and mirror them to the active source session."""
         self._last_shuffle_enabled = YnisonQueueView(queue).shuffle_enabled
-        repeat_value = queue.get("options", {}).get("repeat_mode", "NONE")
-        self._last_repeat_mode = {
-            "NONE": RepeatMode.OFF,
-            "ONE": RepeatMode.ONE,
-            "ALL": RepeatMode.ALL,
-        }.get(repeat_value, RepeatMode.UNKNOWN)
+        self._last_repeat_mode = repeat_from_ynison(queue)
         if self._in_use_by_player:
             self._publish_source_options(self._in_use_by_player)
 
@@ -1908,12 +1896,6 @@ class YandexYnisonProvider(PluginProvider):
             self._command_idempotency.pop(("on_pause", None), None)
             raise PlayerCommandFailed("Ynison send failed") from exc
 
-    # Entity types that use server-side "radio" queue replenishment.
-    # Currently only RADIO (personal wave, genre stations).
-    # Add "WAVE" here if/when Yandex supports it via the same
-    # rotor_station_tracks API.
-    _RADIO_ENTITY_TYPES: ClassVar[set[str]] = {"RADIO"}
-
     def _maybe_prefetch(
         self,
         current_index: int,
@@ -1922,7 +1904,7 @@ class YandexYnisonProvider(PluginProvider):
         entity_type: str,
     ) -> None:
         """Kick off background prefetch when nearing the end of the queue."""
-        if entity_type not in self._RADIO_ENTITY_TYPES:
+        if entity_type not in RADIO_ENTITY_TYPES:
             return
         if not self._yandex_provider or not playable_list:
             return
@@ -1972,55 +1954,14 @@ class YandexYnisonProvider(PluginProvider):
         """Decide and publish navigation against the current serialized queue base."""
         if not (client := self._ynison):
             return "failed"
-        outcome: Literal["change", "restart", "stop", "failed", "radio"] = "failed"
-        original_queue = client.queue_snapshot()
-        for key in ("version", "options", "shuffle_optional"):
-            original_queue.pop(key, None)
-        original_device = client.state.active_device_id
-        original_paused = client.state.is_paused
-
-        def mutate(player_state: dict[str, Any]) -> bool | None:
-            nonlocal outcome
-            queue = player_state["player_queue"]
-            if (
-                {
-                    key: value
-                    for key, value in queue.items()
-                    if key not in ("version", "options", "shuffle_optional")
-                }
-                != original_queue
-                or client.state.active_device_id != original_device
-                or client.state.is_paused != original_paused
-            ):
-                raise ResourceTemporarilyUnavailable("Ynison playback changed during navigation")
-            view = YnisonQueueView(queue)
-            repeat = queue.get("options", {}).get("repeat_mode", "NONE")
-            next_index = (
-                view.current_index
-                if natural and repeat == "ONE"
-                else view.next_index(wrap=repeat == "ALL" and queue.get("entity_type") != "RADIO")
-            )
-            if next_index is None and queue.get("entity_type") in self._RADIO_ENTITY_TYPES:
-                outcome = "radio"
-                return False
-            status = dict(player_state.get("status", {}))
-            if next_index is None:
-                status.update(progress_ms=str(duration), duration_ms=str(duration), paused=True)
-                outcome = "stop"
-            else:
-                queue["current_playable_index"] = next_index
-                status.update(progress_ms="0", duration_ms="0", paused=False)
-                outcome = "restart" if next_index == view.current_index else "change"
-            status["version"] = make_version_block(client.device_id)
-            player_state["status"] = status
-            return None
-
+        baseline = client.navigation_baseline()
         for attempt in range(2):
             if not await self._wait_for_ynison_connection(client):
                 return "failed"
             try:
-                await client.mutate_player_state(mutate)
-                return outcome
+                return await client.advance_queue(
+                    natural=natural, duration_ms=duration, baseline=baseline
+                )
             except ResourceTemporarilyUnavailable:
                 self.logger.warning("Queue navigation superseded", exc_info=True)
                 return "failed"
@@ -2105,7 +2046,7 @@ class YandexYnisonProvider(PluginProvider):
         playable_list = queue.get("playable_list", [])
         entity_type = queue.get("entity_type", "")
         entity_id = queue.get("entity_id", "")
-        if entity_type in self._RADIO_ENTITY_TYPES:
+        if entity_type in RADIO_ENTITY_TYPES:
             # 2b. At end of RADIO queue — use prefetched data or fetch now
             expanded: list[dict[str, Any]] | None = None
             if self._prefetched_queue_generation != generation:
@@ -2204,31 +2145,7 @@ class YandexYnisonProvider(PluginProvider):
             self.logger.warning("No tracks returned for station %s", entity_id)
             return None
 
-        # Determine the 'from' field from existing items
-        from_field = ""
-        if playable_list:
-            from_field = playable_list[0].get("from", "")
-
-        # Convert tracks to Ynison playable_list format
-        new_items: list[dict[str, Any]] = []
-        for track in tracks:
-            album_id = ""
-            if hasattr(track, "albums") and track.albums:
-                album_id = str(track.albums[0].id) if track.albums[0].id else ""
-            cover = ""
-            if hasattr(track, "cover_uri") and track.cover_uri:
-                cover = track.cover_uri
-            new_items.append(
-                {
-                    "playable_id": str(track.id),
-                    "album_id_optional": album_id,
-                    "playable_type": "TRACK",
-                    "from": from_field,
-                    "title": track.title or "",
-                    "cover_url_optional": cover,
-                }
-            )
-
+        new_items = radio_items(tracks, playable_list[0].get("from", "") if playable_list else "")
         self.logger.info(
             "Fetched %d new tracks for station %s (batch=%s)",
             len(new_items),
@@ -2257,33 +2174,13 @@ class YandexYnisonProvider(PluginProvider):
         if not (client := self._ynison) or not await self._wait_for_ynison_connection(client):
             return False
 
-        def mutate(new_state: dict[str, Any]) -> None:
-            queue = new_state.get("player_queue", {})
-            device_id = client.device_id
-            new_state["player_queue"] = dict(queue)
-            new_state["player_queue"]["current_playable_index"] = next_index
-            if expanded_list is not None:
-                new_state["player_queue"]["playable_list"] = expanded_list
-                shuffle = new_state["player_queue"].get("shuffle_optional")
-                if isinstance(shuffle, dict) and isinstance(shuffle.get("playable_indices"), list):
-                    shuffle = dict(shuffle)
-                    shuffle["playable_indices"] = insert_shuffle_indices(
-                        shuffle["playable_indices"],
-                        len(queue.get("playable_list", [])),
-                        len(expanded_list) - len(queue.get("playable_list", [])),
-                    )
-                    new_state["player_queue"]["shuffle_optional"] = shuffle
-            new_state["status"] = dict(new_state.get("status", {}))
-            new_state["status"]["progress_ms"] = "0"
-            new_state["status"]["duration_ms"] = "0"
-            new_state["status"]["paused"] = False
-            new_state["status"]["version"] = make_version_block(device_id)
-
         # `strict=True`: a dropped queue-advance leaves `_wait_for_track_change`
         # spinning for its full 30 s timeout. Log and return — the next
         # reconnect-broadcast picks up our authored version block and resyncs.
         try:
-            await client.mutate_player_state(mutate, expected_generation=expected_generation)
+            await client.go_to_index(
+                next_index, items=expanded_list, expected_generation=expected_generation
+            )
             return True
         except YnisonSendError, ResourceTemporarilyUnavailable:
             self.logger.warning(
@@ -2307,23 +2204,8 @@ class YandexYnisonProvider(PluginProvider):
         """
         if not self._ynison or not self._ynison.connected:
             return
-
-        def mutate(new_state: dict[str, Any]) -> None:
-            queue = new_state.get("player_queue", {})
-            new_state["player_queue"] = dict(queue)
-            new_state["player_queue"]["playable_list"] = expanded_list
-            shuffle = new_state["player_queue"].get("shuffle_optional")
-            if isinstance(shuffle, dict) and isinstance(shuffle.get("playable_indices"), list):
-                shuffle = dict(shuffle)
-                shuffle["playable_indices"] = insert_shuffle_indices(
-                    shuffle["playable_indices"],
-                    len(queue.get("playable_list", [])),
-                    len(expanded_list) - len(queue.get("playable_list", [])),
-                )
-                new_state["player_queue"]["shuffle_optional"] = shuffle
-
         try:
-            await self._ynison.mutate_player_state(mutate, expected_generation=expected_generation)
+            await self._ynison.publish_items(expanded_list, expected_generation=expected_generation)
         except YnisonSendError, ResourceTemporarilyUnavailable:
             self.logger.warning("RADIO queue update dropped", exc_info=True)
 
@@ -2384,19 +2266,8 @@ class YandexYnisonProvider(PluginProvider):
         if repeat_mode == RepeatMode.UNKNOWN:
             raise PlayerCommandFailed("Unknown repeat mode")
 
-        def mutate(new_state: dict[str, Any]) -> None:
-            queue = new_state.get("player_queue", {})
-            new_queue = dict(queue)
-            new_queue["options"] = dict(queue.get("options", {}))
-            new_queue["options"]["repeat_mode"] = {
-                RepeatMode.OFF: "NONE",
-                RepeatMode.ONE: "ONE",
-                RepeatMode.ALL: "ALL",
-            }[repeat_mode]
-            new_state["player_queue"] = new_queue
-
         try:
-            await client.mutate_player_state(mutate)
+            await client.set_repeat_mode(repeat_mode)
         except (YnisonSendError, ResourceTemporarilyUnavailable) as exc:
             raise PlayerCommandFailed("Ynison queue command failed") from exc
 
@@ -2406,25 +2277,7 @@ class YandexYnisonProvider(PluginProvider):
         if not self._yandex_provider or not self._yandex_provider.available:
             raise PlayerCommandFailed("Linked Yandex Music provider unavailable")
 
-        def mutate(new_state: dict[str, Any]) -> None:
-            queue = new_state.get("player_queue", {})
-            playable_list = queue.get("playable_list", [])
-            current_index = queue.get("current_playable_index", -1)
-            new_queue = dict(queue)
-            if (
-                enabled
-                and isinstance(current_index, int)
-                and 0 <= current_index < len(playable_list)
-            ):
-                remaining = [index for index in range(len(playable_list)) if index != current_index]
-                new_queue["shuffle_optional"] = {
-                    "playable_indices": [current_index, *random.sample(remaining, len(remaining))]
-                }
-            else:
-                new_queue.pop("shuffle_optional", None)
-            new_state["player_queue"] = new_queue
-
         try:
-            await client.mutate_player_state(mutate)
+            await client.set_shuffle(enabled=enabled)
         except (YnisonSendError, ResourceTemporarilyUnavailable) as exc:
             raise PlayerCommandFailed("Ynison queue command failed") from exc

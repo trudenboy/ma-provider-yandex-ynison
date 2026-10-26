@@ -8,6 +8,7 @@ import json
 from contextlib import suppress
 from copy import deepcopy
 from functools import partial
+from types import MethodType
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -2477,6 +2478,16 @@ def _wire_queue_mutation(mock: MagicMock) -> None:
         pending = deepcopy(player_state["player_queue"])
 
     mock.mutate_player_state = AsyncMock(side_effect=mutate)
+    # Queue commands are real client logic running over this transport double.
+    for name in (
+        "navigation_baseline",
+        "advance_queue",
+        "go_to_index",
+        "publish_items",
+        "set_repeat_mode",
+        "set_shuffle",
+    ):
+        setattr(mock, name, MethodType(getattr(YnisonClient, name), mock))
 
 
 def _mock_ynison(

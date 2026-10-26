@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
 import pytest
+from music_assistant_models.enums import RepeatMode
 from music_assistant_models.errors import LoginFailed, ResourceTemporarilyUnavailable
 from ya_passport_auth import SecretStr
 
@@ -3019,3 +3020,108 @@ class TestGoAwayLog:
         assert "3600 s" in rendered
         assert "will not appear in the Yandex Music app" in rendered
         assert time.strftime("%Y-%m-%d", time.localtime(time.time() + 3600)) in rendered
+
+
+# ------------------------------------------------------------------
+# Queue commands
+# ------------------------------------------------------------------
+
+
+class TestQueueCommands:
+    """Queue commands publish complete edits through the serialized mutation path."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, client: YnisonClient) -> None:
+        """Make this device active on a three-item queue."""
+        self.mock_ws = AsyncMock()
+        self.mock_ws.closed = False
+        client._ws = self.mock_ws
+        client._connected = True
+        client._parse_state(
+            {
+                "active_device_id_optional": "test-device-id",
+                "player_state": {
+                    "player_queue": {
+                        "current_playable_index": 0,
+                        "playable_list": [{"playable_id": f"t{i}"} for i in range(3)],
+                        "options": {"repeat_mode": "NONE"},
+                        "entity_type": "VARIOUS",
+                        "version": {"device_id": "peer", "version": "1", "timestamp_ms": "0"},
+                    },
+                    "status": {"progress_ms": "0", "duration_ms": "9000", "paused": False},
+                },
+            }
+        )
+
+    def _sent_queue(self) -> dict[str, Any]:
+        """Return the last published player queue."""
+        msg = json.loads(self.mock_ws.send_str.call_args.args[0])
+        return cast("dict[str, Any]", msg["update_player_state"]["player_state"]["player_queue"])
+
+    async def test_advance_publishes_next_item(self, client: YnisonClient) -> None:
+        """A natural advance moves to the next item."""
+        assert await client.advance_queue(natural=True, duration_ms=9000) == "change"
+        assert self._sent_queue()["current_playable_index"] == 1
+
+    async def test_advance_at_radio_end_does_not_publish(self, client: YnisonClient) -> None:
+        """A RADIO queue end returns ``radio`` and publishes nothing."""
+        client.state.player_state["player_queue"].update(
+            entity_type="RADIO", current_playable_index=2
+        )
+
+        assert await client.advance_queue(natural=True, duration_ms=9000) == "radio"
+        self.mock_ws.send_str.assert_not_awaited()
+
+    async def test_advance_aborts_when_playback_changed_meanwhile(
+        self, client: YnisonClient
+    ) -> None:
+        """A peer pause between decision and publication supersedes navigation."""
+        original = client.mutate_player_state
+
+        async def pause_then_mutate(mutation: Any, **kwargs: Any) -> None:
+            client.state.player_state["status"]["paused"] = True
+            await original(mutation, **kwargs)
+
+        with (
+            patch.object(client, "mutate_player_state", side_effect=pause_then_mutate),
+            pytest.raises(ResourceTemporarilyUnavailable, match="changed during navigation"),
+        ):
+            await client.advance_queue(natural=True, duration_ms=9000)
+
+    async def test_go_to_index_with_items_keeps_window(self, client: YnisonClient) -> None:
+        """Appending items while moving keeps the 200-item window around the target."""
+        queue = client.state.player_state["player_queue"]
+        queue["playable_list"] = [{"playable_id": f"t{i}"} for i in range(200)]
+        queue["current_playable_index"] = 199
+        items = [*queue["playable_list"], {"playable_id": "n0"}]
+
+        await client.go_to_index(200, items=items)
+
+        sent = self._sent_queue()
+        assert len(sent["playable_list"]) == 200
+        assert sent["playable_list"][sent["current_playable_index"]] == {"playable_id": "n0"}
+
+    async def test_publish_items_is_gated_on_activity(self, client: YnisonClient) -> None:
+        """A best-effort list publication is skipped while another device is active."""
+        client.state.active_device_id = "phone"
+        items = [*client.state.player_state["player_queue"]["playable_list"], {"playable_id": "n"}]
+
+        assert await client.publish_items(items) is False
+        self.mock_ws.send_str.assert_not_awaited()
+
+    async def test_publish_items_appends(self, client: YnisonClient) -> None:
+        """An active device publishes the appended list without moving."""
+        items = [*client.state.player_state["player_queue"]["playable_list"], {"playable_id": "n"}]
+
+        assert await client.publish_items(items) is True
+        assert self._sent_queue()["playable_list"][-1] == {"playable_id": "n"}
+        assert self._sent_queue()["current_playable_index"] == 0
+
+    async def test_set_repeat_and_shuffle(self, client: YnisonClient) -> None:
+        """Repeat and shuffle edits are published and preserve each other before the echo."""
+        await client.set_repeat_mode(RepeatMode.ALL)
+        await client.set_shuffle(enabled=True)
+
+        sent = self._sent_queue()
+        assert sent["options"]["repeat_mode"] == "ALL"
+        assert sent["shuffle_optional"]["playable_indices"][0] == 0

@@ -24,6 +24,7 @@ from music_assistant_models.errors import (
 )
 
 if TYPE_CHECKING:
+    from music_assistant_models.enums import RepeatMode
     from ya_passport_auth import SecretStr
 
 from .constants import (
@@ -41,6 +42,15 @@ from .constants import (
     YNISON_RECONNECT_ERROR_CODES,
     YNISON_REDIRECT_URL,
     YNISON_STATE_PATH,
+)
+from .queue_model import (
+    QueueOutcome,
+    make_version_block,
+    plan_navigation,
+    replace_items,
+    set_index,
+    set_repeat,
+    set_shuffle,
 )
 from .reconnect_policy import ReconnectPolicy, parse_seconds
 
@@ -60,20 +70,6 @@ class YnisonSendError(ConnectionError):
     """
 
 
-def make_version_block(device_id: str) -> dict[str, Any]:
-    """
-    Build a version sub-object authored by the given device.
-
-    Ynison expects string types for version and timestamp fields;
-    passing integers triggers 500 responses that terminate the WebSocket.
-    """
-    return {
-        "device_id": device_id,
-        "version": str(time.time_ns()),
-        "timestamp_ms": "0",
-    }
-
-
 def _stringify_version(version: Any) -> None:
     """Coerce int `version.version`/`version.timestamp_ms` fields to str in-place."""
     if not isinstance(version, dict):
@@ -87,6 +83,15 @@ def _stringify_version(version: Any) -> None:
 def _local_time(epoch: float) -> str:
     """Format a wall-clock time for log messages in the server's local zone."""
     return datetime.fromtimestamp(epoch, tz=UTC).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _navigation_identity(queue: dict[str, Any]) -> dict[str, Any]:
+    """Return the queue fields that must not change between a navigation decision and its send."""
+    return {
+        key: value
+        for key, value in queue.items()
+        if key not in ("version", "options", "shuffle_optional")
+    }
 
 
 def normalize_player_state_timestamps(player_state: dict[str, Any]) -> None:
@@ -133,6 +138,15 @@ class _StatusWatermark:
     sent_at: float
 
 
+@dataclass(frozen=True)
+class NavigationBaseline:
+    """Playback that a queue navigation decision was made for."""
+
+    queue: dict[str, Any]
+    active_device_id: str | None
+    paused: bool
+
+
 @dataclass
 class YnisonState:
     """Parsed Ynison state from the server."""
@@ -159,6 +173,12 @@ class YnisonState:
             if playable_id:
                 return str(playable_id)
         return None
+
+    @property
+    def current_index(self) -> int:
+        """Return the original-list index of the current item, or -1."""
+        index = self.player_state.get("player_queue", {}).get("current_playable_index", -1)
+        return index if isinstance(index, int) and not isinstance(index, bool) else -1
 
     @property
     def is_paused(self) -> bool:
@@ -550,6 +570,124 @@ class YnisonClient:
             self._pending_queue = deepcopy(queue)
             self._pending_queue_until = time.monotonic() + 30
             self._last_queue_version = int(queue["version"]["version"])
+
+    def navigation_baseline(self) -> NavigationBaseline:
+        """Capture the playback that a later :meth:`advance_queue` must still find."""
+        return NavigationBaseline(
+            queue=_navigation_identity(self.queue_snapshot()),
+            active_device_id=self.state.active_device_id,
+            paused=self.state.is_paused,
+        )
+
+    async def advance_queue(
+        self,
+        *,
+        natural: bool,
+        duration_ms: int,
+        baseline: NavigationBaseline | None = None,
+    ) -> QueueOutcome:
+        """
+        Publish the next logical item of the current queue, honouring repeat.
+
+        :param natural: Whether the current item finished rather than being skipped.
+        :param duration_ms: Duration of the finished item, published on a terminal stop.
+        :param baseline: Playback captured when the decision was requested; defaults
+            to the current playback.
+        :return: ``radio`` without publishing when a RADIO queue needs more items,
+            otherwise the published ``change``, ``restart`` or ``stop``.
+        :raises ResourceTemporarilyUnavailable: When the queue, active device or
+            pause state changed before the edit was sent.
+        :raises YnisonSendError: When the edit could not be sent.
+        """
+        expected = baseline or self.navigation_baseline()
+        outcome: QueueOutcome = "failed"
+
+        def mutate(player_state: dict[str, Any]) -> bool | None:
+            nonlocal outcome
+            if (
+                _navigation_identity(player_state["player_queue"]) != expected.queue
+                or self.state.active_device_id != expected.active_device_id
+                or self.state.is_paused != expected.paused
+            ):
+                raise ResourceTemporarilyUnavailable("Ynison playback changed during navigation")
+            outcome = plan_navigation(
+                player_state, natural=natural, duration_ms=duration_ms, device_id=self.device_id
+            )
+            return False if outcome == "radio" else None
+
+        await self.mutate_player_state(mutate)
+        return outcome
+
+    async def go_to_index(
+        self,
+        index: int,
+        *,
+        items: list[dict[str, Any]] | None = None,
+        expected_generation: int | None = None,
+    ) -> None:
+        """
+        Publish ``index`` as the current item, optionally appending items first.
+
+        :param index: Original-list index of the new current item, counted in ``items``.
+        :param items: Current playables followed by appended ones.
+        :param expected_generation: Queue generation the edit was computed for.
+        :raises ResourceTemporarilyUnavailable: When the queue was replaced meanwhile.
+        :raises YnisonSendError: When the edit could not be sent.
+        """
+
+        def mutate(player_state: dict[str, Any]) -> None:
+            set_index(player_state, index, device_id=self.device_id, items=items)
+
+        await self.mutate_player_state(mutate, expected_generation=expected_generation)
+
+    async def publish_items(
+        self, items: list[dict[str, Any]], *, expected_generation: int | None = None
+    ) -> bool:
+        """
+        Publish an appended playable list without moving, while this device is active.
+
+        :param items: Current playables followed by appended ones.
+        :param expected_generation: Queue generation the items were fetched for.
+        :return: ``False`` when another device is active and nothing was sent.
+        :raises ResourceTemporarilyUnavailable: When the queue was replaced meanwhile.
+        :raises YnisonSendError: When the edit could not be sent.
+        """
+        if self.state.active_device_id != self.device_id:
+            return False
+
+        def mutate(player_state: dict[str, Any]) -> None:
+            replace_items(player_state, items)
+
+        await self.mutate_player_state(mutate, expected_generation=expected_generation)
+        return True
+
+    async def set_repeat_mode(self, mode: RepeatMode) -> None:
+        """
+        Publish a repeat mode for the current queue.
+
+        :param mode: Repeat mode other than ``UNKNOWN``.
+        :raises ResourceTemporarilyUnavailable: When the queue was replaced meanwhile.
+        :raises YnisonSendError: When the edit could not be sent.
+        """
+
+        def mutate(player_state: dict[str, Any]) -> None:
+            set_repeat(player_state, mode)
+
+        await self.mutate_player_state(mutate)
+
+    async def set_shuffle(self, *, enabled: bool) -> None:
+        """
+        Publish a shuffle permutation starting at the current item, or remove it.
+
+        :param enabled: Whether shuffle is on.
+        :raises ResourceTemporarilyUnavailable: When the queue was replaced meanwhile.
+        :raises YnisonSendError: When the edit could not be sent.
+        """
+
+        def mutate(player_state: dict[str, Any]) -> None:
+            set_shuffle(player_state, enabled=enabled)
+
+        await self.mutate_player_state(mutate)
 
     async def send_full_state(
         self,
