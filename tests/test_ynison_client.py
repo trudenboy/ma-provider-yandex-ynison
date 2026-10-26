@@ -2766,12 +2766,12 @@ class TestScheduleReconnect:
 
 
 # ------------------------------------------------------------------
-# Persistent go-away hold
+# Go-away log
 # ------------------------------------------------------------------
 
 
-class TestGoAwayHold:
-    """A go-away window survives client restarts through the owner's storage."""
+class TestGoAwayLog:
+    """A go-away is explained in the log."""
 
     def _client(self, **kwargs: Any) -> YnisonClient:
         return YnisonClient(
@@ -2781,60 +2781,6 @@ class TestGoAwayHold:
             logger=MagicMock(),
             **kwargs,
         )
-
-    async def test_connect_inside_stored_window_does_not_dial(self) -> None:
-        """A restart inside the window waits out the rest of it before the first dial."""
-        client = self._client(go_away_until=time.time() + 1800)
-        client._external_session = AsyncMock(closed=False)
-        sleeps: list[float] = []
-
-        async def record_sleep(delay: float) -> None:
-            sleeps.append(delay)
-            client._stop_event.set()
-
-        with (
-            patch.object(client, "_get_redirect_ticket", new_callable=AsyncMock) as redirect,
-            patch(SLEEP_PATH, new_callable=AsyncMock, side_effect=record_sleep),
-        ):
-            await client.connect()
-            assert client._reconnect_task is not None
-            await client._reconnect_task
-
-        redirect.assert_not_awaited()
-        assert 1795 <= sleeps[0] <= 1800
-
-    async def test_connect_after_stored_window_dials(self) -> None:
-        """An expired window does not delay the first dial."""
-        client = self._client(go_away_until=time.time() - 5)
-        client._external_session = AsyncMock(closed=False)
-
-        with (
-            patch.object(
-                client, "_get_redirect_ticket", new_callable=AsyncMock, return_value=("h", "t", 1)
-            ) as redirect,
-            patch.object(client, "_connect_state", new_callable=AsyncMock),
-        ):
-            await client.connect()
-
-        redirect.assert_awaited_once()
-
-    async def test_go_away_reports_deadline_and_healthy_state_clears_it(self) -> None:
-        """The owner learns the window's end and later that it is over."""
-        reported: list[float] = []
-        client = self._client(on_go_away=reported.append)
-
-        await TestMessageLoop()._run_loop_with_messages(
-            client,
-            [_make_ws_msg(aiohttp.WSMsgType.TEXT, json.dumps(_fixture("go_away_throttle.json")))],
-        )
-        assert len(reported) == 1
-        assert abs(reported[0] - (time.time() + 3600)) < 5
-
-        healthy = _make_ws_msg(
-            aiohttp.WSMsgType.TEXT, json.dumps({"player_state": {"status": {"paused": True}}})
-        )
-        await TestMessageLoop()._run_loop_with_messages(client, [healthy, healthy])
-        assert reported[1:] == [0.0]
 
     async def test_go_away_log_explains_impact_and_next_attempt(self) -> None:
         """The warning names the error, the wait, the user impact, and the next attempt time."""
@@ -2851,17 +2797,4 @@ class TestGoAwayHold:
         assert "500140000" in rendered
         assert "3600 s" in rendered
         assert "will not appear in the Yandex Music app" in rendered
-        assert time.strftime("%Y-%m-%d", time.localtime(client._go_away_until)) in rendered
-
-    async def test_recovery_after_wait_is_logged(self) -> None:
-        """The first healthy session after a wait says so."""
-        client = self._client(go_away_until=time.time() - 1)
-        healthy = _make_ws_msg(
-            aiohttp.WSMsgType.TEXT, json.dumps({"player_state": {"status": {"paused": True}}})
-        )
-
-        await TestMessageLoop()._run_loop_with_messages(client, [healthy])
-
-        client._logger.info.assert_any_call(
-            "Ynison accepted the connection again after the requested wait"
-        )
+        assert time.strftime("%Y-%m-%d", time.localtime(time.time() + 3600)) in rendered

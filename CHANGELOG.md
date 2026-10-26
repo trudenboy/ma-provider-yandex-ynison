@@ -14,7 +14,6 @@ All notable changes to this project will be documented in this file.
 - When Yandex rejects the Ynison connection and asks clients to wait (for example
   error 500140000 with a one-hour wait), the device now waits exactly that long
   instead of reconnecting every few seconds, which kept extending the rejection.
-  The wait also survives a provider reload or a Music Assistant restart.
 - The log now explains such a rejection: the error code, how long Yandex asked to
   wait, that the device will not appear in the Yandex Music app until then, and the
   local time of the next attempt.
