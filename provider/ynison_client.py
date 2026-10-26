@@ -15,6 +15,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import aiohttp
@@ -96,6 +97,11 @@ def _parse_backoff_ladder(value: Any) -> tuple[float, ...]:
         return ()
     millis = {int(part) for part in value.split(":") if part.strip().isdigit()}
     return tuple(ms / 1000 for ms in sorted(millis))
+
+
+def _local_time(epoch: float) -> str:
+    """Format a wall-clock time for log messages in the server's local zone."""
+    return datetime.fromtimestamp(epoch, tz=UTC).astimezone().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def normalize_player_state_timestamps(player_state: dict[str, Any]) -> None:
@@ -189,6 +195,8 @@ class YnisonState:
 StateUpdateCallback = Callable[[YnisonState], Awaitable[None]]
 # Callback invoked on auth failure; should return a fresh token (or raise).
 AuthRefreshCallback = Callable[[], Awaitable["SecretStr"]]
+# Callback receiving the wall-clock end of a go-away window, or 0 once it is over.
+GoAwayCallback = Callable[[float], None]
 
 
 class YnisonClient:
@@ -207,6 +215,8 @@ class YnisonClient:
         logger: logging.Logger,
         http_session: aiohttp.ClientSession | None = None,
         on_auth_failure: AuthRefreshCallback | None = None,
+        go_away_until: float = 0.0,
+        on_go_away: GoAwayCallback | None = None,
     ) -> None:
         """
         Initialize Ynison client.
@@ -219,6 +229,10 @@ class YnisonClient:
         :param on_auth_failure: Optional callback invoked on auth failure during
             reconnect. Should return a fresh SecretStr token. If not provided or
             if the callback raises, reconnect proceeds with the current token.
+        :param go_away_until: Wall-clock end of a go-away window stored by an
+            earlier client; no connection is made before it.
+        :param on_go_away: Called with the wall-clock end of each new go-away
+            window so the owner can store it, and with 0 once a session is healthy.
         """
         self._token = token
         self._device_info = device_info
@@ -226,6 +240,8 @@ class YnisonClient:
         self._logger = logger
         self._external_session = http_session
         self._on_auth_failure = on_auth_failure
+        self._go_away_until = go_away_until
+        self._on_go_away = on_go_away
 
         self._ws: aiohttp.ClientWebSocketResponse | None = None
         self._session: aiohttp.ClientSession | None = None
@@ -299,6 +315,16 @@ class YnisonClient:
         if self._external_session and self._external_session.closed:
             raise ResourceTemporarilyUnavailable("Provided http_session is closed")
         self._session = self._external_session or aiohttp.ClientSession()
+
+        if (remaining := self._go_away_until - time.time()) > 0:
+            # Dialling inside the window would re-arm it.
+            self._logger.warning(
+                "Ynison asked this client to stay away until %s; first connection deferred",
+                _local_time(self._go_away_until),
+            )
+            self._go_away = remaining
+            self._schedule_reconnect()
+            return
 
         try:
             # Step 1: Get redirect ticket
@@ -818,7 +844,7 @@ class YnisonClient:
                         continue
 
                     self._parse_state(data)
-                    self._reconnect_failures = 0
+                    self._mark_healthy()
                     try:
                         await self._on_state_update(self.state)
                     except MusicAssistantError:
@@ -1006,6 +1032,14 @@ class YnisonClient:
             except aiohttp.ClientError, OSError, TimeoutError, ResourceTemporarilyUnavailable:
                 self._logger.warning("Ynison reconnect attempt %d failed", attempt, exc_info=True)
 
+    def _mark_healthy(self) -> None:
+        """Record a session that delivered state: restart the ladder, end any go-away hold."""
+        self._reconnect_failures = 0
+        if self._go_away_until:
+            self._go_away_until = 0.0
+            if self._on_go_away:
+                self._on_go_away(0.0)
+
     def _next_reconnect_delay(self) -> float:
         """Return the wait before the next reconnect attempt, honouring server back-off."""
         if self._go_away:
@@ -1034,11 +1068,15 @@ class YnisonClient:
             self._reconnect_failures = 0
         if go_away:
             self._go_away = go_away
+            self._go_away_until = time.time() + go_away
             self._logger.warning(
-                "Ynison asked this client to stay away for %.0fs (error %s)",
+                "Ynison asked this client to stay away for %.0fs (error %s); next connection at %s",
                 go_away,
                 error_code,
+                _local_time(self._go_away_until),
             )
+            if self._on_go_away:
+                self._on_go_away(self._go_away_until)
 
     def _player_state_message(self, player_state: dict[str, Any]) -> dict[str, Any]:
         """Build a complete queue update envelope."""
