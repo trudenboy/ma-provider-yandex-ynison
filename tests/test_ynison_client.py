@@ -2835,3 +2835,33 @@ class TestGoAwayHold:
         )
         await TestMessageLoop()._run_loop_with_messages(client, [healthy, healthy])
         assert reported[1:] == [0.0]
+
+    async def test_go_away_log_explains_impact_and_next_attempt(self) -> None:
+        """The warning names the error, the wait, the user impact, and the next attempt time."""
+        client = self._client()
+
+        await TestMessageLoop()._run_loop_with_messages(
+            client,
+            [_make_ws_msg(aiohttp.WSMsgType.TEXT, json.dumps(_fixture("go_away_throttle.json")))],
+        )
+
+        warnings = [call.args for call in client._logger.warning.call_args_list]  # type: ignore[attr-defined]
+        message, *args = next(w for w in warnings if "asked to wait" in w[0])
+        rendered = message % tuple(args)
+        assert "500140000" in rendered
+        assert "3600 s" in rendered
+        assert "will not appear in the Yandex Music app" in rendered
+        assert time.strftime("%Y-%m-%d", time.localtime(client._go_away_until)) in rendered
+
+    async def test_recovery_after_wait_is_logged(self) -> None:
+        """The first healthy session after a wait says so."""
+        client = self._client(go_away_until=time.time() - 1)
+        healthy = _make_ws_msg(
+            aiohttp.WSMsgType.TEXT, json.dumps({"player_state": {"status": {"paused": True}}})
+        )
+
+        await TestMessageLoop()._run_loop_with_messages(client, [healthy])
+
+        client._logger.info.assert_any_call(  # type: ignore[attr-defined]
+            "Ynison accepted the connection again after the requested wait"
+        )

@@ -319,7 +319,9 @@ class YnisonClient:
         if (remaining := self._go_away_until - time.time()) > 0:
             # Dialling inside the window would re-arm it.
             self._logger.warning(
-                "Ynison asked this client to stay away until %s; first connection deferred",
+                "Yandex asked earlier to wait before reconnecting to Ynison; the first "
+                "connection is deferred to %s and this device will not appear in the "
+                "Yandex Music app until then",
                 _local_time(self._go_away_until),
             )
             self._go_away = remaining
@@ -1037,6 +1039,7 @@ class YnisonClient:
         self._reconnect_failures = 0
         if self._go_away_until:
             self._go_away_until = 0.0
+            self._logger.info("Ynison accepted the connection again after the requested wait")
             if self._on_go_away:
                 self._on_go_away(0.0)
 
@@ -1070,9 +1073,11 @@ class YnisonClient:
             self._go_away = go_away
             self._go_away_until = time.time() + go_away
             self._logger.warning(
-                "Ynison asked this client to stay away for %.0fs (error %s); next connection at %s",
-                go_away,
+                "Yandex rejected the Ynison connection (error %s) and asked to wait %.0f s. "
+                "This device will not appear in the Yandex Music app until the next attempt "
+                "at %s; reconnecting earlier would extend the wait",
                 error_code,
+                go_away,
                 _local_time(self._go_away_until),
             )
             if self._on_go_away:
