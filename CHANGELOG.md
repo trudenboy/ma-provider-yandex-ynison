@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.3.14] - 2026-10-26
+
+### Changed
+
+- Reconnect attempts follow the official Yandex Music client: 1, 5 and 30 second
+  delays, or the delay sequence the server supplies.
+
+### Fixed
+
+- When Yandex rejects the Ynison connection and asks clients to wait (for example
+  error 500140000 with a one-hour wait), the device now waits exactly that long
+  instead of reconnecting every few seconds, which kept extending the rejection.
+  The wait also survives a provider reload or a Music Assistant restart.
+- The log now explains such a rejection: the error code, how long Yandex asked to
+  wait, that the device will not appear in the Yandex Music app until then, and the
+  local time of the next attempt.
+- A connection that is accepted but dropped before delivering any state no longer
+  resets the reconnect delay, so repeated drops back off instead of retrying at the
+  shortest interval.
+
 ## [4.3.13] - 2026-10-13
 
 ### Fixed
