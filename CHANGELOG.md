@@ -2,12 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
-## [4.3.14] - 2026-10-26
+## [4.4.0] - 2026-10-26
 
 ### Changed
 
 - Reconnect attempts follow the official Yandex Music client: 1, 5 and 30 second
-  delays, or the delay sequence the server supplies.
+  delays without jitter, or the delay sequence the server supplies. Once those are
+  exhausted, or for errors the official client does not retry, the plugin keeps
+  trying every five minutes instead of every 30 seconds.
+- The connection uses the keep-alive interval supplied by Yandex.
+- Playback position is sent to Yandex Music only when it changes (more than two
+  seconds of drift, a pause change or a new duration), as the official client does,
+  instead of every five seconds.
+- Player commands wait up to five seconds for a reconnecting connection before
+  reporting a failure.
+- RADIO queues keep at most 200 tracks around the current track; shuffled queues
+  are not trimmed.
 
 ### Fixed
 
@@ -20,6 +30,13 @@ All notable changes to this project will be documented in this file.
 - A connection that is accepted but dropped before delivering any state no longer
   resets the reconnect delay, so repeated drops back off instead of retrying at the
   shortest interval.
+- Play, pause and seek report a failure instead of silently doing nothing when the
+  track duration is not known yet.
+- The device registers with its app version and only the fields the Ynison protocol
+  defines, and asks again not to receive events while passive after another device
+  takes over playback.
+- A position Yandex merely repeats is no longer mistaken for a seek, and trimming a
+  long RADIO queue no longer restarts the playing track.
 
 ## [4.3.13] - 2026-10-13
 
