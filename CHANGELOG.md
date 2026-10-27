@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.4.5] - 2026-10-27
+
+### Fixed
+
+- Trimming a long RADIO queue no longer restarts the playing track when Yandex
+  Music confirms the trimmed queue very quickly, and a trim that failed to send no
+  longer shifts the playback position.
+- Pausing or resuming right after a track change no longer carries the previous
+  track's position over to the new track.
+- RADIO tracks added while the connection recovers at the end of a track no longer
+  make the finished track play again; playback advances to the next track.
+
 ## [4.4.4] - 2026-10-27
 
 ### Fixed
