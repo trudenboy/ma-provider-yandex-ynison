@@ -1,63 +1,85 @@
-# Copilot Instructions — Yandex Ynison Plugin
+<!-- ma-provider-tools: rendered from wrappers/.github/copilot-instructions.md.j2 -->
+# Copilot Instructions — Yandex Music Connect (Ynison)
 
-## Project overview
+This repo is the source of truth for the **Yandex Music Connect (Ynison)** Music Assistant
+provider, which is later inlined upstream into
+`music-assistant/server/music_assistant/providers/yandex_ynison/`. Review it by
+the upstream standards below (mirrored verbatim from upstream by
+`ma-provider-tools`; do not edit), with these provider-repo exceptions:
 
-Music Assistant plugin that makes MA players appear as devices in the Yandex Music app via the Ynison protocol (Yandex's equivalent of Spotify Connect). Follows the `spotify_connect` provider pattern from the MA server.
+- **Paths.** Upstream `music_assistant/providers/yandex_ynison/` is
+  `provider/` here, and `tests/providers/yandex_ynison/` is `tests/`.
+  `music_assistant/helpers/` and the demo providers come from the installed
+  `music-assistant` package.
+- **Project standards** are in `AGENTS.md` (`CLAUDE.md` is a symlink to it),
+  with provider specifics in `CLAUDE.local.md`. Deviations are at least
+  `[PROBLEM]`.
+- **PR title.** Provider-repo PRs **use** Conventional Commit prefixes
+  (`feat:`, `fix:`, …). Do not flag them. Only PRs in `music-assistant/server`
+  must not have one.
+- **PR description.** Provider-repo PRs follow this repo's
+  `.github/PULL_REQUEST_TEMPLATE.md`. The upstream PR-description rules apply
+  only to text drafted for an upstream PR body.
+- **Settled by CI.** In addition to lint and tests, `check-upstream-rules`
+  (`MA001`–`MA006`), the method-order hook and upstream's own repo checks
+  (blocking IO, icons, manifests) already run. Do not repeat their findings;
+  only question a `# ma-allow:` reason that does not hold up.
+- **Mirrored files.** `.github/instructions/*`, `.claude/skills/*`,
+  `scripts/check_*.py`, `ruff.toml` and the sync-managed workflows are
+  distributed from `ma-provider-tools`. Changes to them belong there, not in
+  this repo.
 
-- **Type**: `PluginProvider` with `ProviderFeature.AUDIO_SOURCE`
-- **Manifest type**: `plugin`, **domain**: `yandex_ynison`
-- **Status**: Alpha — under active development
+## PR Review Standards
 
-## Architecture
+### Philosophy
 
-```
-Yandex Music app (phone/web)
-  → Ynison WebSocket ↔ YandexYnisonProvider
-    → receives track_id from PlayerState
-    → fetches audio via Yandex Music API (reuses yandex-music provider if available)
-    → PCM audio → PluginSource → MA Player (Chromecast/DLNA/etc)
-    ← play/pause/seek → update_playing_status back to Ynison
-```
+Comment only where you're confident there's a real issue — if you're uncertain whether something is a problem, don't raise it. Actionable feedback, not observations. One sentence where one sentence does the job. On documentation or user-facing text, flag wording only when it's genuinely confusing or could mislead someone into an error.
 
-Key data flow: `YnisonClient` maintains a persistent WebSocket to the Ynison state service. When the active track changes, it fires `on_state_update` → `YandexYnisonProvider._handle_ynison_state` resolves the track via the Yandex Music API, pipes audio through ffmpeg into PCM, and feeds it to MA's player infrastructure via `PluginSource`.
+### What to review
 
-### Ynison protocol
+Correctness and bugs, blocking IO in async code, security, performance, test coverage, docs the change makes wrong, and consistency with the surrounding code. `AGENTS.md` holds the project standards — deviations from it are at least `[PROBLEM]`.
 
-- Transport: gRPC-over-WebSocket with JSON messages (not binary protobuf)
-- Two-step connection: Redirector → State Service
-- Auth: `Authorization: OAuth {token}` + device info in `Sec-WebSocket-Protocol` header
-- Reference implementations: `bulatorr/go-yaynison` (Go), `FozerG/YandexMusicRPC` (Python)
+### Linked issues
 
-## Commands
+If the PR references an issue, read it before reviewing the diff. Then judge two things: whether the change actually resolves the reported problem, and whether it does so in the most elegant way available. A fix that works but patches a symptom, sits at the wrong layer, or adds a special case where the existing design already had a seam for it is a `[PROBLEM]` — say which approach would be cleaner and why. A change that leaves part of the issue unaddressed, or addresses something else entirely, is `[CRITICAL]`.
 
-```bash
-# Setup
-scripts/setup.sh          # or: uv sync --extra test
+### Reuse over reimplementation
 
-# Test
-uv run pytest                              # full suite
-uv run pytest tests/test_ynison_client.py  # single file
-uv run pytest -k "test_parse_state"        # single test by name
+Check whether `music_assistant/helpers/` already covers what new code does; providers are expected to use the shared helpers rather than reimplement. A music provider parsing PLS itself instead of calling `parse_pls` from `music_assistant.helpers.playlists` is a `[PROBLEM]`.
 
-# Lint & format
-uv run ruff check .       # lint (auto-fix enabled in config)
-uv run ruff format .      # format
+### New providers
 
-# Type check
-uv run mypy               # strict mode, packages: provider, tests
-```
+When the PR adds files under `music_assistant/providers/`, the matching demo provider is the ground truth — it's the annotated template that encodes the required structure, lifecycle and config schema:
 
-## Key conventions
+| Provider type | Reference |
+|---|---|
+| Music source | `music_assistant/providers/_demo_music_provider` |
+| Player | `music_assistant/providers/_demo_player_provider` |
+| Plugin | `music_assistant/providers/_demo_plugin_provider` |
+| Audio analysis | `music_assistant/providers/_demo_audio_analysis_provider` |
 
-- **Python 3.12+** required. All modules use `from __future__ import annotations`.
-- **`uv`** is the package manager (not pip). Dependencies and test extras are in `pyproject.toml`.
-- **Ruff** is configured with `select = ["ALL"]` and a large ignore list — check `ruff.toml` before adding new rules.
-- **mypy** runs in strict mode with `disallow_untyped_defs = true`. All function signatures need type annotations.
-- **pytest-asyncio** with `asyncio_mode = "auto"` — async test functions are auto-detected, no `@pytest.mark.asyncio` needed.
-- **Line length**: 100 characters (enforced by ruff).
-- **Docstrings**: PEP 257 convention. Every module and public class needs a docstring.
-- **Constants**: All config keys and protocol values live in `provider/constants.py` using `typing.Final`.
-- **Imports**: `music_assistant` is listed as first-party in isort config. Use `TYPE_CHECKING` guard for type-only imports from MA.
-- **Test mocks**: Tests mock the MA `MusicAssistant` instance and `ProviderConfig` — see `_make_mock_mass()` and `_make_mock_config()` helpers in `tests/test_provider.py`.
-- **CI**: Uses reusable workflows from `trudenboy/ma-provider-tools` — do not add CI config directly; modify the reusable workflows repo instead.
-- **Pre-commit**: Configured with ruff, mypy, codespell, and structural checks. Run `uv run pre-commit run --all-files` to check locally.
+Read the demo provider alongside the new one, then flag deviations from its requirements and patterns as `[PROBLEM]` or `[CRITICAL]` depending on what breaks. Provider icons (`icon.svg`) are capped at 5KB — anything larger is `[CRITICAL]`.
+
+### Don't duplicate CI
+
+Reviews are requested only once `lint` and `test` have passed on the commit under review, so formatting, lint, test failures and missing dependencies are already settled — don't flag them. `.pre-commit-config.yaml` and `.github/workflows/test.yml` are the authority on that class of problem. Spend the review on what CI can't see.
+
+### PR title
+
+A functional description of the change, with no conventional-commit prefix (`feat:`, `fix:`, `refactor:`, `chore:`, ...) — labels do the categorizing. A prefixed title is a `[PROBLEM]`.
+
+### Existing review comments
+
+Flag earlier review comments on the PR that haven't been addressed.
+
+### Severity
+
+- `[CRITICAL]` — must fix before merge: bugs, security issues, broken functionality
+- `[PROBLEM]` — should fix: bad patterns, missing tests, standards deviations
+- `[SUGGESTION]` — optional: minor refactors, nice-to-haves
+
+### Output
+
+Post an inline comment on GitHub for every `[CRITICAL]` and `[PROBLEM]`. Do not post `[SUGGESTION]` items, and don't comment on what's already fine.
+
+Each comment carries its severity, states the problem in a sentence, says why it matters when that isn't self-evident, and gives a concrete fix or snippet.
