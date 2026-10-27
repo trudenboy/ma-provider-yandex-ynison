@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.4.9] - 2026-10-27
+
+### Fixed
+
+- A track that ends while a Next or Previous command is still being processed no
+  longer skips the first track of a queue that another device started meanwhile.
+- A skip to the next copy of the same track now starts from the beginning even
+  when Yandex Music confirms it without a position, or when repeat or shuffle is
+  changed before the confirmation, and a failed repeat or shuffle change no longer
+  cancels a pending skip.
+
 ## [4.4.8] - 2026-10-27
 
 ### Fixed

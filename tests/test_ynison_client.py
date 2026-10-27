@@ -3397,6 +3397,70 @@ class TestQueueCommands:
         assert client.state.current_item_navigated is False
         assert client.state.current_item_kept is True
 
+    async def test_failed_option_edit_keeps_a_pending_navigation(
+        self, client: YnisonClient
+    ) -> None:
+        """An unrelated failed send does not forget navigation that is still awaiting its echo."""
+        queue = client.state.player_state["player_queue"]
+        queue["playable_list"] = [{"playable_id": "x"}, {"playable_id": "x"}, {"playable_id": "y"}]
+        assert await client.advance_queue(natural=True, duration_ms=9000) == "change"
+        navigation_echo = self._sent_queue()
+        self.mock_ws.send_str.side_effect = aiohttp.ClientError("down")
+        with pytest.raises(YnisonSendError):
+            await client.set_repeat_mode(RepeatMode.ALL)
+
+        client._parse_state({"player_state": {"player_queue": navigation_echo}})
+
+        assert client.state.current_item_navigated is True
+
+    async def test_queue_only_navigation_echo_starts_at_the_sent_position(
+        self, client: YnisonClient
+    ) -> None:
+        """Adopting our navigation without a status uses the position we sent, not the old one."""
+        client._parse_state(
+            {
+                "player_state": {
+                    "status": {"progress_ms": "70000", "duration_ms": "200000", "paused": False}
+                }
+            }
+        )
+        assert await client.advance_queue(natural=False, duration_ms=200000) == "change"
+
+        client._parse_state({"player_state": {"player_queue": self._sent_queue()}})
+
+        assert client.state.current_item_navigated is True
+        assert client.state.progress_ms == 0
+
+    async def test_option_edit_before_navigation_echo_keeps_the_sent_position(
+        self, client: YnisonClient
+    ) -> None:
+        """An edit sent before our navigation is adopted republishes that navigation's status."""
+        client._parse_state(
+            {
+                "player_state": {
+                    "status": {"progress_ms": "70000", "duration_ms": "200000", "paused": False}
+                }
+            }
+        )
+        assert await client.advance_queue(natural=False, duration_ms=200000) == "change"
+
+        await client.set_repeat_mode(RepeatMode.ALL)
+
+        sent = json.loads(self.mock_ws.send_str.call_args.args[0])
+        assert sent["update_player_state"]["player_state"]["status"]["progress_ms"] == "0"
+
+    async def test_own_navigation_supersedes_an_earlier_baseline(
+        self, client: YnisonClient
+    ) -> None:
+        """A decision taken before our own navigation no longer applies after it."""
+        queue = client.state.player_state["player_queue"]
+        queue["playable_list"] = [{"playable_id": "x"}, {"playable_id": "x"}, {"playable_id": "y"}]
+        baseline = client.navigation_baseline()
+
+        assert await client.advance_queue(natural=False, duration_ms=9000) == "change"
+
+        assert not client.is_current_playback(baseline)
+
     async def test_repeat_one_echo_is_not_navigation(self, client: YnisonClient) -> None:
         """Repeating the same item restarts it locally, so its echo is not a new occurrence."""
         client.state.player_state["player_queue"]["options"] = {"repeat_mode": "ONE"}
