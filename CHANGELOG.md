@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.4.6] - 2026-10-27
+
+### Fixed
+
+- A finished track no longer plays again when a RADIO queue is trimmed while the
+  plugin waits for Yandex Music to confirm the next track.
+- Changing repeat or shuffle while another device replaces the queue no longer lets
+  an end-of-track advance the other device's queue.
+
 ## [4.4.5] - 2026-10-27
 
 ### Fixed
