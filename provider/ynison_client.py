@@ -570,6 +570,14 @@ class YnisonClient:
             self._status_baseline = StatusBaseline(
                 progress_ms, duration_ms, paused, time.monotonic(), None
             )
+            if self._unadopted_navigation is not None and self._navigation_status is not None:
+                # Later queue edits republish this status, not the navigation's.
+                self._navigation_status = {
+                    **self._navigation_status,
+                    "progress_ms": str(progress_ms),
+                    "duration_ms": str(duration_ms),
+                    "paused": paused,
+                }
             track_id = self.state.current_track_id
             if track_id is not None:
                 self._status_watermarks.append(
@@ -1390,6 +1398,8 @@ class YnisonClient:
                 if key == "status" and not self.state.status_is_relay:
                     # A relay keeps the anchor its position is extrapolated from.
                     self._remember_server_status(value)
+                    # A newer status supersedes the one our pending navigation sent.
+                    self._navigation_status = None
                 existing_ps[key] = value
             if (
                 self.state.current_item_navigated

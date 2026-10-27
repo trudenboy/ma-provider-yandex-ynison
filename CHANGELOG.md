@@ -11,7 +11,8 @@ All notable changes to this project will be documented in this file.
 - A skip to the next copy of the same track now starts from the beginning even
   when Yandex Music confirms it without a position, or when repeat or shuffle is
   changed before the confirmation, and a failed repeat or shuffle change no longer
-  cancels a pending skip.
+  cancels a pending skip. A pause or seek made right after such a skip is no longer
+  undone by the next queue change.
 
 ## [4.4.8] - 2026-10-27
 

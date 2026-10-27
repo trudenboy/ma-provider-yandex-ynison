@@ -3449,6 +3449,41 @@ class TestQueueCommands:
         sent = json.loads(self.mock_ws.send_str.call_args.args[0])
         assert sent["update_player_state"]["player_state"]["status"]["progress_ms"] == "0"
 
+    async def test_status_sent_before_navigation_echo_is_not_reverted(
+        self, client: YnisonClient
+    ) -> None:
+        """A pause sent while our navigation awaits its echo survives a later queue edit."""
+        assert await client.advance_queue(natural=False, duration_ms=200000) == "change"
+        assert await client.update_playing_status(30000, 200000, paused=True, strict=True)
+
+        await client.set_repeat_mode(RepeatMode.ALL)
+
+        sent = json.loads(self.mock_ws.send_str.call_args.args[0])
+        status = sent["update_player_state"]["player_state"]["status"]
+        assert (status["progress_ms"], status["paused"]) == ("30000", True)
+
+    async def test_peer_status_before_navigation_echo_is_kept(self, client: YnisonClient) -> None:
+        """A newer status from Ynison wins over the one our pending navigation sent."""
+        assert await client.advance_queue(natural=False, duration_ms=200000) == "change"
+        navigation_echo = self._sent_queue()
+        peer_version = {"device_id": "peer", "version": "9", "timestamp_ms": "0"}
+        client._parse_state(
+            {
+                "player_state": {
+                    "status": {
+                        "progress_ms": "50000",
+                        "duration_ms": "200000",
+                        "paused": False,
+                        "version": peer_version,
+                    }
+                }
+            }
+        )
+
+        client._parse_state({"player_state": {"player_queue": navigation_echo}})
+
+        assert client.state.progress_ms == 50000
+
     async def test_own_navigation_supersedes_an_earlier_baseline(
         self, client: YnisonClient
     ) -> None:
