@@ -12,6 +12,8 @@ All notable changes to this project will be documented in this file.
   the finished track play again.
 - Trimming a long RADIO queue no longer lets a repeated old position seek the
   playing track backwards.
+- A skip that could not be sent no longer restarts the playing track on the next
+  repeat, shuffle or RADIO queue change.
 
 ## [4.4.7] - 2026-10-27
 

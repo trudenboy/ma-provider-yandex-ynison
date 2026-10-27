@@ -3384,6 +3384,19 @@ class TestQueueCommands:
         assert client.state.current_item_navigated is True
         assert client.state.current_item_kept is False
 
+    async def test_failed_navigation_send_is_not_adopted_later(self, client: YnisonClient) -> None:
+        """Navigation that never reached Ynison does not turn a later own edit into a skip."""
+        self.mock_ws.send_str.side_effect = aiohttp.ClientError("down")
+        with pytest.raises(YnisonSendError):
+            await client.advance_queue(natural=True, duration_ms=9000)
+        self.mock_ws.send_str.side_effect = None
+        await client.set_repeat_mode(RepeatMode.ALL)
+
+        client._parse_state({"player_state": {"player_queue": self._sent_queue()}})
+
+        assert client.state.current_item_navigated is False
+        assert client.state.current_item_kept is True
+
     async def test_repeat_one_echo_is_not_navigation(self, client: YnisonClient) -> None:
         """Repeating the same item restarts it locally, so its echo is not a new occurrence."""
         client.state.player_state["player_queue"]["options"] = {"repeat_mode": "ONE"}

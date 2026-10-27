@@ -684,7 +684,11 @@ class YnisonClient:
                 self._navigation_version = int(queue["version"]["version"])
                 self._unadopted_navigation = self._navigation_version
             epoch = self._queue_epoch
-            await self._send_locked(self._player_state_message(player_state), strict=True)
+            try:
+                await self._send_locked(self._player_state_message(player_state), strict=True)
+            except YnisonSendError:
+                self._unadopted_navigation = None
+                raise
             if epoch != self._queue_epoch:
                 raise ResourceTemporarilyUnavailable("Ynison queue changed while command was sent")
             self._pending_queue = deepcopy(queue)
