@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.4.3] - 2026-10-27
+
+### Fixed
+
+- When another device replaces the queue while the connection is recovering at the
+  end of a track, the finished track is no longer reported against the new queue,
+  so its first track is not skipped.
+- A go-away from Yandex that arrives while a reconnect is already waiting now
+  delays that reconnect for the requested window instead of letting it connect
+  early.
+
 ## [4.4.2] - 2026-10-26
 
 ### Fixed
