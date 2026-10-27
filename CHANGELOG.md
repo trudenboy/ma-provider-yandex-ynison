@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.4.7] - 2026-10-27
+
+### Fixed
+
+- Skipping to the next copy of the same track in a queue and then changing repeat
+  or shuffle before Yandex Music confirms the skip now starts that track from the
+  beginning instead of continuing the previous position.
+
 ## [4.4.6] - 2026-10-27
 
 ### Fixed
