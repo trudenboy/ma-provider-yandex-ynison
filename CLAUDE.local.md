@@ -209,8 +209,9 @@ until its echo, peer replacement, disconnect/reconnect, or a 30-second timeout.
 Older own queue versions cannot overwrite a newer sent version. Server state
 remains authoritative; pending queue edits do not optimistically change status.
 Next/previous and terminal repeat/stop decisions use the mutation's queue base
-under the send lock. A navigation lock also orders RADIO fetches. Peer queue or
-active-device changes invalidate queued mutations; unchanged peer heartbeats do
+under the send lock. A navigation lock also orders RADIO fetches. Peer queue
+replacements or active-device changes invalidate queued mutations (a peer
+repeat/shuffle edit only replaces the queue base); unchanged peer heartbeats do
 not discard unacknowledged commands. RADIO API results and prefetch caches carry
 their originating queue generation and are discarded after replacement.
 Outgoing add/remove/move helpers are deferred until MA exposes an AudioSource API
@@ -253,11 +254,11 @@ Each rule names the test that enforces it.
 | Copy | Source of truth | Goes stale when | Re-checked |
 |------|-----------------|-----------------|------------|
 | `PlaybackSession` claim (owner, session id) | MA streams controller callbacks | a same-owner reconnect supersedes the request | `lost(token)` in the stream loop and its `finally` |
-| `PlaybackSession.track_id` / `index` | Ynison queue | a peer queue edit or our window trim | track-change detection; the client flags our own item-keeping echoes (`current_item_kept`) |
+| `PlaybackSession.track_id` / `index` | Ynison queue | a peer queue edit or our window trim | track-change detection; the client flags our own echoes as item-keeping (`current_item_kept`) or navigation (`current_item_navigated`) |
 | `PlaybackSession.progress_ms` | PCM bytes streamed | seek or restart | reset at each item start; `position_ms` prefers a pending start, else the client's `estimated_progress_ms` |
 | Client pending queue base | our last sent queue | echo, peer replacement, reconnect, 30 s | `queue_snapshot()`; queue epoch |
 | Client `StatusBaseline` | newest status received or sent | track change | `report_status` dedup; `status_is_relay` |
-| Navigation baseline | queue lineage, current item, our navigation version | a foreign queue (lineage) or the confirmed echo | `is_current_playback`; `navigation_confirmed` |
+| Navigation baseline | queue lineage, current item, our navigation version | a foreign queue other than a repeat/shuffle edit (lineage) or the confirmed echo | `is_current_playback`; `navigation_confirmed` |
 | RADIO prefetch cache | rotor API for one queue generation | peer queue replacement | generation check before use |
 
 ### Review checklist

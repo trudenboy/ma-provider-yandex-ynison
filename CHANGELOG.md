@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.4.8] - 2026-10-27
+
+### Fixed
+
+- Skipping from the end of a long RADIO queue to a repeated copy of the same track
+  now starts that track from the beginning instead of stopping playback.
+- Changing repeat or shuffle on another device while a track ends no longer makes
+  the finished track play again.
+- Trimming a long RADIO queue no longer lets a repeated old position seek the
+  playing track backwards.
+- A skip that could not be sent no longer restarts the playing track on the next
+  repeat, shuffle or RADIO queue change.
+
 ## [4.4.7] - 2026-10-27
 
 ### Fixed
