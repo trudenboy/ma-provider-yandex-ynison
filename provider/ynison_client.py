@@ -405,6 +405,7 @@ class YnisonClient:
         self._stop_event.clear()
         if self._external_session and self._external_session.closed:
             raise ResourceTemporarilyUnavailable("Provided http_session is closed")
+        # ma-allow: MA001 standalone fallback only; the provider always passes mass.http_session
         self._session = self._external_session or aiohttp.ClientSession()
 
         try:
@@ -1424,6 +1425,7 @@ class YnisonClient:
                             raise ResourceTemporarilyUnavailable(msg)  # noqa: TRY301 - handled by except below
                         self._session = self._external_session
                     else:
+                        # ma-allow: MA001 standalone fallback without mass.http_session
                         self._session = aiohttp.ClientSession()
 
                 host, ticket, session_id = await self._get_redirect_ticket()
