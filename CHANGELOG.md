@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.4.4] - 2026-10-27
+
+### Fixed
+
+- When another device replaces the queue while a track is finishing, playback
+  continues with the new queue instead of stopping.
+- Trimming a long RADIO queue no longer restarts the playing track if Yandex Music
+  sends another update before confirming the trimmed queue.
+- A position Yandex Music merely repeats no longer makes the plugin re-send its own
+  position unnecessarily.
+
 ## [4.4.3] - 2026-10-27
 
 ### Fixed
