@@ -253,10 +253,11 @@ Each rule names the test that enforces it.
 | Copy | Source of truth | Goes stale when | Re-checked |
 |------|-----------------|-----------------|------------|
 | `PlaybackSession` claim (owner, session id) | MA streams controller callbacks | a same-owner reconnect supersedes the request | `lost(token)` in the stream loop and its `finally` |
-| `PlaybackSession.track_id` / `index` | Ynison queue | a peer queue edit or our window trim | track-change detection; `publish_items` returns the trim shift |
-| `PlaybackSession.progress_ms` | PCM bytes streamed | seek or restart | reset at each item start |
+| `PlaybackSession.track_id` / `index` | Ynison queue | a peer queue edit or our window trim | track-change detection; the client flags our own item-keeping echoes (`current_item_kept`) |
+| `PlaybackSession.progress_ms` | PCM bytes streamed | seek or restart | reset at each item start; `position_ms` prefers a pending start, else the client's `estimated_progress_ms` |
 | Client pending queue base | our last sent queue | echo, peer replacement, reconnect, 30 s | `queue_snapshot()`; queue epoch |
-| Client status baseline | newest status received or sent | track change | `report_status` dedup; `status_is_relay` |
+| Client `StatusBaseline` | newest status received or sent | track change | `report_status` dedup; `status_is_relay` |
+| Navigation baseline | queue lineage, current item, our navigation version | a foreign queue (lineage) or the confirmed echo | `is_current_playback`; `navigation_confirmed` |
 | RADIO prefetch cache | rotor API for one queue generation | peer queue replacement | generation check before use |
 
 ### Review checklist
