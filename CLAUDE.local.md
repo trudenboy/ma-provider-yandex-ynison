@@ -262,7 +262,7 @@ Each rule names the test that enforces it.
 | `PlaybackSession.progress_ms` | PCM bytes streamed | seek or restart | reset at each item start; `position_ms` prefers a pending start, else the client's `estimated_progress_ms` |
 | Client pending queue base | our last sent queue | echo, peer replacement, reconnect, 30 s | `queue_snapshot()`; queue epoch |
 | Client `StatusBaseline` | newest status received or sent | track change | `report_status` dedup; `status_is_relay`; our status in an obsolete own echo is dropped with its queue |
-| Navigation baseline | queue lineage, current item, our navigation version | a foreign queue other than a repeat/shuffle edit (lineage) or the confirmed echo | `is_current_playback`; `navigation_confirmed` |
+| Navigation baseline | queue lineage, current item, our navigation version, peer status revision | a foreign queue other than a repeat/shuffle edit (lineage), a fresh peer status such as a seek, or the confirmed echo (an obsolete own echo confirms nothing) | `is_current_playback`; `navigation_confirmed` |
 | RADIO prefetch cache | rotor API for one queue generation | peer queue replacement | generation check before use |
 
 ### Review checklist
