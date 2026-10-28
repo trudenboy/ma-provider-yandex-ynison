@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.4.10] - 2026-10-28
+
+### Fixed
+
+- Pressing Next in the last moment of a track no longer skips the track after it.
+- Playback no longer stops when another device replaces the queue but keeps the
+  finished track current; that track resumes at the position Yandex Music reports.
+- A skip right after a repeat or shuffle change no longer starts the next track at
+  the old position when the earlier change is confirmed late.
+
 ## [4.4.9] - 2026-10-27
 
 ### Fixed

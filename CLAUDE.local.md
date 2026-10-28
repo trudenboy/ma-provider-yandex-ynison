@@ -219,8 +219,12 @@ for those controls. Incoming peer queue edits remain supported.
 
 Natural completion waits at most ten seconds for transport recovery and retries
 one failed queue publication. A changed queue, active device, or pause state
-invalidates the pending completion. RADIO decisions can return `False` from
-the mutation callback to fetch tracks without sending unchanged state.
+invalidates the pending completion. An item that ends while our own
+navigation awaits its echo does not advance again; it waits for that
+navigation. The wait for confirmation wakes on every state frame, and a peer
+queue that keeps the finished item resumes it at the Ynison position. RADIO
+decisions can return `False` from the mutation callback to fetch tracks without
+sending unchanged state.
 
 When a `RADIO` queue reaches its final two items, the provider prefetches
 rotor tracks through the linked Yandex Music provider. It maps returned tracks
@@ -257,7 +261,7 @@ Each rule names the test that enforces it.
 | `PlaybackSession.track_id` / `index` | Ynison queue | a peer queue edit or our window trim | track-change detection; the client flags our own echoes as item-keeping (`current_item_kept`) or navigation (`current_item_navigated`) |
 | `PlaybackSession.progress_ms` | PCM bytes streamed | seek or restart | reset at each item start; `position_ms` prefers a pending start, else the client's `estimated_progress_ms` |
 | Client pending queue base | our last sent queue | echo, peer replacement, reconnect, 30 s | `queue_snapshot()`; queue epoch |
-| Client `StatusBaseline` | newest status received or sent | track change | `report_status` dedup; `status_is_relay` |
+| Client `StatusBaseline` | newest status received or sent | track change | `report_status` dedup; `status_is_relay`; our status in an obsolete own echo is dropped with its queue |
 | Navigation baseline | queue lineage, current item, our navigation version | a foreign queue other than a repeat/shuffle edit (lineage) or the confirmed echo | `is_current_playback`; `navigation_confirmed` |
 | RADIO prefetch cache | rotor API for one queue generation | peer queue replacement | generation check before use |
 
