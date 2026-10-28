@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.4.11] - 2026-10-28
+
+### Fixed
+
+- A seek made in the Yandex Music app just as a track ends is no longer overridden
+  by a skip to the next track.
+- A skip followed quickly by a repeat or shuffle change no longer replays the start
+  of the finished track before the next one begins.
+- A track change or seek to the start is no longer replaced by an older position
+  that Music Assistant passes when playback starts.
+
 ## [4.4.10] - 2026-10-28
 
 ### Fixed
