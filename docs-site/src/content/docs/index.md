@@ -21,7 +21,7 @@ description: Документация провайдера Yandex Music Connect 
 
 
 
-Music Assistant поддерживает [Yandex Music Connect (Ynison)](https://music.yandex.ru) — плеер.
+Music Assistant поддерживает [Yandex Music Connect (Ynison)](https://music.yandex.ru) — плагин-провайдер.
 Провайдер создан и поддерживается [TrudenBoy](https://github.com/TrudenBoy).
 
 
