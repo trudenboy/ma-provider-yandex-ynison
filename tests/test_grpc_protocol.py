@@ -315,3 +315,50 @@ async def test_queue_inject_builds_the_protocol_message() -> None:
     request = to_request(json.dumps(message))
     assert request.WhichOneof("parameters") == "update_player_queue_inject"
     assert request.update_player_queue_inject.player_queue_inject.playable.playable_id == "ad-1"
+
+
+def test_wave_queue_fields_survive_the_bridge() -> None:
+    """New queue oneof and per-playable analytics fields are not normalized away."""
+    request = to_request(
+        json.dumps(
+            {
+                "update_player_state": {
+                    "player_state": {
+                        "player_queue": {
+                            "current_playable_index": 1,
+                            "playable_list": [
+                                {"playable_id": "a"},
+                                {
+                                    "playable_id": "b",
+                                    "track_info": {"batch_id_optional": "batch-1"},
+                                },
+                            ],
+                            "queue": {
+                                "wave_queue": {
+                                    "recommended_playable_list": [
+                                        {
+                                            "playable_id": "c",
+                                            "track_info": {"batch_id_optional": "b2"},
+                                        }
+                                    ],
+                                    "live_playable_index": 1,
+                                    "navigation_id_optional": "nav-1",
+                                    "playback_action_id_optional": "action-1",
+                                }
+                            },
+                        }
+                    }
+                },
+                "rid": "r",
+            }
+        )
+    )
+
+    queue = request.update_player_state.player_state.player_queue
+    assert queue.queue.WhichOneof("type") == "wave_queue"
+    wave = queue.queue.wave_queue
+    assert wave.live_playable_index == 1
+    assert wave.recommended_playable_list[0].playable_id == "c"
+    assert wave.recommended_playable_list[0].track_info.batch_id_optional.value == "b2"
+    assert wave.navigation_id_optional.value == "nav-1"
+    assert queue.playable_list[1].track_info.batch_id_optional.value == "batch-1"

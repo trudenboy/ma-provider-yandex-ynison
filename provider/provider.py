@@ -720,7 +720,7 @@ class YandexYnisonProvider(PluginProvider):
         if source_id != AUDIO_SOURCE_ID or self._ynison is None:
             return
         level = max(0, min(100, volume))
-        if level == self._last_volume_sent:
+        if level in (self._last_volume_sent, self._last_volume_applied):
             return
         try:
             if await self._ynison.update_volume_info(level):
@@ -1482,12 +1482,16 @@ class YandexYnisonProvider(PluginProvider):
             if self._player_volume(owner_id) == level:
                 self._last_volume_applied = level
                 return
+            previous_level = self._last_volume_applied
+            # Record before the command so the MA callback does not bounce the
+            # same level back to Ynison as a new local change.
+            self._last_volume_applied = level
             try:
                 await self.mass.players.cmd_volume_set(owner_id, level)
             except (PlayerCommandFailed, PlayerUnavailableError) as err:
+                self._last_volume_applied = previous_level
                 self.logger.debug("Failed to apply Ynison volume %d: %s", level, err)
                 return
-            self._last_volume_applied = level
             return
 
     def _idempotent(self, action: str, key: str | None) -> bool:
