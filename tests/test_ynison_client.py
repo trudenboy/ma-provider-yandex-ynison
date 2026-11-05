@@ -215,7 +215,10 @@ class TestYnisonClientBuildMethods:
 
     def test_device_registration_has_only_update_device_fields(self, client: YnisonClient) -> None:
         """Registration sends only fields the UpdateDevice message defines."""
-        assert set(client._build_device_dict()) == {"info", "capabilities"}
+        device = client._build_device_dict()
+        assert set(device) == {"info", "capabilities", "volume", "volume_info"}
+        assert device["capabilities"]["volume_granularity"] == 100
+        assert device["volume_info"]["volume"] == 0.0
 
     async def test_losing_activity_mutes_passive_events_again(self, client: YnisonClient) -> None:
         """The server clears mute_events_if_passive on activation, so it is re-sent on loss."""
@@ -3804,6 +3807,8 @@ class TestStatusBaseline:
     def test_unreadable_status_has_no_baseline(self) -> None:
         """A status with a non-numeric position cannot anchor deduplication."""
         assert StatusBaseline.from_status({"progress_ms": "x"}, anchor=0.0) is None
+
+
 # ------------------------------------------------------------------
 # Experimental gRPC transport
 # ------------------------------------------------------------------

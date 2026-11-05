@@ -21,7 +21,13 @@ class RedirectResponse(_message.Message):
     redirect_ticket: str
     session_id: int
     keep_alive_params: KeepAliveParams
-    def __init__(self, host: _Optional[str] = ..., redirect_ticket: _Optional[str] = ..., session_id: _Optional[int] = ..., keep_alive_params: _Optional[_Union[KeepAliveParams, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self,
+        host: _Optional[str] = ...,
+        redirect_ticket: _Optional[str] = ...,
+        session_id: _Optional[int] = ...,
+        keep_alive_params: _Optional[_Union[KeepAliveParams, _Mapping]] = ...,
+    ) -> None: ...
 
 class KeepAliveParams(_message.Message):
     __slots__ = ("keep_alive_time_seconds", "keep_alive_timeout_seconds")
@@ -29,4 +35,8 @@ class KeepAliveParams(_message.Message):
     KEEP_ALIVE_TIMEOUT_SECONDS_FIELD_NUMBER: _ClassVar[int]
     keep_alive_time_seconds: int
     keep_alive_timeout_seconds: int
-    def __init__(self, keep_alive_time_seconds: _Optional[int] = ..., keep_alive_timeout_seconds: _Optional[int] = ...) -> None: ...
+    def __init__(
+        self,
+        keep_alive_time_seconds: _Optional[int] = ...,
+        keep_alive_timeout_seconds: _Optional[int] = ...,
+    ) -> None: ...

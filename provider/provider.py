@@ -84,6 +84,7 @@ from .streaming import (
 from .ynison_client import (
     NavigationBaseline,
     YnisonClient,
+    YnisonDeviceCapabilities,
     YnisonDeviceInfo,
     YnisonSendError,
     YnisonState,
@@ -226,6 +227,9 @@ class YandexYnisonProvider(PluginProvider):
         self._yandex_provider: YandexMusicProviderLike | None = None
         # Source claim, stream cursor, restart and stop requests.
         self._playback = PlaybackSession()
+        # Last volume exchanged with Ynison, used to suppress feedback loops.
+        self._last_volume_sent: int | None = None
+        self._last_volume_applied: int | None = None
         self._last_player_update_time: float = 0.0
         self._prefetched_list: list[dict[str, Any]] | None = None
         self._prefetched_queue_generation: int | None = None
@@ -367,6 +371,8 @@ class YandexYnisonProvider(PluginProvider):
             on_auth_failure=self._refresh_ynison_token,
             transport=self._transport,
             accept_language=str(self.mass.metadata.locale).replace("_", "-"),
+            capabilities=YnisonDeviceCapabilities(volume_granularity=100),
+            volume=self._player_volume(self._default_player_id) or 0,
         )
 
         self._runner_task = self._spawn(self._ynison.connect())
@@ -691,6 +697,13 @@ class YandexYnisonProvider(PluginProvider):
         self._playback.claim(owner_player_id, player_id, stream_session_id)
         self.logger.debug("Active player set to: %s", player_id)
         self._publish_source_options(owner_player_id)
+        owner_volume = self._player_volume(owner_player_id)
+        if (
+            self._ynison is not None
+            and owner_volume is not None
+            and await self._ynison.update_volume_info(owner_volume)
+        ):
+            self._last_volume_sent = owner_volume
 
     async def on_source_unselected(
         self, source_id: str, owner_player_id: str, stream_session_id: str
@@ -701,6 +714,19 @@ class YandexYnisonProvider(PluginProvider):
         # Only this request's own teardown releases the claim: a same-player
         # reconnect may deliver the old request's callback after the new one.
         self._playback.release(owner_player_id, stream_session_id)
+
+    async def on_volume_change(self, source_id: str, volume: int) -> None:
+        """Forward a player volume change to the Ynison device slider."""
+        if source_id != AUDIO_SOURCE_ID or self._ynison is None:
+            return
+        level = max(0, min(100, volume))
+        if level == self._last_volume_sent:
+            return
+        try:
+            if await self._ynison.update_volume_info(level):
+                self._last_volume_sent = level
+        except YnisonSendError:
+            self.logger.debug("Failed to publish Ynison volume %d", level, exc_info=True)
 
     async def _wait_for_track_change(
         self,
@@ -1122,6 +1148,8 @@ class YandexYnisonProvider(PluginProvider):
             )
             return
 
+        await self._apply_device_volume(state, is_our_device)
+
         if is_our_device and not state.is_paused:
             self._remember_and_publish_source_options(queue)
             self.logger.info(
@@ -1423,6 +1451,44 @@ class YandexYnisonProvider(PluginProvider):
             self._default_player_id,
         )
         return None
+
+    def _player_volume(self, player_id: str | None) -> int | None:
+        """Return a player volume level (0..100), when the player exposes one."""
+        if not player_id or (player := self.mass.players.get_player(player_id)) is None:
+            return None
+        volume = player.volume_level
+        return int(volume) if volume is not None else None
+
+    async def _apply_device_volume(self, state: YnisonState, is_our_device: bool) -> None:
+        """Apply a peer-authored volume change for this Ynison device to MA."""
+        if not is_our_device:
+            return
+        for device in state.devices:
+            info = device.get("info")
+            if not isinstance(info, dict) or info.get("device_id") != self._device_id:
+                continue
+            volume_info = device.get("volume_info")
+            if not isinstance(volume_info, dict):
+                return
+            raw_level = volume_info.get("volume")
+            if not isinstance(raw_level, (int, float)) or isinstance(raw_level, bool):
+                return
+            level = max(0, min(100, round(float(raw_level) * 100)))
+            if level in (self._last_volume_sent, self._last_volume_applied):
+                return
+            owner_id = self._playback.owner_player_id or self._get_target_player_id()
+            if not owner_id:
+                return
+            if self._player_volume(owner_id) == level:
+                self._last_volume_applied = level
+                return
+            try:
+                await self.mass.players.cmd_volume_set(owner_id, level)
+            except (PlayerCommandFailed, PlayerUnavailableError) as err:
+                self.logger.debug("Failed to apply Ynison volume %d: %s", level, err)
+                return
+            self._last_volume_applied = level
+            return
 
     def _idempotent(self, action: str, key: str | None) -> bool:
         """

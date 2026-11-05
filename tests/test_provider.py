@@ -5326,3 +5326,58 @@ class TestStableOnlySource:
         )
         assert not hasattr(provider, "_dynamic_task")
         assert provider._normalized_format.content_type == ContentType.PCM_S16LE
+
+
+class TestVolumeSync:
+    """Yandex Music volume is forwarded through Ynison in both directions."""
+
+    async def test_local_volume_change_publishes_update_volume_info(self) -> None:
+        """A player volume change updates this device's Ynison slider."""
+        provider = _make_provider()
+        provider._ynison = MagicMock()
+        provider._ynison.update_volume_info = AsyncMock(return_value=True)
+
+        await provider.on_volume_change(AUDIO_SOURCE_ID, 37)
+
+        provider._ynison.update_volume_info.assert_awaited_once_with(37)
+        assert provider._last_volume_sent == 37
+
+    async def test_peer_volume_applies_to_the_owner_player(self) -> None:
+        """A volume authored by another device reaches the streaming player."""
+        provider = _make_provider()
+        provider._playback.owner_player_id = "player1"
+        player = MagicMock()
+        player.volume_level = 20
+        provider.mass.players.get_player.return_value = player
+        state = YnisonState(
+            active_device_id=provider._device_id,
+            devices=[
+                {
+                    "info": {"device_id": provider._device_id},
+                    "volume_info": {"volume": 0.7},
+                }
+            ],
+        )
+
+        await provider._apply_device_volume(state, True)
+
+        provider.mass.players.cmd_volume_set.assert_awaited_once_with("player1", 70)
+
+    async def test_own_volume_echo_is_not_applied_again(self) -> None:
+        """The server echo of our own volume does not trigger a second player command."""
+        provider = _make_provider()
+        provider._playback.owner_player_id = "player1"
+        provider._last_volume_sent = 70
+        state = YnisonState(
+            active_device_id=provider._device_id,
+            devices=[
+                {
+                    "info": {"device_id": provider._device_id},
+                    "volume_info": {"volume": 0.7},
+                }
+            ],
+        )
+
+        await provider._apply_device_volume(state, True)
+
+        provider.mass.players.cmd_volume_set.assert_not_awaited()

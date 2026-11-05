@@ -11,8 +11,12 @@ from music_assistant_models.enums import RepeatMode
 from provider.queue_model import (
     QUEUE_WINDOW,
     YnisonQueueView,
+    add_last,
+    add_next,
+    move,
     plan_navigation,
     radio_items,
+    remove_at,
     repeat_from_ynison,
     replace_items,
     set_index,
@@ -278,3 +282,86 @@ def test_radio_items_map_tracks_to_playables() -> None:
             "cover_url_optional": "",
         },
     ]
+
+
+def _edit_state() -> dict[str, Any]:
+    return {
+        "player_queue": {
+            "current_playable_index": 1,
+            "playable_list": [
+                {"playable_id": "A"},
+                {"playable_id": "B"},
+                {"playable_id": "C"},
+            ],
+            "shuffle_optional": {"playable_indices": [2, 1, 0]},
+        }
+    }
+
+
+def test_add_next_inserts_after_current_in_playback_order() -> None:
+    """AddNext keeps the current item and queues the new items next."""
+    state = _edit_state()
+    add_next(state, [{"playable_id": "X"}, {"playable_id": "Y"}])
+
+    queue = state["player_queue"]
+    assert [item["playable_id"] for item in queue["playable_list"]] == [
+        "A",
+        "B",
+        "X",
+        "Y",
+        "C",
+    ]
+    assert queue["current_playable_index"] == 1
+    order = queue["shuffle_optional"]["playable_indices"]
+    assert order[order.index(1) + 1 : order.index(1) + 3] == [2, 3]
+
+
+def test_add_last_appends_and_extends_shuffle() -> None:
+    """AddLast appends to both the playable list and the shuffle mapping."""
+    state = _edit_state()
+    add_last(state, [{"playable_id": "X"}])
+
+    queue = state["player_queue"]
+    assert [item["playable_id"] for item in queue["playable_list"]][-1] == "X"
+    assert queue["shuffle_optional"]["playable_indices"][-1] == 3
+
+
+def test_remove_at_shifts_current_and_shuffle() -> None:
+    """Removing before the current item keeps the same playing item."""
+    state = _edit_state()
+    remove_at(state, 0)
+
+    queue = state["player_queue"]
+    assert [item["playable_id"] for item in queue["playable_list"]] == ["B", "C"]
+    assert queue["current_playable_index"] == 0
+    assert queue["shuffle_optional"]["playable_indices"] == [1, 0]
+
+
+def test_remove_current_selects_the_next_item() -> None:
+    """Removing the current item leaves its index on the following item."""
+    state = _edit_state()
+    remove_at(state, 1)
+
+    assert state["player_queue"]["current_playable_index"] == 1
+    assert [item["playable_id"] for item in state["player_queue"]["playable_list"]] == ["A", "C"]
+
+
+def test_move_updates_current_and_shuffle_order() -> None:
+    """Moving the current item follows it and rewrites the shuffle mapping."""
+    state = _edit_state()
+    move(state, 1, 2)
+
+    queue = state["player_queue"]
+    assert [item["playable_id"] for item in queue["playable_list"]] == ["A", "C", "B"]
+    assert queue["current_playable_index"] == 2
+    # Moving an item changes original indices; the current item keeps its
+    # logical position in the shuffle order so playback is not interrupted.
+    order = queue["shuffle_optional"]["playable_indices"]
+    assert order == [1, 2, 0]
+    assert order.index(queue["current_playable_index"]) == 1
+
+
+def test_remove_at_rejects_out_of_range() -> None:
+    """An out-of-range queue position is a caller error, not silent corruption."""
+    with pytest.raises(IndexError):
+        remove_at(_edit_state(), 5)

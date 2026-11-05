@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.5.0] - 2026-11-05
+
+### Added
+
+- An experimental native gRPC transport for Ynison, selectable in the advanced
+  provider settings; WebSocket remains the default. It speaks the same device
+  and queue protocol as the official Android application.
+- Volume synchronization over Ynison: the device advertises a 100-step volume
+  slider, changes made in Music Assistant reach Yandex Music, and volume changes
+  made from the Yandex Music app reach the streaming player.
+
+### Changed
+
+- Device registration now advertises playback capabilities, volume granularity
+  and the current volume, and a full-state update can report that this device is
+  playing.
+- The native gRPC client covers every request type in the Ynison schema,
+  including queue injection, EOV synchronization and response device/session
+  parsing.
+
 ## [4.4.11] - 2026-10-28
 
 ### Fixed

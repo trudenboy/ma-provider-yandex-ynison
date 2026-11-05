@@ -15,4 +15,9 @@ class YnisonDeviceInfoHeader(_message.Message):
     type: _device_type_pb2.DeviceType
     app_name: str
     app_version: str
-    def __init__(self, type: _Optional[_Union[_device_type_pb2.DeviceType, str]] = ..., app_name: _Optional[str] = ..., app_version: _Optional[str] = ...) -> None: ...
+    def __init__(
+        self,
+        type: _Optional[_Union[_device_type_pb2.DeviceType, str]] = ...,
+        app_name: _Optional[str] = ...,
+        app_version: _Optional[str] = ...,
+    ) -> None: ...

@@ -23,7 +23,15 @@ class Device(_message.Message):
     session: Session
     is_offline: bool
     volume_info: DeviceVolume
-    def __init__(self, info: _Optional[_Union[DeviceInfo, _Mapping]] = ..., volume: _Optional[float] = ..., capabilities: _Optional[_Union[DeviceCapabilities, _Mapping]] = ..., session: _Optional[_Union[Session, _Mapping]] = ..., is_offline: bool = ..., volume_info: _Optional[_Union[DeviceVolume, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self,
+        info: _Optional[_Union[DeviceInfo, _Mapping]] = ...,
+        volume: _Optional[float] = ...,
+        capabilities: _Optional[_Union[DeviceCapabilities, _Mapping]] = ...,
+        session: _Optional[_Union[Session, _Mapping]] = ...,
+        is_offline: bool = ...,
+        volume_info: _Optional[_Union[DeviceVolume, _Mapping]] = ...,
+    ) -> None: ...
 
 class DeviceVolume(_message.Message):
     __slots__ = ("volume", "version")
@@ -31,7 +39,11 @@ class DeviceVolume(_message.Message):
     VERSION_FIELD_NUMBER: _ClassVar[int]
     volume: float
     version: _update_version_pb2.UpdateVersion
-    def __init__(self, volume: _Optional[float] = ..., version: _Optional[_Union[_update_version_pb2.UpdateVersion, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self,
+        volume: _Optional[float] = ...,
+        version: _Optional[_Union[_update_version_pb2.UpdateVersion, _Mapping]] = ...,
+    ) -> None: ...
 
 class DeviceInfo(_message.Message):
     __slots__ = ("device_id", "title", "type", "app_name", "app_version")
@@ -45,7 +57,14 @@ class DeviceInfo(_message.Message):
     type: _device_type_pb2.DeviceType
     app_name: str
     app_version: str
-    def __init__(self, device_id: _Optional[str] = ..., title: _Optional[str] = ..., type: _Optional[_Union[_device_type_pb2.DeviceType, str]] = ..., app_name: _Optional[str] = ..., app_version: _Optional[str] = ...) -> None: ...
+    def __init__(
+        self,
+        device_id: _Optional[str] = ...,
+        title: _Optional[str] = ...,
+        type: _Optional[_Union[_device_type_pb2.DeviceType, str]] = ...,
+        app_name: _Optional[str] = ...,
+        app_version: _Optional[str] = ...,
+    ) -> None: ...
 
 class DeviceCapabilities(_message.Message):
     __slots__ = ("can_be_player", "can_be_remote_controller", "volume_granularity")
@@ -55,7 +74,12 @@ class DeviceCapabilities(_message.Message):
     can_be_player: bool
     can_be_remote_controller: bool
     volume_granularity: int
-    def __init__(self, can_be_player: bool = ..., can_be_remote_controller: bool = ..., volume_granularity: _Optional[int] = ...) -> None: ...
+    def __init__(
+        self,
+        can_be_player: bool = ...,
+        can_be_remote_controller: bool = ...,
+        volume_granularity: _Optional[int] = ...,
+    ) -> None: ...
 
 class Session(_message.Message):
     __slots__ = ("id",)

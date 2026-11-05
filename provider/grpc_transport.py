@@ -133,16 +133,23 @@ def to_json(message: Message) -> str:
     )
 
 
-async def redirect(metadata: list[tuple[str, str]]) -> dict[str, Any]:
+async def redirect(
+    metadata: list[tuple[str, str]],
+    *,
+    target: str = GRPC_ENDPOINT,
+    secure: bool = True,
+) -> dict[str, Any]:
     """
     Ask the redirector which state host serves this account.
 
     :param metadata: Call metadata from :func:`build_metadata`.
+    :param target: Redirector target, normally :data:`GRPC_ENDPOINT`.
+    :param secure: Use TLS; ``False`` is only for local test servers.
     :return: Redirect response in the WebSocket gateway's JSON shape.
     :raises LoginFailed: When the token is rejected.
     :raises YnisonRejectedError: When the server answers with another error.
     """
-    async with grpc.aio.secure_channel(GRPC_ENDPOINT, grpc.ssl_channel_credentials()) as channel:
+    async with _open_channel(target, secure=secure) as channel:
         call = channel.unary_unary(
             _REDIRECT_METHOD,
             request_serializer=redirector_pb2.RedirectRequest.SerializeToString,
@@ -169,17 +176,26 @@ class GrpcStateSocket:
     an ``error`` object, and finally a close frame.
     """
 
-    def __init__(self, host: str, metadata: list[tuple[str, str]], *, keepalive_s: float) -> None:
+    def __init__(
+        self,
+        host: str,
+        metadata: list[tuple[str, str]],
+        *,
+        keepalive_s: float,
+        secure: bool = True,
+    ) -> None:
         """
         Prepare a state stream.
 
         :param host: State host from the redirector.
         :param metadata: Call metadata including the redirect ticket.
         :param keepalive_s: Keep-alive ping interval in seconds, or 0 for the default.
+        :param secure: Use TLS; ``False`` is only for local test servers.
         """
         self._target = host if ":" in host else f"{host}:443"
         self._metadata = metadata
         self._keepalive_s = keepalive_s
+        self._secure = secure
         self._outbox: asyncio.Queue[ynison_state_pb2.PutYnisonStateRequest | None] = asyncio.Queue()
         self._channel: grpc.aio.Channel | None = None
         self._call: Any = None
@@ -193,15 +209,17 @@ class GrpcStateSocket:
 
     async def open(self) -> None:
         """Open the bidirectional state stream."""
-        options: list[tuple[str, Any]] = [("grpc.max_receive_message_length", -1)]
+        options: list[tuple[str, Any]] = [
+            ("grpc.max_receive_message_length", -1),
+            ("grpc.max_send_message_length", -1),
+        ]
         if self._keepalive_s:
             options += [
                 ("grpc.keepalive_time_ms", int(self._keepalive_s * 1000)),
+                ("grpc.keepalive_timeout_ms", int(self._keepalive_s * 1000)),
                 ("grpc.keepalive_permit_without_calls", 1),
             ]
-        self._channel = grpc.aio.secure_channel(
-            self._target, grpc.ssl_channel_credentials(), options=options
-        )
+        self._channel = _open_channel(self._target, secure=self._secure, options=options)
         stream = self._channel.stream_stream(
             _STATE_METHOD,
             request_serializer=ynison_state_pb2.PutYnisonStateRequest.SerializeToString,
@@ -253,3 +271,15 @@ class GrpcStateSocket:
         """Feed queued requests to the call until the stream is closed."""
         while (request := await self._outbox.get()) is not None:
             yield request
+
+
+def _open_channel(
+    target: str,
+    *,
+    secure: bool,
+    options: list[tuple[str, Any]] | None = None,
+) -> grpc.aio.Channel:
+    """Open a TLS channel for Ynison, or an insecure one for local tests."""
+    if secure:
+        return grpc.aio.secure_channel(target, grpc.ssl_channel_credentials(), options=options)
+    return grpc.aio.insecure_channel(target, options=options)

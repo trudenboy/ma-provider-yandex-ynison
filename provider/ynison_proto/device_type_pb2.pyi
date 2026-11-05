@@ -18,6 +18,7 @@ class DeviceType(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     APPLE_TV: _ClassVar[DeviceType]
     ANDROID_WEAR: _ClassVar[DeviceType]
     WEB_DESKTOP: _ClassVar[DeviceType]
+
 UNSPECIFIED: DeviceType
 WEB: DeviceType
 ANDROID: DeviceType

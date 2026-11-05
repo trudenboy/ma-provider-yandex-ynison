@@ -82,6 +82,8 @@ per-track ffmpeg → session-fixed PCM → Music Assistant player
 | `provider/reconnect_policy.py` | Pure reconnect timing: ladders, go-away, retryable statuses, idle retry |
 | `provider/queue_model.py` | Pure queue view and edits: navigation, index moves, appends with the 200-item window, repeat, shuffle |
 | `provider/ynison_client.py` | Ynison transport, state parsing, echo/relay classification, status reporter, queue commands, strict sends |
+| `provider/grpc_transport.py` | Native gRPC redirect/state transport, metadata, protobuf-JSON bridge |
+| `provider/ynison_proto/` | Generated schema for the Ynison services and messages |
 | `provider/streaming.py` | PCM profiles, probe arguments, and fresh format factory |
 | `provider/protocols.py` | Structural subset required from `yandex_music` |
 | `provider/constants.py` | URLs, keys, defaults, timeouts, and protocol errors |
@@ -173,7 +175,7 @@ track is never advanced accidentally.
 
 ## Ynison transport and recovery
 
-The transport performs:
+The default transport performs:
 
 1. redirector WebSocket authentication;
 2. ticket/session extraction;
@@ -181,6 +183,25 @@ The transport performs:
 4. fresh device/full-state registration;
 5. passive-event muting request;
 6. message-loop state dispatch.
+
+The experimental native transport performs the same sequence through gRPC:
+`GetRedirectToYnison` on `ynison.music.yandex.net:443` followed by the bidi
+`PutYnisonState` stream. `GrpcStateSocket` presents that stream like the aiohttp
+WebSocket, so the message loop, echo detection, reconnect policy and queue code
+stay transport-agnostic. The client carries `Ynison-Device-Info` (base64
+device header), device id, redirect ticket and session id as call metadata.
+The official schema ships in `provider/ynison_proto/`; every
+`PutYnisonStateRequest` oneof variant is supported, including full state,
+active device, status, player state, volume, queue injection, session params,
+volume info and EOV sync. `UpdateFullState` carries the device capabilities,
+volume info, active flag and an optional EOV request. Device registration
+advertises a 100-step volume slider; `UpdateVolumeInfo` is sent for local
+volume changes and peer volume is applied once with an echo guard. WebSocket
+remains the default; the transport is an advanced setting.
+
+Yandex currently rejects the service for this account with `500140000` and a
+`go-away` window over both transports, so live verification is external-blocked.
+The native transport must honour that window exactly like the WebSocket one.
 
 Reconnect timing lives in `ReconnectPolicy` and follows the official client:
 1, 5 and 30 second delays without jitter, or the server's `ynison-backoff-millis`
@@ -214,7 +235,8 @@ replacements or active-device changes invalidate queued mutations (a peer
 repeat/shuffle edit only replaces the queue base); unchanged peer heartbeats do
 not discard unacknowledged commands. RADIO API results and prefetch caches carry
 their originating queue generation and are discarded after replacement.
-Outgoing add/remove/move helpers are deferred until MA exposes an AudioSource API
+The client implements outgoing add-next, add-last, remove-at and move queue
+commands; the provider does not expose them until MA offers an AudioSource API
 for those controls. Incoming peer queue edits remain supported.
 
 Natural completion waits at most ten seconds for transport recovery and retries

@@ -219,6 +219,126 @@ def replace_items(player_state: dict[str, Any], items: list[dict[str, Any]]) -> 
     return dropped
 
 
+def add_next(player_state: dict[str, Any], playables: Sequence[dict[str, Any]]) -> None:
+    """
+    Insert playables directly after the current item.
+
+    :param player_state: Complete player state to edit in place.
+    :param playables: Playable objects to insert.
+    """
+    _insert_playables(player_state, playables, after_current=True)
+
+
+def add_last(player_state: dict[str, Any], playables: Sequence[dict[str, Any]]) -> None:
+    """
+    Append playables to the end of the queue.
+
+    :param player_state: Complete player state to edit in place.
+    :param playables: Playable objects to append.
+    """
+    _insert_playables(player_state, playables, after_current=False)
+
+
+def remove_at(player_state: dict[str, Any], position: int) -> None:
+    """
+    Remove one playable and keep the current item valid.
+
+    :param player_state: Complete player state to edit in place.
+    :param position: Original-list index to remove.
+    :raises IndexError: When the position is outside the playable list.
+    """
+    queue = dict(player_state["player_queue"])
+    playables = list(queue.get("playable_list") or [])
+    if position < 0 or position >= len(playables):
+        raise IndexError("Ynison queue position out of range")
+    playables.pop(position)
+    queue["playable_list"] = playables
+    current = queue.get("current_playable_index", -1)
+    if isinstance(current, int) and not isinstance(current, bool):
+        if current == position:
+            current = min(position, len(playables) - 1)
+        elif current > position:
+            current -= 1
+        queue["current_playable_index"] = current
+    shuffle = queue.get("shuffle_optional")
+    if isinstance(shuffle, dict) and isinstance(shuffle.get("playable_indices"), list):
+        order = [index for index in shuffle["playable_indices"] if index != position]
+        queue["shuffle_optional"] = {
+            "playable_indices": [index - 1 if index > position else index for index in order]
+        }
+    player_state["player_queue"] = queue
+
+
+def move(player_state: dict[str, Any], source: int, destination: int) -> None:
+    """
+    Move one playable to another original-list position.
+
+    :param player_state: Complete player state to edit in place.
+    :param source: Original-list index to move.
+    :param destination: Target index in the resulting playable list.
+    :raises IndexError: When the source position is outside the playable list.
+    """
+    queue = dict(player_state["player_queue"])
+    playables = list(queue.get("playable_list") or [])
+    if source < 0 or source >= len(playables):
+        raise IndexError("Ynison queue source position out of range")
+    destination = max(0, min(destination, len(playables) - 1))
+    item = playables.pop(source)
+    playables.insert(destination, item)
+    queue["playable_list"] = playables
+    current = queue.get("current_playable_index", -1)
+    if isinstance(current, int) and not isinstance(current, bool):
+        if current == source:
+            current = destination
+        elif source < current <= destination:
+            current -= 1
+        elif destination <= current < source:
+            current += 1
+        queue["current_playable_index"] = current
+    shuffle = queue.get("shuffle_optional")
+    if isinstance(shuffle, dict) and isinstance(shuffle.get("playable_indices"), list):
+        order = list(shuffle["playable_indices"])
+        if source in order:
+            order.remove(source)
+            if destination in order:
+                order.insert(order.index(destination), source)
+            elif playables:
+                order.append(source)
+        queue["shuffle_optional"] = {"playable_indices": order}
+    player_state["player_queue"] = queue
+
+
+def _insert_playables(
+    player_state: dict[str, Any],
+    playables: Sequence[dict[str, Any]],
+    *,
+    after_current: bool,
+) -> None:
+    """Insert playables into the legacy queue and update its shuffle mapping."""
+    if not playables:
+        return
+    queue = dict(player_state["player_queue"])
+    items = list(queue.get("playable_list") or [])
+    current = queue.get("current_playable_index", -1)
+    position = (
+        current + 1 if after_current and isinstance(current, int) and current >= 0 else len(items)
+    )
+    items[position:position] = list(playables)
+    queue["playable_list"] = items
+    shuffle = queue.get("shuffle_optional")
+    if isinstance(shuffle, dict) and isinstance(shuffle.get("playable_indices"), list):
+        order = list(shuffle["playable_indices"])
+        shifted = [index + len(playables) if index >= position else index for index in order]
+        inserted = list(range(position, position + len(playables)))
+        if after_current and current in order:
+            insert_at = shifted.index(current) + 1
+            shifted = [*shifted[:insert_at], *inserted, *shifted[insert_at:]]
+        else:
+            shifted = [*shifted, *inserted]
+        queue["shuffle_optional"] = {"playable_indices": shifted}
+    player_state["player_queue"] = queue
+
+
 def set_repeat(player_state: dict[str, Any], mode: RepeatMode) -> None:
     """
     Publish a Music Assistant repeat mode in a player state.

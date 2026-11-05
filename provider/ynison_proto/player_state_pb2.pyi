@@ -18,4 +18,11 @@ class PlayerState(_message.Message):
     status: _playing_status_pb2.PlayingStatus
     player_queue: _queue_pb2.PlayerQueue
     player_queue_inject_optional: _player_queue_inject_pb2.PlayerQueueInject
-    def __init__(self, status: _Optional[_Union[_playing_status_pb2.PlayingStatus, _Mapping]] = ..., player_queue: _Optional[_Union[_queue_pb2.PlayerQueue, _Mapping]] = ..., player_queue_inject_optional: _Optional[_Union[_player_queue_inject_pb2.PlayerQueueInject, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self,
+        status: _Optional[_Union[_playing_status_pb2.PlayingStatus, _Mapping]] = ...,
+        player_queue: _Optional[_Union[_queue_pb2.PlayerQueue, _Mapping]] = ...,
+        player_queue_inject_optional: _Optional[
+            _Union[_player_queue_inject_pb2.PlayerQueueInject, _Mapping]
+        ] = ...,
+    ) -> None: ...

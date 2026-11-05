@@ -10,7 +10,17 @@ from typing import ClassVar as _ClassVar, Optional as _Optional, Union as _Union
 DESCRIPTOR: _descriptor.FileDescriptor
 
 class Playable(_message.Message):
-    __slots__ = ("playable_id", "album_id_optional", "playable_type", "title", "cover_url_optional", "video_clip_info", "track_info", "navigation_id_optional", "playback_action_id_optional")
+    __slots__ = (
+        "playable_id",
+        "album_id_optional",
+        "playable_type",
+        "title",
+        "cover_url_optional",
+        "video_clip_info",
+        "track_info",
+        "navigation_id_optional",
+        "playback_action_id_optional",
+    )
     class PlayableType(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
         __slots__ = ()
         UNSPECIFIED: _ClassVar[Playable.PlayableType]
@@ -18,6 +28,7 @@ class Playable(_message.Message):
         LOCAL_TRACK: _ClassVar[Playable.PlayableType]
         INFINITE: _ClassVar[Playable.PlayableType]
         VIDEO_CLIP: _ClassVar[Playable.PlayableType]
+
     UNSPECIFIED: Playable.PlayableType
     TRACK: Playable.PlayableType
     LOCAL_TRACK: Playable.PlayableType
@@ -42,7 +53,19 @@ class Playable(_message.Message):
     track_info: TrackInfo
     navigation_id_optional: _wrappers_pb2.StringValue
     playback_action_id_optional: _wrappers_pb2.StringValue
-    def __init__(self, playable_id: _Optional[str] = ..., album_id_optional: _Optional[_Union[_wrappers_pb2.StringValue, _Mapping]] = ..., playable_type: _Optional[_Union[Playable.PlayableType, str]] = ..., title: _Optional[str] = ..., cover_url_optional: _Optional[_Union[_wrappers_pb2.StringValue, _Mapping]] = ..., video_clip_info: _Optional[_Union[VideoClipInfo, _Mapping]] = ..., track_info: _Optional[_Union[TrackInfo, _Mapping]] = ..., navigation_id_optional: _Optional[_Union[_wrappers_pb2.StringValue, _Mapping]] = ..., playback_action_id_optional: _Optional[_Union[_wrappers_pb2.StringValue, _Mapping]] = ..., **kwargs) -> None: ...
+    def __init__(
+        self,
+        playable_id: _Optional[str] = ...,
+        album_id_optional: _Optional[_Union[_wrappers_pb2.StringValue, _Mapping]] = ...,
+        playable_type: _Optional[_Union[Playable.PlayableType, str]] = ...,
+        title: _Optional[str] = ...,
+        cover_url_optional: _Optional[_Union[_wrappers_pb2.StringValue, _Mapping]] = ...,
+        video_clip_info: _Optional[_Union[VideoClipInfo, _Mapping]] = ...,
+        track_info: _Optional[_Union[TrackInfo, _Mapping]] = ...,
+        navigation_id_optional: _Optional[_Union[_wrappers_pb2.StringValue, _Mapping]] = ...,
+        playback_action_id_optional: _Optional[_Union[_wrappers_pb2.StringValue, _Mapping]] = ...,
+        **kwargs,
+    ) -> None: ...
 
 class VideoClipInfo(_message.Message):
     __slots__ = ("recommendation_type",)
@@ -55,6 +78,7 @@ class VideoClipInfo(_message.Message):
         ARTIST: _ClassVar[VideoClipInfo.RecommendationType]
         OWN: _ClassVar[VideoClipInfo.RecommendationType]
         EDITORIAL_CHOICE: _ClassVar[VideoClipInfo.RecommendationType]
+
     UNSPECIFIED: VideoClipInfo.RecommendationType
     RECOMMENDED: VideoClipInfo.RecommendationType
     ON_DEMAND: VideoClipInfo.RecommendationType
@@ -64,7 +88,9 @@ class VideoClipInfo(_message.Message):
     EDITORIAL_CHOICE: VideoClipInfo.RecommendationType
     RECOMMENDATION_TYPE_FIELD_NUMBER: _ClassVar[int]
     recommendation_type: VideoClipInfo.RecommendationType
-    def __init__(self, recommendation_type: _Optional[_Union[VideoClipInfo.RecommendationType, str]] = ...) -> None: ...
+    def __init__(
+        self, recommendation_type: _Optional[_Union[VideoClipInfo.RecommendationType, str]] = ...
+    ) -> None: ...
 
 class TrackInfo(_message.Message):
     __slots__ = ("track_source_key", "batch_id_optional")
@@ -72,4 +98,8 @@ class TrackInfo(_message.Message):
     BATCH_ID_OPTIONAL_FIELD_NUMBER: _ClassVar[int]
     track_source_key: int
     batch_id_optional: _wrappers_pb2.StringValue
-    def __init__(self, track_source_key: _Optional[int] = ..., batch_id_optional: _Optional[_Union[_wrappers_pb2.StringValue, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self,
+        track_source_key: _Optional[int] = ...,
+        batch_id_optional: _Optional[_Union[_wrappers_pb2.StringValue, _Mapping]] = ...,
+    ) -> None: ...

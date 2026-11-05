@@ -20,4 +20,11 @@ class PlayingStatus(_message.Message):
     paused: bool
     playback_speed: float
     version: _update_version_pb2.UpdateVersion
-    def __init__(self, progress_ms: _Optional[int] = ..., duration_ms: _Optional[int] = ..., paused: bool = ..., playback_speed: _Optional[float] = ..., version: _Optional[_Union[_update_version_pb2.UpdateVersion, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self,
+        progress_ms: _Optional[int] = ...,
+        duration_ms: _Optional[int] = ...,
+        paused: bool = ...,
+        playback_speed: _Optional[float] = ...,
+        version: _Optional[_Union[_update_version_pb2.UpdateVersion, _Mapping]] = ...,
+    ) -> None: ...

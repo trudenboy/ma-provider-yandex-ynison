@@ -49,8 +49,12 @@ from .constants import (
 from .grpc_transport import GrpcStateSocket, YnisonRejectedError, build_metadata, redirect
 from .queue_model import (
     NavigationOutcome,
+    add_last,
+    add_next,
     make_version_block,
+    move,
     plan_navigation,
+    remove_at,
     replace_items,
     set_index,
     set_repeat,
@@ -153,6 +157,16 @@ class YnisonDeviceInfo:
     type: str = DEVICE_TYPE_WEB
     app_name: str = DEFAULT_APP_NAME
     app_version: str = DEFAULT_APP_VERSION
+
+
+@dataclass(frozen=True)
+class YnisonDeviceCapabilities:
+    """Capabilities advertised by this Ynison device."""
+
+    can_be_player: bool = True
+    can_be_remote_controller: bool = False
+    # Number of steps on the volume slider exposed to remote devices.
+    volume_granularity: int = 100
 
 
 @dataclass(frozen=True)
@@ -345,6 +359,8 @@ class YnisonClient:
         on_auth_failure: AuthRefreshCallback | None = None,
         transport: str = TRANSPORT_WEBSOCKET,
         accept_language: str = "en",
+        capabilities: YnisonDeviceCapabilities | None = None,
+        volume: int = 0,
     ) -> None:
         """
         Initialize Ynison client.
@@ -360,9 +376,15 @@ class YnisonClient:
         :param transport: ``websocket`` (gateway) or ``grpc`` (experimental
             native transport used by the official mobile apps).
         :param accept_language: Preferred content language sent over gRPC.
+        :param capabilities: Capabilities advertised during registration.
+        :param volume: Initial volume level (0..100).
         """
         self._token = token
         self._device_info = device_info
+        self._capabilities = capabilities or YnisonDeviceCapabilities()
+        self._volume = max(0, min(100, volume))
+        self._volume_version: dict[str, Any] | None = None
+        self._session_id: int | None = None
         self._on_state_update = on_state_update
         self._logger = logger
         self._external_session = http_session
@@ -425,6 +447,16 @@ class YnisonClient:
     def device_id(self) -> str:
         """Return our Ynison device_id (used when authoring outgoing state)."""
         return self._device_info.device_id
+
+    @property
+    def volume(self) -> int:
+        """Return the last volume level known for this device (0..100)."""
+        return self._volume
+
+    @property
+    def session_id(self) -> int | None:
+        """Return the Ynison session id assigned by the redirector."""
+        return self._session_id or self._last_session_id
 
     @property
     def queue_generation(self) -> int:
@@ -635,6 +667,99 @@ class YnisonClient:
         }
         await self._send(msg)
 
+    async def update_volume_info(
+        self,
+        volume: int,
+        *,
+        version: dict[str, Any] | None = None,
+        strict: bool = False,
+    ) -> bool:
+        """
+        Publish this device's volume with a new version.
+
+        The value is clamped to the 0..100 scale used by the plugin and sent as
+        the 0.0..1.0 ratio the protocol expects. The local registration state is
+        updated only after the request was accepted by the transport.
+
+        :param volume: New volume level (0..100).
+        :param version: Version block to author this change, or ``None`` for a
+            fresh block authored by this device.
+        :param strict: Raise :class:`YnisonSendError` when the send fails.
+        :return: ``True`` when the request was sent.
+        """
+        level = max(0, min(100, volume))
+        version_block = version or make_version_block(self.device_id)
+        msg = {
+            "update_volume_info": {
+                "device_id": self.device_id,
+                "volume_info": {
+                    "volume": level / 100,
+                    "version": version_block,
+                },
+            },
+            **self._message_meta(),
+        }
+        self._logger.info("→ update_volume_info: volume=%d", level)
+        sent = await self._send(msg, strict=strict)
+        if sent:
+            self._volume = level
+            self._volume_version = deepcopy(version_block)
+        return sent
+
+    async def update_volume(self, volume: int, device_id: str | None = None) -> None:
+        """
+        Publish the deprecated scalar volume update.
+
+        Kept for protocol completeness; new code should use
+        :meth:`update_volume_info`.
+
+        :param volume: New volume level (0..100).
+        :param device_id: Target device id, or this device when omitted.
+        """
+        level = max(0, min(100, volume))
+        msg = {
+            "update_volume": {
+                "volume": level / 100,
+                "device_id": device_id or self.device_id,
+            },
+            **self._message_meta(),
+        }
+        if await self._send(msg):
+            self._volume = level
+
+    async def update_player_queue_inject(
+        self,
+        playing_status: dict[str, Any],
+        playable: dict[str, Any],
+        *,
+        version: dict[str, Any] | None = None,
+        strict: bool = False,
+    ) -> bool:
+        """
+        Publish the state of an injected queue entity (Alice shot, ad, preroll).
+
+        :param playing_status: Complete playing-status object for the entity.
+        :param playable: Injected playable object.
+        :param version: Version block for the injection, or ``None`` for a new
+            block authored by this device.
+        :param strict: Raise :class:`YnisonSendError` when the send fails.
+        :return: ``True`` when the request was sent.
+        """
+        msg = {
+            "update_player_queue_inject": {
+                "player_queue_inject": {
+                    "playing_status": playing_status,
+                    "playable": playable,
+                    "version": version or make_version_block(self.device_id),
+                },
+            },
+            **self._message_meta(),
+        }
+        self._logger.info(
+            "→ update_player_queue_inject: type=%s", playable.get("playable_type", "")
+        )
+        return await self._send(msg, strict=strict)
+
     async def update_session_params(self, mute_events_if_passive: bool = True) -> None:
         """
         Configure session params on the Ynison server.
@@ -680,6 +805,7 @@ class YnisonClient:
         player_state: dict[str, Any],
         *,
         strict: bool = False,
+        interception: str = "DO_NOT_INTERCEPT_BY_DEFAULT",
     ) -> None:
         """
         Send player state update (queue changes, track skip).
@@ -692,8 +818,11 @@ class YnisonClient:
             transport failure instead of silently scheduling a reconnect.
             Delivery-critical callers (queue advance after track end)
             opt in; queue-list-replenish heartbeats leave the default.
+        :param interception: ``activity_interception_type`` for this update.
         """
-        await self._send(self._player_state_message(player_state), strict=strict)
+        await self._send(
+            self._player_state_message(player_state, interception=interception), strict=strict
+        )
 
     async def mutate_player_state(
         self,
@@ -935,22 +1064,108 @@ class YnisonClient:
 
         await self.mutate_player_state(mutate)
 
+    async def add_next_playables(self, playables: list[dict[str, Any]]) -> int | None:
+        """
+        Insert playables directly after the current item.
+
+        :param playables: Playable objects to insert.
+        :return: Published queue version, or ``None`` when nothing was sent.
+        :raises ResourceTemporarilyUnavailable: When the queue was replaced meanwhile.
+        :raises YnisonSendError: When the edit could not be sent.
+        """
+
+        def mutate(player_state: dict[str, Any]) -> None:
+            add_next(player_state, playables)
+
+        return await self.mutate_player_state(mutate)
+
+    async def add_last_playables(self, playables: list[dict[str, Any]]) -> int | None:
+        """
+        Append playables to the end of the queue.
+
+        :param playables: Playable objects to append.
+        :return: Published queue version, or ``None`` when nothing was sent.
+        :raises ResourceTemporarilyUnavailable: When the queue was replaced meanwhile.
+        :raises YnisonSendError: When the edit could not be sent.
+        """
+
+        def mutate(player_state: dict[str, Any]) -> None:
+            add_last(player_state, playables)
+
+        return await self.mutate_player_state(mutate)
+
+    async def remove_at(self, position: int) -> int | None:
+        """
+        Remove the playable at an original-list position.
+
+        :param position: Original-list index to remove.
+        :return: Published queue version, or ``None`` when nothing was sent.
+        :raises ResourceTemporarilyUnavailable: When the queue was replaced meanwhile.
+        :raises YnisonSendError: When the edit could not be sent.
+        """
+
+        def mutate(player_state: dict[str, Any]) -> None:
+            remove_at(player_state, position)
+
+        return await self.mutate_player_state(mutate)
+
+    async def move(self, source: int, destination: int) -> int | None:
+        """
+        Move one playable to another original-list position.
+
+        :param source: Original-list index to move.
+        :param destination: Target index in the resulting playable list.
+        :return: Published queue version, or ``None`` when nothing was sent.
+        :raises ResourceTemporarilyUnavailable: When the queue was replaced meanwhile.
+        :raises YnisonSendError: When the edit could not be sent.
+        """
+
+        def mutate(player_state: dict[str, Any]) -> None:
+            move(player_state, source, destination)
+
+        return await self.mutate_player_state(mutate)
+
     async def send_full_state(
         self,
         player_state: dict[str, Any] | None = None,
-    ) -> None:
-        """Send full state update (cold start, reconnect after offline)."""
+        *,
+        is_currently_active: bool = False,
+        intercept_if_no_one_active: bool = False,
+        sync_eov_queue_id: str | None = None,
+        strict: bool = False,
+    ) -> bool:
+        """
+        Send the full device and player state (cold start, reconnect, resync).
+
+        :param player_state: Complete player state, or the empty initial state.
+        :param is_currently_active: Whether this device currently plays audio.
+        :param intercept_if_no_one_active: Ask Ynison to make this device active
+            when no other device is active.
+        :param sync_eov_queue_id: Queue id for an embedded EOV sync request, or
+            ``None`` to omit it.
+        :param strict: Raise :class:`YnisonSendError` when the send fails.
+        :return: ``True`` when the request was sent.
+        """
         state = player_state or self._build_initial_state()
+        full_state: dict[str, Any] = {
+            "player_state": state,
+            "device": self._build_device_dict(),
+            "is_currently_active": is_currently_active,
+        }
+        if sync_eov_queue_id is not None:
+            full_state["sync_state_from_eov_optional"] = {
+                "actual_queue_id": sync_eov_queue_id,
+            }
         msg = {
-            "update_full_state": {
-                "player_state": state,
-                "device": self._build_device_dict(),
-                "is_currently_active": False,
-            },
-            **self._message_meta(),
+            "update_full_state": full_state,
+            **self._message_meta(
+                "INTERCEPT_IF_NO_ONE_ACTIVE"
+                if intercept_if_no_one_active
+                else "DO_NOT_INTERCEPT_BY_DEFAULT"
+            ),
         }
         self._logger.debug("Sending full state: %s", json.dumps(msg)[:500])
-        await self._send(msg)
+        return await self._send(msg, strict=strict)
 
     @staticmethod
     def _message_meta(interception: str = "DO_NOT_INTERCEPT_BY_DEFAULT") -> dict[str, Any]:
@@ -1093,13 +1308,17 @@ class YnisonClient:
         }
 
     def _build_device_dict(self) -> dict[str, Any]:
-        """Build device info dict for Ynison messages."""
+        """Build device info, capabilities and volume for Ynison messages."""
         info = asdict(self._device_info)
+        volume_version = self._volume_version or make_version_block(self.device_id)
         return {
             "info": info,
-            "capabilities": {
-                "can_be_player": True,
-                "can_be_remote_controller": False,
+            "capabilities": asdict(self._capabilities),
+            # Deprecated scalar field, kept populated for older servers.
+            "volume": self._volume / 100,
+            "volume_info": {
+                "volume": self._volume / 100,
+                "version": volume_version,
             },
         }
 
@@ -1399,6 +1618,27 @@ class YnisonClient:
         )
         return True
 
+    def _adopt_own_device(self, devices: list[dict[str, Any]]) -> None:
+        """Record the server's view of this device's volume and session."""
+        for device in devices:
+            info = device.get("info")
+            if not isinstance(info, dict) or info.get("device_id") != self.device_id:
+                continue
+            session = device.get("session")
+            if isinstance(session, dict):
+                session_id = session.get("id")
+                if isinstance(session_id, (str, int)) and not isinstance(session_id, bool):
+                    with suppress(ValueError):
+                        self._session_id = int(session_id)
+            volume_info = device.get("volume_info")
+            if not isinstance(volume_info, dict):
+                continue
+            volume = volume_info.get("volume")
+            if isinstance(volume, (int, float)) and not isinstance(volume, bool):
+                self._volume = max(0, min(100, round(float(volume) * 100)))
+                version = volume_info.get("version")
+                self._volume_version = version if isinstance(version, dict) else None
+
     def _parse_state(self, data: dict[str, Any]) -> None:
         """Parse PutYnisonStateResponse into YnisonState."""
         old_track = self.state.current_track_id
@@ -1437,6 +1677,7 @@ class YnisonClient:
         if self.state.active_device_id != old_active_device:
             self._reset_pending_queue()
         self.state.devices = data.get("devices", self.state.devices)
+        self._adopt_own_device(self.state.devices)
 
         new_track = self.state.current_track_id
         queue = self.state.player_state.get("player_queue", {})
@@ -1632,7 +1873,12 @@ class YnisonClient:
             existing_ps["status"] = deepcopy(self._navigation_status)
         self.state.last_update_is_echo = is_echo
 
-    def _player_state_message(self, player_state: dict[str, Any]) -> dict[str, Any]:
+    def _player_state_message(
+        self,
+        player_state: dict[str, Any],
+        *,
+        interception: str = "DO_NOT_INTERCEPT_BY_DEFAULT",
+    ) -> dict[str, Any]:
         """Build a complete queue update envelope."""
         queue = player_state.get("player_queue", {})
         self._logger.info(
@@ -1645,7 +1891,7 @@ class YnisonClient:
             "update_player_state": {
                 "player_state": player_state,
             },
-            **self._message_meta(),
+            **self._message_meta(interception),
         }
         self._logger.debug("Sending player state: %s", json.dumps(msg)[:500])
         return msg

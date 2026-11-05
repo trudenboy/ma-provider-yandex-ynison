@@ -14,4 +14,9 @@ class UpdateVersion(_message.Message):
     device_id: str
     version: int
     timestamp_ms: int
-    def __init__(self, device_id: _Optional[str] = ..., version: _Optional[int] = ..., timestamp_ms: _Optional[int] = ...) -> None: ...
+    def __init__(
+        self,
+        device_id: _Optional[str] = ...,
+        version: _Optional[int] = ...,
+        timestamp_ms: _Optional[int] = ...,
+    ) -> None: ...

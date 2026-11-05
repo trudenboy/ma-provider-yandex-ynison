@@ -21,6 +21,7 @@ class PlayerQueueInject(_message.Message):
             ALICE_SHOT: _ClassVar[PlayerQueueInject.Playable.PlayableType]
             AD: _ClassVar[PlayerQueueInject.Playable.PlayableType]
             PREROLL: _ClassVar[PlayerQueueInject.Playable.PlayableType]
+
         UNSPECIFIED: PlayerQueueInject.Playable.PlayableType
         ALICE_SHOT: PlayerQueueInject.Playable.PlayableType
         AD: PlayerQueueInject.Playable.PlayableType
@@ -33,11 +34,23 @@ class PlayerQueueInject(_message.Message):
         playable_type: PlayerQueueInject.Playable.PlayableType
         title: str
         cover_url: _wrappers_pb2.StringValue
-        def __init__(self, playable_id: _Optional[str] = ..., playable_type: _Optional[_Union[PlayerQueueInject.Playable.PlayableType, str]] = ..., title: _Optional[str] = ..., cover_url: _Optional[_Union[_wrappers_pb2.StringValue, _Mapping]] = ...) -> None: ...
+        def __init__(
+            self,
+            playable_id: _Optional[str] = ...,
+            playable_type: _Optional[_Union[PlayerQueueInject.Playable.PlayableType, str]] = ...,
+            title: _Optional[str] = ...,
+            cover_url: _Optional[_Union[_wrappers_pb2.StringValue, _Mapping]] = ...,
+        ) -> None: ...
+
     PLAYING_STATUS_FIELD_NUMBER: _ClassVar[int]
     PLAYABLE_FIELD_NUMBER: _ClassVar[int]
     VERSION_FIELD_NUMBER: _ClassVar[int]
     playing_status: _playing_status_pb2.PlayingStatus
     playable: PlayerQueueInject.Playable
     version: _update_version_pb2.UpdateVersion
-    def __init__(self, playing_status: _Optional[_Union[_playing_status_pb2.PlayingStatus, _Mapping]] = ..., playable: _Optional[_Union[PlayerQueueInject.Playable, _Mapping]] = ..., version: _Optional[_Union[_update_version_pb2.UpdateVersion, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self,
+        playing_status: _Optional[_Union[_playing_status_pb2.PlayingStatus, _Mapping]] = ...,
+        playable: _Optional[_Union[PlayerQueueInject.Playable, _Mapping]] = ...,
+        version: _Optional[_Union[_update_version_pb2.UpdateVersion, _Mapping]] = ...,
+    ) -> None: ...

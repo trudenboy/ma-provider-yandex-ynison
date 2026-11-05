@@ -144,10 +144,17 @@ provider adopts a newer Music Assistant API.
 
 ## Protocol notes
 
-Ynison uses JSON messages over WebSocket in a gRPC-like service layout. The
-client first requests a redirect ticket and then opens the state-service
-connection. Ynison is not a public stable API, so server-side protocol changes
-can require provider updates.
+Ynison exposes gRPC services. The default client uses the JSON-over-WebSocket
+gateway in the same gRPC-like service layout; an experimental advanced setting
+switches to the native gRPC transport used by the official mobile application.
+Both first request a redirect ticket and then open the state service. Ynison is
+not a public stable API, so server-side protocol changes can require provider
+updates.
+
+The native transport follows the official request shape, including device
+capabilities, volume, active-device and queue updates. Yandex can still reject
+Ynison connections for an account with a temporary `500140000` response and a
+`go-away` window; the provider honours that window and does not retry inside it.
 
 ## License
 
