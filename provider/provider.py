@@ -455,9 +455,17 @@ class YandexYnisonProvider(PluginProvider):
 
     async def get_audio_stream(  # noqa: PLR0915
         self, streamdetails: StreamDetails, seek_position: int = 0
+<<<<<<< provider
     ) -> AsyncGenerator[bytes]:
         """
         Return continuous audio stream following Ynison track changes.
+||||||| upstream-base
+    ) -> AsyncGenerator[bytes, None]:
+        """Return continuous audio stream following Ynison track changes.
+=======
+    ) -> AsyncGenerator[bytes]:
+        """Return continuous audio stream following Ynison track changes.
+>>>>>>> upstream-head
 
         Streams the current track, then waits for track changes and streams
         the next track automatically. Runs until the source is deselected.
@@ -729,9 +737,17 @@ class YandexYnisonProvider(PluginProvider):
         track_id: str,
         seek_ms: int = 0,
         session_params: dict[str, Any] | None = None,
+<<<<<<< provider
     ) -> AsyncGenerator[bytes]:
         """
         Stream a single track, normalizing to fixed PCM via per-track ffmpeg.
+||||||| upstream-base
+    ) -> AsyncGenerator[bytes, None]:
+        """Stream a single track, normalizing to fixed PCM via per-track ffmpeg.
+=======
+    ) -> AsyncGenerator[bytes]:
+        """Stream a single track, normalizing to fixed PCM via per-track ffmpeg.
+>>>>>>> upstream-head
 
         Every track is decoded through its own ffmpeg process to produce a
         fixed PCM output (s16le or s24le based on YM quality setting). This
